@@ -338,3 +338,36 @@ honours), `KRD_Q=0` (errors), `KRD_DUMP` (bytes). Full descriptions in [TESTING.
 `ssh host tail -f ~/krd.log`. The 1 Hz `stats:` line tells you whether frames arrive at all
 (`tiles/s 0` with `dirty 0` = nothing changed or nothing captured; see
 [ARCHITECTURE](ARCHITECTURE.md#9-diagnostics-wiring) for every field).
+
+## 6. Headless (`krd ax`)
+
+### 37. `krd ax` says "no Accessibility permission"
+
+**Cause.** The grant is recorded against the code signature, per binary, and an ad-hoc rebuild
+changes the cdhash — a binary that was granted yesterday is a stranger today. It is also possible
+that the pane lists a *different* copy of krd (the one in `~/.build/`, not `~/bin/`).
+**Fix.** `krd ax doctor` prints the exact path it is asking about. Grant that one: System Settings →
+Privacy & Security → Accessibility → `+` → the path (`Cmd-Shift-G`). If it is already listed,
+remove it with `−` and add it again, or start over with
+`tccutil reset Accessibility com.kkrt.macdesk`. `krd ax --prompt` opens the dialog for you.
+Note that `krd ax` needs Accessibility only; Screen Recording belongs to the mirror.
+
+### 38. `krd ax` is granted but still answers `cannotComplete`
+
+**Cause.** The process has no window-server connection yet, or there is nothing to talk to. In an
+ssh (Background) session the *first* accessibility call always fails this way and succeeds after
+the window server has been touched; krd warms up before probing, so a failure that reaches you is
+real: the Mac is asleep, at the login window, or every candidate app is hung.
+**Fix.** Wake/unlock the Mac and re-run. `krd ax doctor` separates the two cases: it prints whether
+the first call failed and whether the retry succeeded, plus the frontmost app it managed to read.
+If the retry succeeds, the earlier failure was just startup and can be ignored.
+
+### 39. `krd ax tree` shows the window frame but not the page inside it
+
+**Cause.** Chromium and Electron do not build a renderer accessibility tree until an assistive
+client asks for one, and on macOS 27 the two attributes that used to ask
+(`AXManualAccessibility`, `AXEnhancedUserInterface`) are not settable — measured on Chrome. The
+result is a correct-looking tree of window buttons with no `AXWebArea` underneath.
+**Fix.** Do not trust a small tree as "the app is simple". For browsers use CDP
+(`--remote-debugging-port`) or launch with `--force-renderer-accessibility`; for Electron apps the
+same flag applies. Details and measurements: [research-ax-text-channel.md](research-ax-text-channel.md) §5.3.

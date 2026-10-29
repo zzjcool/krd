@@ -285,3 +285,32 @@ selftest 能画出来，说明渲染器没问题，问题在采集或权限；�
 `ssh -t host ~/bin/krd --fps 20 --debug --log ~/krd.log`，然后在另一个会话里
 `ssh host tail -f ~/krd.log`。1 Hz 的 `stats:` 行能告诉你帧到底来没来（`tiles/s 0` 且 `dirty 0` = 没变化
 或者没采到；每个字段的含义见 [ARCHITECTURE](ARCHITECTURE.zh-CN.md#9-诊断开关的接线)）。
+
+## 6. Headless（`krd ax`）
+
+### 37. `krd ax` 报「没有辅助功能权限」
+
+**根因。** 授权记在**代码签名**上，而且按二进制算——ad-hoc 重新构建会换 cdhash，昨天授权过的
+今天就是陌生人了。另一种常见情况是授权面板里列的是**另一份** krd（比如 `~/.build/` 里的，
+而不是 `~/bin/` 的）。
+**对策。** `krd ax doctor` 会打印它正在询问的那个路径，授权那一个：系统设置 → 隐私与安全性 →
+辅助功能 → `+` → 选中路径（`Cmd-Shift-G` 可以直接输路径）。如果面板里已经有了，先 `−` 删掉再加，
+或者用 `tccutil reset Accessibility com.kkrt.macdesk` 从头来。`krd ax --prompt` 会替你拉起授权弹窗。
+注意 `krd ax` 只要辅助功能权限；屏幕录制是镜像模式的。
+
+### 38. 已经授权了，`krd ax` 仍然回 `cannotComplete`
+
+**根因。** 进程还没建立窗口服务器连接，或者根本没有可对话的对象。ssh（Background）会话里
+**第一次**无障碍调用必然是这种失败，碰一下窗口服务器之后就好；krd 会自己预热，所以能冒到你面前的
+失败是真的：Mac 睡了、停在登录窗口、或者所有候选应用都卡住了。
+**对策。** 唤醒/解锁 Mac 再跑。`krd ax doctor` 会把两种情况分开：它打印第一次调用是否失败、
+重试是否成功，以及它成功读到的最前台应用。重试成功说明前面那次只是启动噪声。
+
+### 39. `krd ax tree` 只有窗口外框，看不到里面的页面
+
+**根因。** Chromium / Electron 默认不构建渲染进程的无障碍树，要等辅助客户端来请求；而在
+macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、`AXEnhancedUserInterface`）
+在 Chrome 上**设不进去**（实测）。结果就是一棵看起来很正常、只有窗口按钮、没有 `AXWebArea` 的树。
+**对策。** 别把「树很小」当成「应用很简单」。浏览器走 CDP（`--remote-debugging-port`）或用
+`--force-renderer-accessibility` 启动；Electron 应用同理。详见
+[research-ax-text-channel.md](research-ax-text-channel.md) §5.3。

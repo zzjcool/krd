@@ -80,6 +80,13 @@ func usage() -> String {
       --replay <dir>      feed recorded frames through the real pipeline
       --stats-json <path> per-second stats as NDJSON (implies the --debug stats)
 
+    headless (text, no frames, no Screen Recording needed):
+      ax windows          list on-screen windows as text
+      ax tree --app <q>   accessibility tree of one window (--pid, --window, -d, -i, --all)
+      ax screen           one line per window, plus the focused element
+      ax doctor           check Accessibility and the window server, change nothing
+                          (`krd ax --help` for the full surface and the exit codes)
+
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
     """
 }
@@ -783,6 +790,13 @@ enum DeskError: Error, CustomStringConvertible {
         case .message(let text): return text
         }
     }
+}
+
+// The headless face: `krd ax …` reads the accessibility tree and exits. It is dispatched
+// before anything else so it never starts the AppKit context, the capture stream or the
+// terminal modes -- it must stay usable from a plain, non-interactive ssh command.
+if AXCommand.isInvocation(Array(CommandLine.arguments.dropFirst())) {
+    AXCommand.run(Array(CommandLine.arguments.dropFirst(2)))
 }
 
 // ScreenCaptureKit only behaves on this macOS build when an AppKit application

@@ -2,7 +2,7 @@
 
 English | [简体中文](ARCHITECTURE.zh-CN.md)
 
-krd is a single Swift executable, ~2.9 kLOC in ten files, no dependencies outside the system
+krd is a single Swift executable, ~3.9 kLOC in thirteen files, no dependencies outside the system
 frameworks (`ScreenCaptureKit`, `CoreGraphics`, `AppKit`, `Accelerate`, `libz`). This document
 describes how the pieces fit and which invariants must not be broken.
 
@@ -31,9 +31,13 @@ Sources/krd/
   Bench.swift     synthetic corpus, staged timings, JSON, --bench-wire, --stats-json
   Replay.swift    --record / --replay of real frames (raw + manifest.jsonl)
   Log.swift       File logger (never the tty)
+  AXCommand.swift `krd ax …`: preflight, app resolution, budgeted tree walk, text + JSON
+  AXFormat.swift  the pure half: sanitizing, pruning, one-line rendering (covered by tests)
 ```
 
 Dependency direction is a straight line: `main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`.
+`krd ax` is a second root: `main` dispatches it before AppKit exists and it depends on `AXFormat`
+only, so nothing in the capture or render path can be reached from it (and vice versa).
 `Render` and `Input` know the terminal protocol; nothing else does. `Capture` knows ScreenCaptureKit;
 nothing else does.
 

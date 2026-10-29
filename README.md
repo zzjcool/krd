@@ -60,6 +60,25 @@ Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a r
 Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/TESTING.md](docs/TESTING.md).
 
+### Headless: read the Mac as text
+
+Same binary, no frames. `krd ax` walks the accessibility tree and prints it, so an agent can read
+and act on windows without a picture — and without Screen Recording, which only the mirror needs.
+
+```bash
+krd ax doctor                # is Accessibility granted, does the window server answer
+krd ax windows               # app, pid, window index, title, frame
+krd ax tree --app Finder -d 3 -i    # one window, shallow, actionable nodes only
+krd ax tree --app Finder --json     # same, for a program
+krd ax screen                # every on-screen window, plus the focused element
+```
+
+Output is one line per node — `@e3  button  "Save"  value="hi"  [120,80 64x24]  press` — with refs
+stable for the life of that dump. Exit codes: `0` ok, `2` usage, `3` no Accessibility permission,
+`4` window server unreachable, `5` nothing matched. Text is sanitized: a window title can contain
+ESC sequences and those are replaced, not printed. See
+[docs/research-ax-text-channel.md](docs/research-ax-text-channel.md) for the measurements.
+
 ## Requirements
 
 - macOS 14 or newer.
@@ -85,7 +104,7 @@ Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/AR
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 36 symptoms with root causes |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 39 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
 ## Contributing
