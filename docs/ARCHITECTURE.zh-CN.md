@@ -209,6 +209,8 @@ stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> wr
 
 写下来是为了让后来的人不去追鬼：
 
+- 两个抓帧缓冲只有在「帧真的被发出去」时才能省掉复制。被整帧去重丢掉的帧会让 `previous`
+  指回即将被重写的那个缓冲，所以下一次真正发出的帧要多付一次 13.5 MB 复制，之后轮转才重新对齐。
 - `TileGrid.bpp` 在算布局时从 writer 取；如果哪天支持中途换 `--format`，网格和它对应的
   `previousFrame` 都会失效。
 - `LevelPolicy` 每块瓦片从 level 5 起步，需要一帧才能学到；改窗口大小之后所有瓦片重新学，

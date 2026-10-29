@@ -226,6 +226,9 @@ status attachment.
 
 Documented so the next reader does not chase ghosts:
 
+- The two capture buffers remove the per-frame copy only while frames are being *emitted*. A frame
+  dropped by the whole-frame dedupe leaves `previous` pointing at the buffer that is about to be
+  rewritten, so the next emitted frame pays one 13.5 MB copy before the rotation is in phase again.
 - `TileGrid.bpp` is taken from the writer at layout time; a `--format` change mid-session (there is
   none today) would invalidate the grid and the `previousFrame` it was measured against.
 - `LevelPolicy` starts every tile at level 5 and needs one frame per tile to learn; after a resize
