@@ -13,6 +13,11 @@ keep it that way are welcome.
   protocol. krd is started by a human in an SSH session and exits with it; keep it that way.
 - **No new dependencies.** `Package.swift` has exactly one target plus the system `CZlib` shim.
   Adding SwiftPM packages for something the system frameworks already do will be declined.
+  Speed is not a reason on its own: the encoder is under 2 % of the 50 ms frame budget
+  ([docs/BENCHMARK.md](docs/BENCHMARK.md)), so a faster compressor buys nothing a viewer can see
+  (measured in #8, declined there). The one accepted mechanism, if that ever changes, is a
+  `systemLibrary` target with a one-line `module.modulemap` and a **static** link, so
+  `deploy.sh` still ships a single file — no vendored source trees, no SwiftPM packages.
 - **Read first:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (especially §7, the rendering
   invariants), [docs/PROTOCOL.md](docs/PROTOCOL.md) (why no deletes, why `C=1`), and
   [docs/TESTING.md](docs/TESTING.md).
