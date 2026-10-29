@@ -209,6 +209,7 @@ which is why §7.6 exists.
 | `KRD_FORMAT` | `rgb` (default, `f=24`) or `rgba` (`f=32`) |
 | `KRD_SYNC` | `tile` restores one synchronized block per tile; `KRD_NOSYNC=1` disables them |
 | `KRD_REAP` | repaint everything after n frames (0 = off, the default) |
+| `KRD_BENCH_BUDGET_SCALE` | `bench/bench.py` only (not read by krd): multiplies `ms.*` / `write_ms.*` budgets by the machine's speed factor, never bytes ([BENCHMARK](BENCHMARK.md) §6) |
 
 The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
 

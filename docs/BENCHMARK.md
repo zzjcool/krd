@@ -194,11 +194,51 @@ frames of the reference layout is ~800 MB, which is why the default limit is 60 
 | `line@unlimited` write p99 | ≤ 10 ms | |
 | `line@unlimited` late frames | ≤ 3 | |
 
-CI runs `python3 bench/bench.py --quick --rounds 8` as a step in `.github/workflows/ci.yml`: encoder
-plus two wire runs (~8 s) and the budget verdict. It does **not** compare against a committed timing
-baseline — a macOS runner is not the same machine class as the laptop these come from, and a gate
-that fails on runner noise is deleted within a week. Bytes, tile counts and the zero-byte invariant
-are deterministic, so those are gated.
+CI runs `python3 bench/bench.py --quick --rounds 8` as a step in `.github/workflows/ci.yml`: the
+encoder plus two wire runs (~8 s) and all 15 checks in `bench/budget.json`. It does **not** compare
+against a committed timing baseline — a macOS runner is not the same machine class as the laptop
+these come from, and a gate that fails on runner noise is deleted within a week. Bytes, tile counts
+and the zero-byte invariant are deterministic, so those are gated at their absolute values.
+
+### The 7.6x: why CI scales the timing budgets
+
+Timings are the only machine-dependent half, so CI states its own factor instead of the budgets
+being loosened for everyone:
+
+```
+KRD_BENCH_BUDGET_SCALE=7.6   # .github/workflows/ci.yml, benchmark step
+```
+
+`bench.py` multiplies **only** `ms.*` and `write_ms.*` limits by it (default `1.0`, i.e. no change);
+every `bytes.*` limit, the tile counts, `late` and the zero-byte invariant are compared as written.
+The report and the console line print the effective limits, so a green CI run still says what it
+was checked against.
+
+Where 7.6 comes from — same commit, `--quick --rounds 8`, `photo ms.total`:
+
+| machine | p50 | p99 |
+|---|---:|---:|
+| M1 Pro laptop (where the budgets were set) | 25.30 ms | 30.06 ms |
+| `macos-14` CI runner | 193.52 ms | 227.24 ms |
+| **ratio** | **7.65x** | **7.56x** |
+
+Budget 120 ms / laptop 30.06 ms = 4.0x headroom. On the runner the same headroom is 4.0 x 7.6 =
+30x, i.e. 912 ms, which a 7.6x-scaled budget states explicitly: `120 x 7.6 = 912`. Before this, the
+runner's 227 ms was compared against 120 ms and the step was red on every pull request — the check
+existed but told nobody anything.
+
+**What the gate actually catches.** Headroom is ~3x (`char`), ~4.7x (`line`) and ~4.0x (`photo`), and
+scaling preserves those ratios, so the CI gate trips at the same regression factor as the laptop's.
+It does *not* catch a 2x regression, on either machine: `photo` would need 60 ms of budget for that,
+and with one absolute number shared by a 7.6x-slower machine, 2x sensitivity is impossible — a
+2x regression there is only 454 ms against a 912 ms limit. If 2x sensitivity is wanted, it has to be
+a per-machine budget (or a per-run baseline), not a tighter constant.
+
+**Re-measuring the factor** (do this when the runner image changes): run the benchmark on the runner
+(`workflow_dispatch`, or read the step log of any PR), take `photo ms.total.p99` from
+`bench/report.md`, and divide by the laptop's number **on the same commit** with the same flags.
+Update `ci.yml` and the table above together. The number moves with `--rounds`, with the pane
+geometry and with runner generation, so it is a measurement, not a constant to guess.
 
 ### A/B two revisions (`make bench-ab`)
 

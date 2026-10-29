@@ -41,5 +41,12 @@ jobs:
       - name: Build universal binary (arm64 + x86_64)
         run: swift build -c release --arch arm64 --arch x86_64
 
+      # Timing budgets are absolute numbers measured on a laptop (bench/budget.json), and this
+      # runner is 7.6x slower on the same commit: same code, photo p99 30.06 ms here vs 227.24 ms
+      # there, p50 25.30 vs 193.52. Scaling the timing budgets by that ratio keeps the gate's
+      # headroom identical on both machines instead of red every time. Bytes are content and are
+      # never scaled -- see docs/BENCHMARK.md section 6 for the measurement and its re-run recipe.
       - name: Benchmark budgets
+        env:
+          KRD_BENCH_BUDGET_SCALE: "7.6"
         run: python3 bench/bench.py --quick --rounds 8

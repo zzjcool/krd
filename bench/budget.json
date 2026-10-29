@@ -1,11 +1,13 @@
 {
   "schema": 1,
   "note": [
-    "Absolute budgets, deliberately loose: they exist to catch a 2x regression, not a 5% one.",
-    "Bytes are content, so they are machine-independent and can be tight. Timings are not: on a",
-    "macOS runner everything is 1.5-2x slower than on the laptop these were set from, so the",
-    "timing budgets carry that headroom and a real regression still trips them.",
-    "docs/BENCHMARK.md section 6 explains why there is no committed timing baseline."
+    "Absolute budgets, deliberately loose: they exist to catch a large regression, not a 5% one.",
+    "Bytes are content, so they are machine-independent and can be tight. Timings are not, so their",
+    "headroom is ~3x (char) to ~5x (line) over the laptop they were set from: they trip at a ~4x",
+    "regression there. A machine N times slower multiplies its timing budgets by N",
+    "(KRD_BENCH_BUDGET_SCALE, 7.6 in CI) instead of these numbers being widened for everyone.",
+    "docs/BENCHMARK.md section 6 has the measurement, how to re-run it, and why a single absolute",
+    "number cannot also be a 2x gate on a 7.6x-slower runner."
   ],
   "encode": [
     {"case": "char",     "field": "bytes.payload", "max": 900},

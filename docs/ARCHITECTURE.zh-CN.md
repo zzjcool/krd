@@ -186,6 +186,7 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `KRD_FORMAT` | `rgb`（默认，`f=24`）或 `rgba`（`f=32`） |
 | `KRD_SYNC` | `tile` 恢复每瓦片一个同步块；`KRD_NOSYNC=1` 完全关掉 |
 | `KRD_REAP` | 每 n 帧整屏重绘（0 = 关闭，默认） |
+| `KRD_BENCH_BUDGET_SCALE` | 只给 `bench/bench.py` 用（krd 本身不读）：按机器速度倍数放大 `ms.*` / `write_ms.*` 预算，bytes 永不放宽（见 [BENCHMARK](BENCHMARK.md) §6） |
 
 1 Hz 的统计行就是 `Desk.startStats()` 里一次 `String(format:)`：
 
