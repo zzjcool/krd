@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           # Tag push -> that tag; manual dispatch -> the tag being republished.
@@ -111,13 +111,24 @@ jobs:
           echo "checksum=dist/${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: krd ${{ steps.meta.outputs.tag }}
-          files: |
-            ${{ steps.package.outputs.tarball }}
-            ${{ steps.package.outputs.checksum }}
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(steps.meta.outputs.version, '-') }}
+        # No third-party action: `gh` is preinstalled on the runner and needs no Node runtime.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          notes=()
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$TARBALL" "$CHECKSUM" --clobber
+            gh release edit "$TAG" --draft=false --name "krd $TAG" --latest
+            echo "updated existing release $TAG"
+          else
+            case "$VERSION" in
+              *-*) notes+=(--prerelease) ;;
+            esac
+            gh release create "$TAG" "$TARBALL" "$CHECKSUM" \
+              --title "krd $TAG" --generate-notes --verify-tag "${notes[@]}"
+          fi
