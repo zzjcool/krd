@@ -354,7 +354,9 @@ def main():
     with open(os.path.join(BENCH, "report.md"), "w") as handle:
         handle.write(report)
 
-    history = os.path.join(BENCH, "history", "%s-%s.json" % (version(), encode["git"].replace("/", "-")))
+    # One file per version, overwritten: the git rev is recorded inside the JSON. A file per
+    # commit accumulated one artifact per `make bench` run and buried the release baseline.
+    history = os.path.join(BENCH, "history", "%s.json" % version())
     os.makedirs(os.path.dirname(history), exist_ok=True)
     with open(history, "w") as handle:
         json.dump({"encode": encode, "wire": wire,
