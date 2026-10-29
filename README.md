@@ -108,7 +108,7 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 
 | | |
 |---|---|
-| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, SSH |
+| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, display-set changes (plug/unplug, resolution, lid) restart capture in place, SSH |
 | Rough | colour-heavy full-screen motion (no codec yet), Herdr's image-delete semantics |
 | Solid (clipboard) | clipboard bridge, opt-in with `--clipboard=in|out|both`: a copy inside the mirrored
 desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the terminal
@@ -117,7 +117,7 @@ that answers the OSC 52 read — `--clipboard-paste <file>` is the path that alw
 | Solid (IME/CJK) | `--ime` (`auto` / `raw` / `unicode`): physical keys go to the target so *its* input method composes
 (candidate window renders in the mirrored picture); characters with no key fall back to injected
 text, with a log line — see TROUBLESHOOTING §19 |
-| Not yet | multi-display hot switch |
+| Not yet | spanning several displays in one picture (a session follows one display at a time) |
 
 ## Docs
 
