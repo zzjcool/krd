@@ -85,6 +85,45 @@ way.
 7. **Small, focused commits** with a real message ("why", not "what"). Do not commit generated
    files, `.build/`, or dumps.
 
+## If a Rust core ever lands
+
+Do not start here: the decision record is [docs/decision-rust.md](docs/decision-rust.md), and it says
+what has to be true first. If one of its triggers fires, this is the shape the port takes — decided
+now so the first PR does not invent its own boundary.
+
+- **Where it lives.** `Sources/krdcore-rs/` (a Cargo crate) is built as a static library and exposed
+  to Swift by `Sources/krdcoreffi/` (a `systemLibrary` module map). `Sources/krdcore` stays as the
+  Swift implementation, and `Package.swift` is the only place that chooses between them. `krd` imports
+  `krdcore` either way; **no call site outside `Sources/krdcore` may change.**
+- **What the boundary is.** The C surface is deliberately tiny, and it is the same five entry points
+  the Swift module's API already implies:
+
+  ```c
+  krd_encoder *krd_encoder_new(int32_t tile_cols, int32_t tile_rows, int32_t bpp);
+  void         krd_encoder_free(krd_encoder *);
+  // One frame: pixels are borrowed for the duration of the call (no copy), and the escapes are
+  // written to `out_fd` by Rust itself so the bytes never cross back into Swift.
+  int32_t      krd_encode_frame(krd_encoder *, const uint8_t *pixels, int32_t w, int32_t h,
+                                int32_t stride, int out_fd, krd_frame_stats *stats_out);
+  krd_parser  *krd_parser_new(void);
+  void         krd_parser_free(krd_parser *);
+  // One read(2): POD events through the callback, one call per event (~100 ns), called on the
+  // thread that read the bytes.
+  size_t       krd_parse(krd_parser *, const uint8_t *bytes, size_t len,
+                         krd_event_cb cb, void *ctx);
+  ```
+
+  The OS half — ScreenCaptureKit, `NSApplication`, `CGEvent`/`postToPid`, termios, `NSPasteboard`,
+  AX — stays Swift. It is the part that is fragile and the part a language change does not improve.
+- **What must not regress.** Both committed fixtures must reproduce byte for byte from the Rust build:
+  `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump` (sha256 `f18475a2…`) and
+  `Tests/krdcoreTests/Fixtures/input-trace.dump`. The `--debug` parity procedure in
+  [docs/TESTING.md](docs/TESTING.md) runs against both implementations, and `bench/budget.json` stays
+  the regression gate.
+- **What it does not buy.** A pure-Rust binary still has to answer `ARCHITECTURE.md` §4 (one frame
+  without an AppKit context kills the stream) and TCC's code-signature binding. That is a separate
+  decision, and the decision record says not to take it.
+
 ## Pull requests
 
 - One concern per PR. Describe the failure you observed, the cause you found, and how you verified

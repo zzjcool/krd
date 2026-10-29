@@ -60,6 +60,8 @@ Sources/krd/              <- 所有碰操作系统的部分
 - **`ScreenWriter` 有一个 `sink`。** 生产环境是 nil，字节直接进 pty；黄金测试把它设成收集字节流。
   `discardOutput`（bench 用）行为不变：仍然在写入 dump 之前就丢弃。
 
+为什么这部分**不用** Rust 写、什么会改变这个决定：[decision-rust](decision-rust.zh-CN.md)。
+
 这次抽取没有改变任何字节：重构前后两个二进制在 `--selftest --pane 80x24 --cell 17x33` +
 `KRD_DUMP` 下产出的 dump 完全一致（118 087 字节，
 sha256 `f18475a2596aeeab522fb3037bed0ab4c90d99d325dff4346599abaf9123aa11`），`otool -L` 也没变。
