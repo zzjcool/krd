@@ -234,6 +234,30 @@ Alt-`G`，后面全变成文字。
 **根因。** 锁屏会话不给 ScreenCaptureKit 任何屏幕内容，流还在跑，但帧是黑的/空的。
 **对策。** 解锁。不要指望无人值守时还能看到锁屏后的画面；锁屏会话的屏幕共享不是支持的模式。
 
+### 29b. `--window` 出来一整块黑：那个"窗口"其实是桌面
+
+**根因。** 桌面、壁纸、每块屏的 backstop 在 ScreenCaptureKit 眼里都是窗口，但它们不是*内容*：给它们建
+`SCContentFilter` 拿到的是裸的背板层，也就是全黑帧，而且退出码还是 0、什么都不说。实测一帧 480×306：
+
+| 目标 | 不同颜色数 | 3 秒字节 |
+|---|---|---|
+| `--window <Finder，空标题>` | **24**（146 846 / 146 880 像素是 `(0,0,0)`） | 1 KB |
+| `--window <Terminal>` | 1664 | 829 KB |
+| `--display 1` | 正常 | 正常 |
+
+**对策。** `--list` 会给这类条目标上 `(backdrop — use --display <n>)`，`--window` 现在直接拒绝它们，
+不再画黑屏：
+
+```
+krd: window 19 (Finder, title "", layer -2147483603) is the desktop backdrop, not a window —
+         ScreenCaptureKit hands back the bare layer, which composites to black.
+         Mirror the whole screen instead: krd --display 0
+```
+
+判定故意保守：窗口层要**在桌面图标层或更低**，**且**覆盖某块屏的 90% 以上。真实 app 是 0 层，菜单栏 24，
+投屏遮罩在最顶上——都不符合；低层但只占屏幕一条的窗口也照常镜像。开 `--debug` 时，若窗口镜像的第一帧
+99% 以上是黑的，还会额外打一行提示，用来接住漏过判定的合成层。
+
 ### 30. `idle` 一直涨，画面就是不更新
 
 **根因。** 帧状态是用 `CMGetAttachment(sampleBuffer, SCStreamFrameInfo.status, …)` 读的，而这个调用

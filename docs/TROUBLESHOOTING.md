@@ -279,6 +279,33 @@ with black/empty frames.
 **Fix.** Unlock the Mac. Do not unattended-restart krd expecting a picture while the session is
 locked; screen sharing of a locked session is not a supported mode.
 
+### 29b. `--window` shows a black frame: that "window" is the desktop
+
+**Cause.** The desktop, the wallpaper and the per-display backstop are windows to ScreenCaptureKit
+but not *content*: a `SCContentFilter` built for one of them returns the bare backdrop layer, i.e.
+an all-black frame with exit status 0 and nothing said. Measured on a 480×306 frame:
+
+| target | distinct colours | bytes in 3 s |
+|---|---|---|
+| `--window <Finder, empty title>` | **24** (146 846 of 146 880 px are `(0,0,0)`) | 1 KB |
+| `--window <Terminal>` | 1664 | 829 KB |
+| `--display 1` | normal | normal |
+
+**Fix.** `--list` marks those entries `(backdrop — use --display <n>)`, and `--window` now refuses
+them instead of painting black:
+
+```
+krd: window 19 (Finder, title "", layer -2147483603) is the desktop backdrop, not a window —
+         ScreenCaptureKit hands back the bare layer, which composites to black.
+         Mirror the whole screen instead: krd --display 0
+```
+
+The test is deliberately conservative: a window layer at or below the desktop-icon level **and**
+filling (90 % of) a display. A real app is layer 0, the menu bar 24, the screen-share shield at the
+top — none of them qualify, and a low-layer window that only covers a strip of the screen is still
+mirrored normally. With `--debug`, a window mirror whose first frame is 99 %+ black also logs a
+hint, for a compositing layer that slipped through.
+
 ### 30. `idle` climbs but the picture never updates
 
 **Cause.** The frame status was read with `CMGetAttachment(sampleBuffer, SCStreamFrameInfo.status, …)`,

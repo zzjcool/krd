@@ -43,8 +43,8 @@ curl -fsSL … | sh -s -- --from-source                # 直接从源码编译
 
 ```bash
 krd --fps 20                 # 镜像指针所在的那块屏
-krd --list                   # 列出显示器与窗口
-krd --window Safari          # 只镜像一个窗口
+krd --list                   # 列出显示器与窗口，背板条目会标出来
+krd --window Safari          # 只镜像一个窗口（背板窗口会被拒绝，而不是给黑屏）
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
 krd --no-cursor              # 画面里不画指针，鼠标移动也就不会再弄脏瓦片
