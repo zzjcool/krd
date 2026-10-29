@@ -410,3 +410,13 @@ macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、
 `clipboard: 5678 B terminal -> target, Cmd-V posted`），**从不打内容**，所以"哪一半缺了"是可查的。
 如果看到 `dropped (limit 2097152 B)`，说明这次剪贴板超过 2 MB——这是有意的：终端会在粘贴前把整段
 payload 解码，而 krd 的 stdout 还要跑帧。只桥接文本，不桥接图片。
+
+### 46. 插拔显示器（或改分辨率）之后画面还是旧的形状
+
+**根因。** 一个会话绑在一块显示器上；采集帧的几何只在重建采集流时才会重算，而触发重建的要么是
+CoreGraphics 的 reconfiguration 回调（从 GUI 启动的 krd），要么是 2 Hz 的指纹轮询（其它情况——
+ssh 会话里的进程收不到那个回调）。
+**对策。** 不用做什么——变化大约一秒内会被跟上，`--debug` 会留下两行：选目标时的
+`krd: capturing …`，以及重建采集流时的 `krd: capture restarted (N display(s), was M): …`（下面还有
+新的 `source … -> … px`）。如果你镜像的那块屏没了，日志会说明改用哪块。两行都没有，说明采集压根没
+起来（这跟 `krd ax doctor` 无关，去看 `--debug` 里的 `no displays available`）。

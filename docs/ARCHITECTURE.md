@@ -23,6 +23,7 @@ describes how the pieces fit and which invariants must not be broken.
 Sources/krd/
   main.swift      Options parsing, lifecycle, layout application, stats, resize, selftest
   Geometry.swift  TermGeometry (CSI 16t/14t, TIOCGWINSZ) and Viewport (cells/pixels → points)
+  Displays.swift  DisplayPick (which display, and why) and Debounce (one action per burst)
   Tiles.swift     TileGrid: whole-cell grid, per-tile pixel rects, extraction, dirty detection
   Capture.swift   Capturer: SCStream setup, BGRA→RGBA, byte-identical frame dropping
   Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP
@@ -74,7 +75,8 @@ Desk.run():
   configureSource(rect)                   → zoom focus: --zoom-at, else the pointer, else the centre
   applyLayout(geometry)                   → Viewport.crop(full, zoom, focus) → TileGrid + Viewport
   writer.beginSession()                   → heal, alt screen, home, hide cursor
-  installSignalCleanup(); installResizeHandler(); if --debug startStats()
+  installSignalCleanup(); installResizeHandler(); installDisplayChangeHandler()
+  if --debug startStats()
   capturer.start(filter:sourceRect:width:height:fps:)  (width/height = layout, sourceRect = the crop)
   if !--no-input: InputReader.start()     → raw tty, ?1003h ?1002h ?1006h ?1016h
   while true { sleep 1 s }
@@ -83,6 +85,37 @@ Desk.run():
 `NSApplication` exists because ScreenCaptureKit on the tested macOS build delivers exactly one
 frame without an AppKit context and a full stream with it (`KRD_NO_NSAPP=1` reproduces the
 failure). `.accessory` keeps krd out of the Dock and the app switcher.
+
+### Display-set changes (issue #19)
+
+A session is started against one display, so plugging, unplugging, mirroring, rotating or
+resizing a display has to rebuild the stream instead of painting a stale geometry. One function
+decides what to capture -- `makeCaptureTarget()`, used by startup *and* by every change -- and one
+path restarts the stream (`restartCapture`), shared with the terminal resize and the zoom follow,
+so two of them can never start a stream at the same time.
+
+Two things had to be measured before this worked, and both are why the code looks the way it does:
+
+1. **No AppKit notification.** `NSApplication.didChangeScreenParametersNotification` is posted by
+   NSApp's run loop, and krd never runs one (the main loop is async: `while true { await sleep }`).
+   A probe that calls `NSApp.run()` gets three notifications per resolution change; krd got none,
+   with `queue: .main` *or* `queue: nil`.
+2. **No CoreGraphics callback either, over ssh.** `CGDisplayRegisterReconfigurationCallback` is
+   registered anyway (it is the fast path for a GUI-launched krd), but it is not delivered to a
+   process outside the Aqua session -- measured: the same probe got zero callbacks from `ssh`.
+
+So the backstop is a **fingerprint poll at 2 Hz**: `CGGetActiveDisplayList` plus `CGDisplayBounds`,
+sorted by display id (`DisplaySet.fingerprint`, so a reordered list is not a change). Measured end
+to end on the VM: resolution change -> one restart line 0.70 s later. Every trigger (poll, callback)
+only *notes* the event; a 500 ms trailing debounce (`Debounce`) collapses the burst -- `NSApp.run()`
+fires 3 notifications for one lid close, and the poll can see a change twice while it settles.
+
+Which display is chosen is a pure function (`DisplayPick.choose`, covered by `DisplayPickTests`):
+`--display <i>` wins while that index exists; otherwise the display the session is already on wins
+(the pointer wandering onto another screen is *not* a reason to move); only if it is gone does the
+pointer's display take over, and that is logged (`krd: capturing display 2 is gone; following the
+pointer to display 1`). A restart that keeps failing is reported once per session, and the last
+frame stays on screen.
 
 ## 5. Frame path
 

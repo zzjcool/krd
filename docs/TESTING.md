@@ -251,9 +251,12 @@ to decide "is this the terminal or is this krd?" — each one prints its own nar
 | `probe/kbench.py`, `probe/kpace.py` | pipe throughput and backpressure at a fixed frame rate |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`, `CGPreflightPostEventAccess()`, display/window enumeration (run on the target Mac to see whether TCC is the problem) |
 | `probe/ax_probe.swift` | what a headless client can read: the AX warm-up trap, window list without Screen Recording, per-window node counts and walk timing, pruned vs raw size (read-only) |
+| `probe/display_probe.swift` | which display-change mechanism fires: `now`, `list`, `set <i>` (a real resolution change), `watch [--appkit]` printing CoreGraphics callbacks and AppKit notifications for 10 s |
 
 ```bash
 python3 probe/kprobe4.py > /tmp/p4.log 2>&1 ; cat /tmp/p4.log
 swift probe/sck_probe.swift   # on the machine being viewed
 swift probe/ax_probe.swift    # best over ssh: the first AX call fails there until warm-up
+swift probe/display_probe.swift watch          # ssh: no events at all (that is issue #19)
+swift probe/display_probe.swift watch --appkit # a GUI terminal: 3 notifications per change
 ```

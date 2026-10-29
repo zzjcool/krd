@@ -237,6 +237,15 @@ func parseSize(_ spec: String) -> (Int, Int)? {
     return (w, h)
 }
 
+/// The display reconfiguration callback: hand the event to the session and touch nothing else.
+/// It runs *while* the display set is being reconfigured, so every real decision waits for the
+/// debounce.
+private let krdDisplayChanged: CGDisplayReconfigurationCallBack = { _, flags, userInfo in
+    guard let userInfo else { return }
+    let desk = Unmanaged<Desk>.fromOpaque(userInfo).takeUnretainedValue()
+    desk.noteScreenParametersChanged(removing: flags.contains(.removeFlag))
+}
+
 final class Desk {
     private let options: Options
     private let writer = ScreenWriter()
@@ -255,6 +264,18 @@ final class Desk {
     private var captureRestarting = false
     private var restartPending = false
     private var followTimer: DispatchSourceTimer?
+    /// The display this session is attached to, and how many existed when we last looked. Both
+    /// are what "the display set changed" is measured against.
+    private var trackedDisplayID: CGDirectDisplayID?
+    private var displayCount = 0
+    private var displayCallbackRegistered = false
+    /// What the last poll saw, so a change is noticed exactly once.
+    private var displayFingerprint: [DisplayBox] = []
+    private var displayPollTimer: DispatchSourceTimer?
+    private var displayDebounce = Debounce(window: 0.5)
+    private var displayTimer: DispatchSourceTimer?
+    /// A restart that failed is worth one line, not one per plug event.
+    private var restartFailureReported = false
     /// The `--window` target: events go to this process instead of the window manager (issue #17).
     private var windowTarget: (pid: pid_t, id: CGWindowID, name: String)?
     /// Clipboard bridge (issue #18) and the 4 Hz timer that watches the target pasteboard.
@@ -380,58 +401,16 @@ final class Desk {
                 "krd: terminal reports no pixel size; assuming a \(Int(TermGeometry.fallbackCell.w))x\(Int(TermGeometry.fallbackCell.h)) px cell (override with --cell)\n")
         }
 
-        let filter: SCContentFilter
-        let sourceRect: CGRect
-
-        if let query = options.windowQuery {
-            let match = content.windows.first { window in
-                guard window.frame.width > 40, window.frame.height > 40 else { return false }
-                if let id = Int(query) { return window.windowID == id }
-                return (window.title ?? "").localizedCaseInsensitiveContains(query)
-            }
-            guard let window = match else {
-                throw DeskError.message("no window matched \"\(query)\" (try --list)")
-            }
-            // `content.displays` can be empty while windows are listed (macOS 26 without a
-            // display-capture grant), so fall back to CoreGraphics for recognition. The index is
-            // only printed when it really is the one `--display` expects.
-            let shareable = content.displays.map { CGDisplayBounds($0.displayID) }
-            let displayBounds = shareable.isEmpty ? WindowPick.displayBounds() : shareable
-            if let covered = WindowPick.backdrop(layer: window.windowLayer, frame: window.frame,
-                                                 displays: displayBounds) {
-                // Refusing beats painting black with exit status 0: the user asked for a window and
-                // the desktop layer is not one (issue #24).
-                let owner = window.owningApplication?.applicationName ?? "no owning app"
-                let advice = shareable.firstIndex(of: covered).map { "krd --display \($0)" }
-                    ?? "krd --display <n>  (see --list for the indices)"
-                throw DeskError.message(
-                    "window \(window.windowID) (\(owner), title \"\(window.title ?? "")\", layer \(window.windowLayer)) "
-                    + "is the desktop backdrop, not a window — ScreenCaptureKit hands back the bare\n"
-                    + "         layer, which composites to black. Mirror the whole screen instead: \(advice)")
-            }
-            filter = SCContentFilter(desktopIndependentWindow: window)
-            sourceRect = window.frame
-            if let app = window.owningApplication, app.processID > 0 {
-                windowTarget = (app.processID, window.windowID, app.applicationName)
-            }
-        } else {
-            let mainID = CGMainDisplayID()
-            let pointer = CGEvent(source: nil)?.location ?? .zero
-            let underPointer: CGDirectDisplayID? = content.displays
-                .first { CGDisplayBounds($0.displayID).contains(pointer) }?.displayID
-            let preferred: CGDirectDisplayID = underPointer ?? mainID
-            let display: SCDisplay
-            if let index = options.displayIndex, index < content.displays.count {
-                display = content.displays[index]
-            } else if let direct = content.displays.first(where: { $0.displayID == preferred }) {
-                display = direct
-            } else if let first = content.displays.first {
-                display = first
-            } else {
-                throw DeskError.message("no displays available")
-            }
-            filter = SCContentFilter(display: display, excludingWindows: [])
-            sourceRect = CGDisplayBounds(display.displayID)
+        let target = try await makeCaptureTarget(using: content)
+        let filter = target.filter
+        let sourceRect = target.rect
+        trackedDisplayID = target.displayID
+        displayCount = target.displayCount
+        if let windowTarget = target.window { self.windowTarget = windowTarget }
+        if options.debug {
+            // Always said, not only when it fell back: `--display 1` on a one-display Mac is a
+            // surprise worth one line even though nothing went wrong.
+            Log.write("krd: capturing \(target.reason)\n")
         }
 
         self.filter = filter
@@ -462,6 +441,7 @@ final class Desk {
         writer.beginSession()
         installSignalCleanup()
         installResizeHandler()
+        installDisplayChangeHandler()
         if options.debug || options.statsJSON != nil { startStats() }
 
         try await capturer.start(filter: filter, sourceRect: cropForFilter(),
@@ -561,6 +541,192 @@ final class Desk {
         while true {
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
+    }
+
+    // MARK: capture target
+
+    struct CaptureTarget {
+        var filter: SCContentFilter
+        /// The whole source: display bounds, or the window frame.
+        var rect: CGRect
+        var displayID: CGDirectDisplayID?
+        var displayCount: Int
+        /// One sentence for `--debug`, from `DisplayPick`.
+        var reason: String
+        var fellBack: Bool
+        var window: (pid: pid_t, id: CGWindowID, name: String)?
+    }
+
+    /// Build what the stream should capture. Startup and every display-set change go through
+    /// this one function, so "which display, and why" has exactly one implementation.
+    private func makeCaptureTarget(using content: SCShareableContent? = nil) async throws -> CaptureTarget {
+        let shareable: SCShareableContent
+        if let given = content {
+            shareable = given
+        } else {
+            shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        }
+
+        if let query = options.windowQuery {
+            let match = shareable.windows.first { window in
+                guard window.frame.width > 40, window.frame.height > 40 else { return false }
+                if let id = Int(query) { return window.windowID == id }
+                return (window.title ?? "").localizedCaseInsensitiveContains(query)
+            }
+            guard let window = match else {
+                throw DeskError.message("no window matched \"\(query)\" (try --list)")
+            }
+            // `shareable.displays` can be empty while windows are listed (macOS 26 without a
+            // display-capture grant), so fall back to CoreGraphics for recognition. The index is
+            // only printed when it really is the one `--display` expects.
+            let displayRects = shareable.displays.map { CGDisplayBounds($0.displayID) }
+            let displayBounds = displayRects.isEmpty ? WindowPick.displayBounds() : displayRects
+            if let covered = WindowPick.backdrop(layer: window.windowLayer, frame: window.frame,
+                                                 displays: displayBounds) {
+                // Refusing beats painting black with exit status 0: the user asked for a window and
+                // the desktop layer is not one (issue #24).
+                let owner = window.owningApplication?.applicationName ?? "no owning app"
+                let advice = displayRects.firstIndex(of: covered).map { "krd --display \($0)" }
+                    ?? "krd --display <n>  (see --list for the indices)"
+                throw DeskError.message(
+                    "window \(window.windowID) (\(owner), title \"\(window.title ?? "")\", layer \(window.windowLayer)) "
+                    + "is the desktop backdrop, not a window — ScreenCaptureKit hands back the bare\n"
+                    + "         layer, which composites to black. Mirror the whole screen instead: \(advice)")
+            }
+            var windowTarget: (pid: pid_t, id: CGWindowID, name: String)?
+            if let app = window.owningApplication, app.processID > 0 {
+                windowTarget = (app.processID, window.windowID, app.applicationName)
+            }
+            return CaptureTarget(filter: SCContentFilter(desktopIndependentWindow: window),
+                                 rect: window.frame, displayID: nil,
+                                 displayCount: shareable.displays.count,
+                                 reason: "window \(window.windowID) moved to \(Int(window.frame.minX)),"
+                                     + "\(Int(window.frame.minY)) \(Int(window.frame.width))x\(Int(window.frame.height))",
+                                 fellBack: false, window: windowTarget)
+        }
+
+        let boxes = shareable.displays.map { DisplayBox(id: $0.displayID, bounds: CGDisplayBounds($0.displayID)) }
+        guard let choice = DisplayPick.choose(requested: options.displayIndex,
+                                              tracked: trackedDisplayID,
+                                              displays: boxes,
+                                              pointer: CGEvent(source: nil)?.location ?? .zero,
+                                              main: CGMainDisplayID()),
+              let display = shareable.displays.first(where: { $0.displayID == choice.display.id }) else {
+            throw DeskError.message("no displays available (ScreenCaptureKit reported \(boxes.count))")
+        }
+        return CaptureTarget(filter: SCContentFilter(display: display, excludingWindows: []),
+                             rect: choice.display.bounds, displayID: display.displayID,
+                             displayCount: boxes.count, reason: choice.reason, fellBack: choice.fellBack)
+    }
+
+    // MARK: display-set changes
+
+    /// Plug/unplug, mirroring, a resolution change and closing the lid all arrive here.
+    ///
+    /// The notification needs the AppKit context `run()` already has, and it fires two or three
+    /// times for one physical event, so the work is debounced (see `Debounce`).
+    /// The display set as CoreGraphics sees it right now. Cheap and synchronous, unlike
+    /// ScreenCaptureKit's enumeration, which is only worth doing once something changed.
+    private func liveDisplayFingerprint() -> [DisplayBox] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { DisplayBox(id: $0, bounds: CGDisplayBounds($0)) }
+    }
+
+    private func pollDisplays() {
+        guard !cleanedUp, filter != nil else { return }
+        let now = liveDisplayFingerprint()
+        guard !now.isEmpty, DisplaySet.differs(now, displayFingerprint) else { return }
+        let removed = now.count < displayFingerprint.count
+        displayFingerprint = now
+        noteScreenParametersChanged(removing: removed)
+    }
+
+    /// Called on the window server's thread for every display reconfiguration. A top-level
+    /// function pointer because `CGDisplayRemoveReconfigurationCallback` only unregisters the
+    /// exact pointer that was registered.
+    private func installDisplayChangeHandler() {
+        // `NSApplication.didChangeScreenParametersNotification` is delivered by NSApp's own run
+        // loop, and krd never runs one (the main loop is async: `while true { await sleep }`).
+        // Measured on macOS 26: a probe that calls NSApp.run() gets three notifications per
+        // resolution change, krd gets none -- with `queue: .main` *or* `queue: nil`. The
+        // CoreGraphics reconfiguration callback is the one that does not need a run loop.
+        CGDisplayRegisterReconfigurationCallback(krdDisplayChanged, Unmanaged.passUnretained(self).toOpaque())
+        displayCallbackRegistered = true
+        // The backstop for sessions that get no callback at all (see DisplaySet): one cheap
+        // read a second, and only a *changed* fingerprint starts the debounce.
+        displayFingerprint = liveDisplayFingerprint()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in self?.pollDisplays() }
+        timer.resume()
+        displayPollTimer = timer
+    }
+
+    /// Called on the window server's thread for every display reconfiguration.
+    fileprivate func noteScreenParametersChanged(removing: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.cleanedUp else { return }
+            if self.options.debug, removing {
+                Log.write("krd: a display went away\n")
+            }
+            self.displayDebounce.note(Date())
+            self.displayTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + self.displayDebounce.window)
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.cleanedUp, self.displayDebounce.isCurrent(at: Date()) else { return }
+                self.displayDebounce.reset()
+                self.reconcileCaptureTarget()
+            }
+            timer.resume()
+            self.displayTimer = timer
+        }
+    }
+
+    /// One coalesced display-set change: rebuild the filter, keep the zoom honest, recompute the
+    /// layout, clear, restart. Same sequence as a terminal resize, through the same restart path
+    /// (so a zoom pan and a display change cannot restart the stream at the same time).
+    private func reconcileCaptureTarget() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let target = try await self.makeCaptureTarget()
+                let displayMoved = target.displayID != self.trackedDisplayID
+                    || target.displayCount != self.displayCount
+                let frameMoved = target.rect != self.fullRect
+                guard displayMoved || frameMoved else { return }
+                let previousCount = self.displayCount
+                self.filter = target.filter
+                self.trackedDisplayID = target.displayID
+                self.displayCount = target.displayCount
+                if let window = target.window { self.windowTarget = window }
+                self.configureSource(rect: target.rect)
+                if let geometry = self.geometry { self.applyLayout(geometry: geometry) }
+                self.writer.clear()
+                Log.write("krd: capture restarted (\(target.displayCount) display(s), was \(previousCount)): "
+                    + "\(target.reason)\n")
+                if self.options.debug, let layout = self.currentGrid() {
+                    let crop = self.currentCrop()
+                    Log.write("krd:   source \(Int(crop.width))x\(Int(crop.height)) pt"
+                        + (self.zoomScale > 1 ? " (zoom \(self.zoomScale))" : "")
+                        + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells\n")
+                }
+                self.restartCapture(reason: "a display-set change")
+            } catch {
+                self.warnRestartOnce("krd: could not follow the display change (\(error)); "
+                    + "the last frame stays on screen\n")
+            }
+        }
+    }
+
+    /// One line per session for capture restarts that keep failing, not one per plug event.
+    private func warnRestartOnce(_ message: String) {
+        guard !restartFailureReported else { return }
+        restartFailureReported = true
+        Log.write(message)
     }
 
     // MARK: replay
@@ -853,7 +1019,12 @@ final class Desk {
         restartCapture()
     }
 
-    private func restartCapture() {
+    /// Restart the stream against the current filter and layout.
+    ///
+    /// One path for both triggers: a terminal resize and a display-set change (and the zoom
+    /// follow, which is the same operation with a different reason). `captureRestarting` keeps
+    /// two of them from starting a stream at the same time; the loser is queued, not dropped.
+    private func restartCapture(reason: String = "a zoom pan") {
         guard let filter, let layout = currentGrid(), !cleanedUp else { return }
         if captureRestarting { restartPending = true; return }
         captureRestarting = true
@@ -866,7 +1037,8 @@ final class Desk {
                                               width: layout.pixelW, height: layout.pixelH,
                                               fps: self.options.fps)
             } catch {
-                Log.write("krd: could not restart capture after a zoom pan: \(error)\n")
+                self.warnRestartOnce("krd: could not restart capture after \(reason): \(error); "
+                    + "the last frame stays on screen\n")
             }
             self.captureRestarting = false
             if self.restartPending {
@@ -1009,18 +1181,14 @@ final class Desk {
     }
 
     private func handleResize() {
-        guard let filter = self.filter, !cleanedUp else { return }
+        guard filter != nil, !cleanedUp else { return }
         let geometry = TermGeometry.read()
         applyLayout(geometry: geometry)
         guard let layout = currentGrid(), layout.pixelW > 8, layout.pixelH > 8 else { return }
         writer.clear()
-        let capturer = self.capturer
-        let crop = cropForFilter()
-        Task {
-            await capturer.stop()
-            try? await capturer.start(filter: filter, sourceRect: crop,
-                                      width: layout.pixelW, height: layout.pixelH, fps: options.fps)
-        }
+        // Same path as a display change: one place decides whether a stream is already
+        // starting, so a resize during a plug event queues instead of racing it.
+        restartCapture(reason: "a terminal resize")
         if options.debug {
             Log.write("resize: \(layout.pixelW)x\(layout.pixelH) in \(layout.paneCols)x\(layout.paneRows) cells\n")
         }
@@ -1088,6 +1256,12 @@ final class Desk {
         cleanedUp = true
         followTimer?.cancel()
         clipboardTimer?.cancel()
+        displayTimer?.cancel()
+        displayPollTimer?.cancel()
+        if displayCallbackRegistered {
+            CGDisplayRemoveReconfigurationCallback(krdDisplayChanged, Unmanaged.passUnretained(self).toOpaque())
+            displayCallbackRegistered = false
+        }
         input?.restore()
         writer.endSession()
         exit(0)

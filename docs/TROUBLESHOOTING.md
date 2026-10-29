@@ -479,3 +479,16 @@ write is refused before anything is sent.
 missing" is answerable without guessing. If the line says `dropped (limit 2097152 B)`, the clip was
 over 2 MB — that is deliberate: the terminal decodes the whole payload before pasting anything, and
 krd shares that stdout with the frames. Only text is bridged; images are not.
+
+### 46. The picture stays at the old shape after plugging in / unplugging a display
+
+**Cause.** A session is attached to one display; the geometry of the captured frame is only
+recomputed when the stream is rebuilt, and the trigger for that is either the CoreGraphics
+reconfiguration callback (GUI-launched krd) or a 2 Hz fingerprint poll (everything else — the
+callback is not delivered to a process in an ssh session).
+**Fix.** Nothing to do — a change is picked up within about a second, and `--debug` shows both
+lines: `krd: capturing …` when the target is chosen, `krd: capture restarted (N display(s), was M):
+…` when the stream is rebuilt (with the new `source … -> … px` underneath). If the display you were
+mirroring is gone, the log says which one it followed instead. If neither line appears, the capture
+never started (`krd ax doctor` is the wrong tool here — check `--debug` for `no displays
+available`).

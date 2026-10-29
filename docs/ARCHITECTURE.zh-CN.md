@@ -20,6 +20,7 @@ krd 是一个单文件 Swift 可执行程序，十三个源文件约 3.9 k 行�
 Sources/krd/
   main.swift      参数解析、生命周期、布局应用、统计、resize、selftest
   Geometry.swift  TermGeometry（CSI 16t/14t、TIOCGWINSZ）与 Viewport（格/像素 → 屏幕点）
+  Displays.swift  DisplayPick（选哪块屏、为什么）与 Debounce（一串事件只做一次动作）
   Tiles.swift     TileGrid：整格网格、每块瓦片的像素矩形、切片、脏检测
   Capture.swift   Capturer：SCStream 配置、BGRA→RGBA、逐字节相同帧丢弃
   Render.swift    ScreenWriter：会话框架、逐瓦片 kitty 转义、zlib、KRD_DUMP
@@ -64,7 +65,8 @@ Desk.run():
   configureSource(rect)                   → 缩放焦点：--zoom-at，否则指针，否则中心
   applyLayout(geometry)                   → Viewport.crop(full, zoom, focus) → TileGrid + Viewport，previousFrame = []
   writer.beginSession()                   → 自愈、备用屏、归位、隐藏光标
-  installSignalCleanup(); installResizeHandler(); if --debug startStats()
+  installSignalCleanup(); installResizeHandler(); installDisplayChangeHandler()
+  if --debug startStats()
   capturer.start(filter:sourceRect:width:height:fps:)  （width/height 来自布局，sourceRect = 裁剪区）
   if !--no-input: InputReader.start()     → raw tty、?1003h ?1002h ?1006h ?1016h
   while true { sleep 1 s }
@@ -73,6 +75,32 @@ Desk.run():
 之所以要有 `NSApplication`：在被测的 macOS 版本上，没有 AppKit 上下文时 ScreenCaptureKit 只送一帧，
 有上下文才是完整流（`KRD_NO_NSAPP=1` 可复现这个故障）。`.accessory` 让 krd 不出现在 Dock 和
 ⌘-Tab 里。
+
+### 显示器集合变化（issue #19）
+
+一个会话是对着某一块显示器起来的，所以插拔、镜像、旋转、改分辨率都必须重建采集流，而不是继续画旧的
+几何。决定「采哪块屏」只有一个函数（`makeCaptureTarget()`，启动和每次变化共用），重启采集只有一条
+路径（`restartCapture`，和终端 resize、zoom follow 共用），所以任意两个触发都不会同时起一条流。
+
+有两件事是实测之后才定下来的，代码现在的样子就是这两条的后果：
+
+1. **AppKit 的通知收不到。** `NSApplication.didChangeScreenParametersNotification` 由 NSApp 的
+   run loop 派发，而 krd 从来不跑它（主循环是 async 的 `while true { await sleep }`）。实测：调了
+   `NSApp.run()` 的探针每次改分辨率收到 3 条通知，krd 一条都没有——`queue: .main` 和
+   `queue: nil` 都一样。
+2. **走 ssh 时 CoreGraphics 的回调也收不到。** `CGDisplayRegisterReconfigurationCallback` 仍然注册
+   （从 GUI 启动 krd 时它是快路径），但它不投递给 Aqua 会话之外的进程——实测同一个探针在 ssh 下
+   零回调。
+
+所以兜底是 **2 Hz 的指纹轮询**：`CGGetActiveDisplayList` + `CGDisplayBounds`，按 display id 排序
+（`DisplaySet.fingerprint`，列表顺序变化不算变化）。VM 上端到端实测：改分辨率 → 0.70 秒后出现一行
+重启日志。所有触发（轮询、回调）都只**记一笔**，由 500 ms 的尾沿去抖（`Debounce`）合并——
+`NSApp.run()` 下一次合盖会连发 3 条通知，而轮询在稳定过程中也可能看到两次变化。
+
+选哪块屏是纯函数（`DisplayPick.choose`，`DisplayPickTests` 覆盖）：`--display <i>` 在索引还有效时
+优先；否则优先保留会话已经在的那块（指针跑到别的屏**不**构成换屏理由）；只有它消失了才回退到指针所在
+的屏，并且会写进日志（`krd: capturing display 2 is gone; following the pointer to display 1`）。
+重启一直失败时每个会话只报一次，画面保持最后一帧。
 
 ## 5. 帧路径
 
