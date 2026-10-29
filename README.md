@@ -45,8 +45,8 @@ Everything is explained in [docs/DEPLOY.md](docs/DEPLOY.md); the script itself i
 
 ```bash
 krd --fps 20                 # mirror the display the pointer is on
-krd --list                   # displays and windows
-krd --window Safari          # mirror a single window
+krd --list                   # displays and windows; backdrop entries are marked
+krd --window Safari          # mirror a single window (a backdrop window is refused, not shown black)
 krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --no-cursor              # no pointer in the picture, and a moving mouse stops dirtying tiles

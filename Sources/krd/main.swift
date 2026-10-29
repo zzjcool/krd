@@ -190,6 +190,8 @@ final class Desk {
     private let stateLock = NSLock()
     private var grid: TileGrid?
     private var reportedFrameMismatch = false
+    /// Set once the first delivered frame of a `--window` mirror has been looked at (issue #24).
+    private var checkedFirstWindowFrame = false
     private var viewport = Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero)
     private var previousFrame: [UInt8] = []
     private var lastDirtyCount = 0
@@ -268,13 +270,29 @@ final class Desk {
 
         if options.listOnly {
             var text = ""
+            // `content.displays` can be empty while windows are listed (macOS 26 without a
+            // display-capture grant), so fall back to CoreGraphics for recognition. The index is
+            // only printed when it really is the one `--display` expects.
+            let shareable = content.displays.map { CGDisplayBounds($0.displayID) }
+            let displayBounds = shareable.isEmpty ? WindowPick.displayBounds() : shareable
             for (index, display) in content.displays.enumerated() {
-                let bounds = CGDisplayBounds(display.displayID)
+                let bounds = displayBounds[index]
                 text += "[\(index)] display \(display.displayID)  \(Int(bounds.width))x\(Int(bounds.height)) pt\n"
             }
             for window in content.windows where window.frame.width > 60 {
                 let app = window.owningApplication?.applicationName ?? "?"
-                text += "    window \(window.windowID)  @\(Int(window.frame.minX)),\(Int(window.frame.minY)) \(Int(window.frame.width))x\(Int(window.frame.height))  app=\(app)  title=\(window.title ?? "-")\n"
+                var line = "    window \(window.windowID)  @\(Int(window.frame.minX)),\(Int(window.frame.minY)) \(Int(window.frame.width))x\(Int(window.frame.height))  app=\(app)  title=\(window.title ?? "-")"
+                // Say it here, before somebody picks it: a backdrop window captures as a black
+                // frame, which looks like krd being broken (issue #24).
+                if let covered = WindowPick.backdrop(layer: window.windowLayer, frame: window.frame,
+                                                     displays: displayBounds) {
+                    if let index = shareable.firstIndex(of: covered) {
+                        line += "  (backdrop — use --display \(index))"
+                    } else {
+                        line += "  (backdrop — use --display <n>)"
+                    }
+                }
+                text += line + "\n"
             }
             FileHandle.standardOutput.write(Data(text.utf8))
             exit(0)
@@ -299,6 +317,23 @@ final class Desk {
             }
             guard let window = match else {
                 throw DeskError.message("no window matched \"\(query)\" (try --list)")
+            }
+            // `content.displays` can be empty while windows are listed (macOS 26 without a
+            // display-capture grant), so fall back to CoreGraphics for recognition. The index is
+            // only printed when it really is the one `--display` expects.
+            let shareable = content.displays.map { CGDisplayBounds($0.displayID) }
+            let displayBounds = shareable.isEmpty ? WindowPick.displayBounds() : shareable
+            if let covered = WindowPick.backdrop(layer: window.windowLayer, frame: window.frame,
+                                                 displays: displayBounds) {
+                // Refusing beats painting black with exit status 0: the user asked for a window and
+                // the desktop layer is not one (issue #24).
+                let owner = window.owningApplication?.applicationName ?? "no owning app"
+                let advice = shareable.firstIndex(of: covered).map { "krd --display \($0)" }
+                    ?? "krd --display <n>  (see --list for the indices)"
+                throw DeskError.message(
+                    "window \(window.windowID) (\(owner), title \"\(window.title ?? "")\", layer \(window.windowLayer)) "
+                    + "is the desktop backdrop, not a window — ScreenCaptureKit hands back the bare\n"
+                    + "         layer, which composites to black. Mirror the whole screen instead: \(advice)")
             }
             filter = SCContentFilter(desktopIndependentWindow: window)
             sourceRect = window.frame
@@ -611,6 +646,27 @@ final class Desk {
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
+
+        // A window mirror whose very first frame is essentially all black is almost certainly a
+        // compositing layer that slipped past the layer test, not an app (issue #24). One line,
+        // only with --debug: stderr lands on the picture, so this must not be a default path (§31).
+        if options.debug, options.windowQuery != nil, !checkedFirstWindowFrame {
+            checkedFirstWindowFrame = true
+            let bpp = max(1, writer.format.bytesPerPixel)
+            var black = 0, sampled = 0
+            var i = 0
+            while i + 2 < pixels.count {
+                if pixels[i] == 0, pixels[i + 1] == 0, pixels[i + 2] == 0 { black += 1 }
+                sampled += 1
+                i += bpp * 17
+            }
+            if sampled > 0, Double(black) / Double(sampled) > 0.99 {
+                Log.write("krd: the first frame of this window is 99%+ black — that window is probably "
+                          + "a compositing layer (desktop/backdrop), not an app.\n"
+                          + "         --list now marks those entries; mirror the screen with --display <n>\n")
+            }
+        }
+
         // capture callback -> last byte out: the number that is actually felt (Q4 in
         // docs/BENCHMARK.md). `defer` so every early return is measured too.
         defer { lastPipeMs = benchNowMs() - started }
