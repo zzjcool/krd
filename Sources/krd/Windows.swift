@@ -1,4 +1,5 @@
 import CoreGraphics
+import krdcore
 
 /// Recognising a backdrop, i.e. the desktop layer rather than a window with content.
 ///

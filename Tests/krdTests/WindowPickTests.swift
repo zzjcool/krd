@@ -1,6 +1,7 @@
 import XCTest
 import CoreGraphics
 @testable import krd
+@testable import krdcore
 
 /// Backdrop detection for `--window` (issue #24). Pure numbers, no window server: the decision is
 /// "below the desktop layer and filling a display", and the layer values in these tests are the

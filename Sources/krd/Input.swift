@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import krdcore
 
 /// Input tables. `internal` rather than `private` on purpose: the test target pins them, and
 /// the #14 crash was arithmetic on a table rather than a wrong key, so the table is the thing

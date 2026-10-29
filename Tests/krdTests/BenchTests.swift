@@ -1,6 +1,7 @@
 import XCTest
 import CZlib
 @testable import krd
+@testable import krdcore
 
 /// L0: the pure functions, with no terminal, no screen and no permissions.
 ///

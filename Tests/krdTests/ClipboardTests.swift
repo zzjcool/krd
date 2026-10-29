@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 @testable import krd
+@testable import krdcore
 
 /// The pure half of the clipboard bridge (issue #18): direction parsing, the `--no-input` rule, and
 /// the OSC 52 framing/limits. The pasteboard half is exercised by hand in the VM (see the PR), since

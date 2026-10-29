@@ -1,6 +1,19 @@
 import Foundation
 import CZlib
 
+/// Monotonic milliseconds. In the core because the writer measures itself (issue #21).
+@inline(__always) public func benchNowMs() -> Double {
+    Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000.0
+}
+
+/// Per-tile stage timings, written by `ScreenWriter.emit` only when a bench asks for them.
+/// Lives here because `emit` takes a pointer to it (issue #21).
+public struct EmitTiming {
+    public var base64Ms = 0.0
+    public var assembleMs = 0.0
+    public init() {}
+}
+
 /// Turns pixel frames into kitty graphics escapes on the pty.
 ///
 /// One rule learned the hard way: never let the screen hold "no image" between two frames,
@@ -10,13 +23,13 @@ import CZlib
 ///
 /// Compression is stateless (parallel, see `main.handleFrame`); everything below `emit` is
 /// strictly serial because the escapes have to reach the pty in order.
-final class ScreenWriter {
+public final class ScreenWriter {
     /// q=2 silences every protocol reply; KRD_Q=0 reveals them while debugging.
     private let quiet = ProcessInfo.processInfo.environment["KRD_Q"] ?? "2"
     /// Pixel format on the wire: the desktop is opaque, so RGB (`f=24`) is ~17 % smaller than
     /// RGBA (`f=32`) and also compresses faster. `KRD_FORMAT=rgba` is the documented fallback
     /// for a terminal that does not implement `f=24`.
-    var format: PixelFormat = {
+    public var format: PixelFormat = {
         (ProcessInfo.processInfo.environment["KRD_FORMAT"] ?? "rgb").lowercased() == "rgba" ? .rgba : .rgb
     }()
     /// How the tiles of one frame are wrapped in DEC 2026 synchronized-update blocks.
@@ -31,25 +44,25 @@ final class ScreenWriter {
     private var batchOpen = false
     private var out = [UInt8]()
 
-    private(set) var framesEmitted = 0
-    private(set) var lastFrameBytes = 0
+    public private(set) var framesEmitted = 0
+    public private(set) var lastFrameBytes = 0
     /// Bytes that actually left the process for the last frame (escapes + base64 + headers).
     /// Accumulated across every flush of the frame, so the `?2026h`/`?2026l` wrapper and a
     /// nudge are counted too -- one flush in the middle of a frame is not the frame.
-    private(set) var lastWireBytes = 0
+    public private(set) var lastWireBytes = 0
     private var frameWireBytes = 0
-    private(set) var totalBytes = 0
-    private(set) var lastCompressMs = 0.0
-    private(set) var lastWriteMs = 0.0
+    public private(set) var totalBytes = 0
+    public private(set) var lastCompressMs = 0.0
+    public private(set) var lastWriteMs = 0.0
 
     // Write-path distribution. `lastWriteMs` is one sample; a stutter is a p99, and the
     // stats line used to average a number that spikes (docs/BENCHMARK.md, Q3).
-    private(set) var writeSamples = 0
-    private(set) var writeSumMs = 0.0
-    private(set) var writeMaxMs = 0.0
-    private(set) var writeOver5Ms = 0
+    public private(set) var writeSamples = 0
+    public private(set) var writeSumMs = 0.0
+    public private(set) var writeMaxMs = 0.0
+    public private(set) var writeOver5Ms = 0
 
-    func resetWriteStats() {
+    public func resetWriteStats() {
         writeSamples = 0
         writeSumMs = 0
         writeMaxMs = 0
@@ -65,21 +78,21 @@ final class ScreenWriter {
 
     /// Per-tile zlib level, learned from the previous frame's compression ratio.
     private var levels = LevelPolicy(tiles: 0)
-    private(set) var lastCompressedTiles = 0
+    public private(set) var lastCompressedTiles = 0
 
-    init() {
+    public init() {
         out.reserveCapacity(1 << 21)
     }
 
     /// Called when the grid (and therefore the tile count) changes.
-    func resize(tiles: Int) {
+    public func resize(tiles: Int) {
         if tiles != levels.count { levels = LevelPolicy(tiles: tiles) }
     }
 
-    func level(for index: Int) -> Int { levels.level(for: index) }
+    public func level(for index: Int) -> Int { levels.level(for: index) }
     /// The tile loop compresses in parallel and reports the wall time once.
-    func addCompressTime(_ ms: Double) { lastCompressMs += ms }
-    func observe(index: Int, ratio: Double) { levels.observe(index: index, ratio: ratio) }
+    public func addCompressTime(_ ms: Double) { lastCompressMs += ms }
+    public func observe(index: Int, ratio: Double) { levels.observe(index: index, ratio: ratio) }
 
     // MARK: session
 
@@ -90,14 +103,14 @@ final class ScreenWriter {
         "\u{1B}\\\u{1B}[?2026l\u{1B}[?1003l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[0m\u{1B}[?25h"
     }
 
-    func beginSession() {
+    public func beginSession() {
         // Alternate screen: keeps scrollback clean and makes the terminal hand us wheel
         // events instead of scrolling itself.
         // Mouse reporting is enabled later, by InputReader, once it knows stdin is readable.
         write(healSequence + "\u{1B}[?1049h\u{1B}[2J\u{1B}[H\u{1B}[?25l")
     }
 
-    static func writeMouseReporting(_ on: Bool) {
+    public static func writeMouseReporting(_ on: Bool) {
         // 1003 = report every motion, not only while a button is held: a remote pointer has to
         // follow the mouse even when nobody is clicking. 1006 = SGR encoding, 1016 = SGR *pixels*.
         writeRaw(on ? "\u{1B}[?1003h\u{1B}[?1002h\u{1B}[?1006h\u{1B}[?1016h"
@@ -123,9 +136,9 @@ final class ScreenWriter {
     /// One lock for everything that reaches the terminal. The frame path flushes a whole frame
     /// through several `write(2)` calls, so a concurrent OSC 52 (clipboard) or mouse-mode sequence
     /// (input) could otherwise land between two tiles of the same image.
-    static let outLock = NSLock()
+    public static let outLock = NSLock()
 
-    static func writeKeyboardProtocol(_ on: Bool) {
+    public static func writeKeyboardProtocol(_ on: Bool) {
         if on {
             keyboardPushed = true
             writeRaw("\u{1B}[>15u\u{1B}[?u")
@@ -137,7 +150,7 @@ final class ScreenWriter {
 
     /// Straight to the tty, bypassing the frame buffer: input-mode sequences, OSC 52 and the like
     /// must not land in the middle of a placement (and must work before the first frame exists).
-    static func writeRaw(_ text: String) {
+    public static func writeRaw(_ text: String) {
         // Same lock as the frame path: an OSC 52 or a mouse-mode change landing in the middle of a
         // tile image would be decoded as image data and corrupt that tile.
         outLock.lock()
@@ -152,7 +165,7 @@ final class ScreenWriter {
         }
     }
 
-    func endSession() {
+    public func endSession() {
         // Terminate any half-written APC *first*, then retire the screen. The keyboard push goes
         // with it: a pop after the alternate screen is gone is still our business, not the shell's.
         write("\u{1B}\\\u{1B}[?2026l")
@@ -167,11 +180,11 @@ final class ScreenWriter {
     /// placements cannot pile up and there is nothing to reclaim. Set `KRD_REAP=<n>` only on a
     /// terminal that leaks placements (symptom: memory grows, tiles go stale after a while) --
     /// the cost is one full repaint, i.e. a visible blink, every n frames.
-    var reapInterval = Int(ProcessInfo.processInfo.environment["KRD_REAP"] ?? "0") ?? 0
+    public var reapInterval = Int(ProcessInfo.processInfo.environment["KRD_REAP"] ?? "0") ?? 0
     private var sinceReap = 0
 
     /// Returns true when the caller must repaint everything.
-    func reapIfNeeded() -> Bool {
+    public func reapIfNeeded() -> Bool {
         guard reapInterval > 0 else { return false }   // 0 disables it; must not mean "always"
         sinceReap += 1
         guard sinceReap >= reapInterval else { return false }
@@ -182,11 +195,11 @@ final class ScreenWriter {
 
     /// A terminal only repaints when something arrives; one harmless byte keeps a static
     /// frame committed (Herdr otherwise waits for the next output cycle to show a placement).
-    func nudge() {
+    public func nudge() {
         write("\u{1B}[?25l")
     }
 
-    func clear() {
+    public func clear() {
         append("\u{1B}_Ga=d,d=a\u{1B}\\")   // drop every image this terminal holds
         append("\u{1B}[2J")
         flush()
@@ -197,7 +210,7 @@ final class ScreenWriter {
     /// DEC 2026: the terminal commits everything until endBatch() in one repaint.
     /// Reset the per-frame counters and, in the default mode, open the single synchronized
     /// block that wraps every tile of this frame.
-    func beginFrame() {
+    public func beginFrame() {
         lastFrameBytes = 0
         lastCompressMs = 0
         lastWriteMs = 0
@@ -210,7 +223,7 @@ final class ScreenWriter {
     }
 
     /// Close the frame's synchronized block and push the bytes out.
-    func endFrame() {
+    public func endFrame() {
         if batchOpen {
             append("\u{1B}[?2026l")
             batchOpen = false
@@ -222,7 +235,7 @@ final class ScreenWriter {
         lastWireBytes = frameWireBytes
     }
 
-    func beginBatch() {
+    public func beginBatch() {
         out.removeAll(keepingCapacity: true)
         frameWireBytes = 0
         append("\u{1B}[?2026h")
@@ -231,7 +244,7 @@ final class ScreenWriter {
         lastCompressMs = 0
     }
 
-    func endBatch() {
+    public func endBatch() {
         append("\u{1B}[?2026l")
         batchOpen = false
         let t0 = benchNowMs()
@@ -252,7 +265,7 @@ final class ScreenWriter {
     /// not an option (Herdr and rex treat `a=d,i=<id>` as "drop the whole image set" -> black
     /// screen) and alternating ids are not an option either (two images then own the same cells
     /// and the stale one shows through), so a tile simply overwrites its own placement.
-    static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int) -> CompressedTile? {
+    public static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int) -> CompressedTile? {
         guard let payload = zlibCompress(pixels, level: level), !payload.isEmpty else { return nil }
         let ratio = pixels.isEmpty ? 0 : Double(payload.count) / Double(pixels.count)
         return CompressedTile(index: index, rect: rect, payload: payload, ratio: ratio)
@@ -260,7 +273,7 @@ final class ScreenWriter {
 
     /// Turn an already compressed tile into escapes. Single-threaded: the order of the tiles
     /// (and therefore the cursor moves) has to stay deterministic.
-    func emit(_ tile: CompressedTile, sync: Bool, timing: UnsafeMutablePointer<EmitTiming>? = nil) {
+    public func emit(_ tile: CompressedTile, sync: Bool, timing: UnsafeMutablePointer<EmitTiming>? = nil) {
         let r = tile.rect
         let iid = 100 + tile.index
         let pid = 1000 + tile.index
@@ -304,12 +317,12 @@ final class ScreenWriter {
     }
 
     /// Should `emit` wrap this tile in its own synchronized block?
-    var perTileSync: Bool { syncMode == .tile }
+    public var perTileSync: Bool { syncMode == .tile }
 
     /// Diagnostic: draw one block with an explicitly chosen protocol shape, so a human can
     /// tell which variant a terminal actually honours.
     /// 0 = a=T with id, 1 = a=T without id, 2 = a=t + a=p with id, 3 = a=T with id inside 2026
-    func emitVariant(_ variant: Int, id: Int, row: Int, col: Int,
+    public func emitVariant(_ variant: Int, id: Int, row: Int, col: Int,
                      pixels: [UInt8], width: Int, height: Int, cols: Int, rows: Int) {
         guard let compressed = zlibCompress(pixels), !compressed.isEmpty else { return }
         let b64 = Array(Data(compressed).base64EncodedString().utf8)
@@ -343,7 +356,7 @@ final class ScreenWriter {
 
     // MARK: full frame (fallback / comparison)
 
-    func emitFullFrame(rgba: [UInt8], width: Int, height: Int, cols: Int, rows: Int) {
+    public func emitFullFrame(rgba: [UInt8], width: Int, height: Int, cols: Int, rows: Int) {
         // Same reasoning as emitTile: one fixed image id and placement id, overwritten in
         // place. Nothing is ever deleted, so no terminal can lose the picture to `a=d`.
         let newID = 2
@@ -378,7 +391,7 @@ final class ScreenWriter {
 
     // MARK: plumbing
 
-    func write(_ text: String) {
+    public func write(_ text: String) {
         append(text)
         flush()
     }
@@ -395,11 +408,19 @@ final class ScreenWriter {
     }()
 
     /// Benchmarks exercise the whole encoder without a terminal to write to.
-    var discardOutput = false
+    public var discardOutput = false
+    /// Test seam (issue #21): when set, flushed bytes go here instead of the tty, so the golden
+    /// dump test can compare a byte stream in memory. `nil` in production, where the pty is the sink.
+    public var sink: (([UInt8]) -> Void)?
 
     private func flush() {
         guard !out.isEmpty else { return }
         frameWireBytes += out.count
+        if let sink {
+            sink(out)
+            out.removeAll(keepingCapacity: true)
+            return
+        }
         if discardOutput {
             out.removeAll(keepingCapacity: true)
             return
@@ -423,7 +444,7 @@ final class ScreenWriter {
 
 /// RFC1950 zlib via system libz -- exactly what the protocol's `o=z` requires.
 /// (Apple's COMPRESSION_ZLIB emits *raw* DEFLATE, which the terminal rejects.)
-func zlibCompress(_ input: [UInt8], level: Int = 5) -> [UInt8]? {
+public func zlibCompress(_ input: [UInt8], level: Int = 5) -> [UInt8]? {
     guard !input.isEmpty else { return nil }
     var capacity = compressBound(uLong(input.count))
     var out = [UInt8](repeating: 0, count: Int(capacity))

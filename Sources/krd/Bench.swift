@@ -1,4 +1,5 @@
 import Foundation
+import krdcore
 
 /// Benchmarks: the encoder (L1), the wire under a pty (L2) and replay of real frames (L4).
 ///
@@ -15,9 +16,6 @@ import Foundation
 ///    and emits 198 tiles is a bug in the harness, not a number to report
 
 /// Monotonic milliseconds. `Date` is wall-clock and can jump backwards mid-run.
-@inline(__always) func benchNowMs() -> Double {
-    Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000.0
-}
 
 /// p50/p95/p99/max/mean over one stage of one case.
 struct Percentiles {
@@ -38,11 +36,6 @@ struct Percentiles {
     }
 }
 
-/// Per-tile stage timings, written by `ScreenWriter.emit` only when a bench asks for them.
-struct EmitTiming {
-    var base64Ms = 0.0
-    var assembleMs = 0.0
-}
 
 #if DEBUG
 let isDebugBuild = true

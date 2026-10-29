@@ -1,5 +1,6 @@
 import XCTest
 @testable import krd
+@testable import krdcore
 
 /// Refs are the only thing that lasts longer than one `krd ax` process, so the rules for
 /// "is this the same node" and "which dump printed this ref" are the safety-critical part of
