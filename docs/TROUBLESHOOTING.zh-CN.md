@@ -236,10 +236,13 @@ Alt-`G`，后面全变成文字。
 
 ### 30. `idle` 一直涨，画面就是不更新
 
-**根因。** `CMGetAttachment(sampleBuffer, SCStreamFrameInfo.status, …)` 用 `as? Int` 取会静默失败 ——
-实际挂上去的是 `NSNumber`；于是每一个空帧都被当成坏帧，状态也丢了。
-**对策。** `as? NSNumber` → `.intValue`（`Capture.swift`）。`idle` = 没有像素缓冲且 status 非 0；
-`bad` = 没有像素缓冲且 status 为 0。
+**根因。** 帧状态是用 `CMGetAttachment(sampleBuffer, SCStreamFrameInfo.status, …)` 读的，而这个调用
+永远读不到：ScreenCaptureKit 把帧信息放在 buffer 的 *sample attachments* 里
+（`CMSampleBufferGetSampleAttachmentsArray`）。于是每次读到的都是 nil，后面的 `?? 0` 又把“没有状态”
+当成“状态 0 = complete”——静态屏幕下每个 idle 帧都被记成坏帧，`idle` 永远不动（issue #25）。
+**对策。** 从 sample attachments 里读 `status`（`Capture.swift`），并把三种状态分开：没有像素缓冲且状态为
+**complete**（或 buffer 根本读不出来）→ `bad`；没有像素缓冲但状态是别的，或者压根没有状态 → `idle`。
+现在 `bad` 才真的只表示错误，而且第一个坏帧会把 status 和它实际带的附件键都打进日志。
 
 ## 5. 排查手段
 

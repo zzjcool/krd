@@ -212,8 +212,9 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0 max=3 over5=0]  
 ```
 
 Reading it: `tiles/s 0` and `dirty 0` for several seconds = nothing changed (or nothing arrives);
-`idle` growing = the capture side is alive but the screen is static; `bad` growing = frames without
-a pixel buffer, usually a capture/permission problem; `write` in the tens of ms regularly = the
+`idle` growing = the capture side is alive but the screen is static; `bad` growing = the capture is
+contradicting itself (a frame that says `complete` but carries no usable image), which is a real
+capture/buffer problem rather than a quiet screen; `write` in the tens of ms regularly = the
 terminal is not keeping up with the byte rate, lower `--fps` or use bigger tiles.
 
 ## 9. Calibrating a new terminal

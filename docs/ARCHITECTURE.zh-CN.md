@@ -75,7 +75,7 @@ Desk.run():
 ```
 SCStream 回调（采集队列）
   └─ Capturer.stream(_:didOutputSampleBuffer:of:)
-       ├─ CMGetAttachment(status)        → 空帧（没有像素缓冲）还是坏帧
+       ├─ sample attachments：status=complete|idle|blank…  → idle / bad / 真正的帧
        ├─ CVPixelBuffer → vImagePermuteChannels_ARGB8888(BGRA → RGBA)
        └─ previous == rgba ? 丢弃 : 保留   ← 静止桌面在这里就是零成本
           └─ Desk.handleFrame(pixels:width:height:)          （同一队列）
@@ -192,7 +192,8 @@ stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> wr
 ```
 
 `tiles/s` 是 `framesEmitted` 的增量（数的是瓦片，不是帧）；`KB` 是最近一帧压缩后的负载；`MB/s` 是最近
-一秒写出的字节；`idle`/`bad` 是没有像素缓冲的 ScreenCaptureKit 帧，按 status attachment 区分。
+一秒写出的字节；`idle`/`bad` 是没有像素缓冲的 ScreenCaptureKit 帧，按 sample attachments 里的
+status 区分（`idle` = 状态这么说或者根本没有状态，`bad` = 它声称 `complete`）。
 
 ## 10. 扩展点
 
