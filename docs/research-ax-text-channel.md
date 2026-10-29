@@ -286,6 +286,39 @@ headless 看不到：图形/图表/布局/颜色/图片内容/视频/自定义�
 
 副作用：新增一个临时状态目录（含屏幕文本，属敏感），要写进 `SECURITY.md`。
 
+### 8.1 已实现（issue #28）
+
+方案 3，落在 `Sources/krd/AXRefs.swift`（纯逻辑 + 文件 IO）与 `AXCommand.swift`（AX 那一侧）：
+
+```
+$TMPDIR/krd-ax/index.json               ref → 是哪次 dump 打印的（+ 每个窗口的计数器）
+$TMPDIR/krd-ax/snapshots/<generation>.json   那次 dump 的每个 ref 及其 anchor 链
+KRD_AX_STATE                           把上面整个目录搬到别处（测试/只读 TMPDIR）
+```
+
+anchor 链的每一步是 `{index, role, identifier, title}`：`index` 是父节点 `AXChildren` 里的位置，
+后三个是当时那个 child 的样子。解析时逐级往下：**先看记录的那个 index**（树很少动，命中只读一个
+child），对不上才把整层读出来找唯一匹配。匹配规则：两边都有 `AXIdentifier` 就只比它（按钮标题从
+"Start" 变 "Stop" 还是同一个按钮）；否则比 role+title（标题改了就当它没了）。
+
+四条由此得到的性质，都是实测过的：
+
+1. **编号按窗口单调递增，不重用**。这条是实测逼出来的：实测时先 dump（@e19 是 bold 复选框），
+   中间又 dump 了一次（重新从 @e1 编号），再 `press @e19` —— 工具点到了 `ruler` 上。现在每次 dump
+   从上次的最后一个号往后编（`AXIndex.counters`），旧 ref 永远指向打印它的那次 dump，配合 anchor
+   校验，只可能"成功"或"明确失败"，不会改指。该窗口的 snapshot 全被淘汰后计数器才归零。
+2. **失效就 fail-closed，并说清下一步**。窗口没了 / 应用重启（pid 复用也算）/ 节点改名 / 一层里
+   出现两个一样的兄弟，都是非零退出 + "重新 dump"，不会回退到"按 index 硬点"。
+3. **`find` 与 `tree` 用同一套 walk 参数**，同一个界面状态下编号一致；`--all` 会搜到更多节点，
+   也就必然换号（文档写明了）。
+4. **`--menubar` 的链从 menu bar 起**，snapshot 每个节点记 `root`，解析时选对起点（实测
+   `press` 一个菜单项：`AXPress` 返回 0 ms，但目标窗口没有焦点时菜单项是 disabled，回读直接把
+   `enabled=false` 打出来，而不是假装成功）。
+
+写路径的默认值是关的：`press`/`set` 是显式子命令，`--dry-run` 只打印不发送，写入后一定回读；
+`set` 回读到的值不等于请求值就按 `6` 退出（应用接受了写入却规范化/裁掉了内容时，这是唯一诚实的
+答案）。
+
 ## 9. 两种形态的职责划分（产品视角）
 
 | 任务 | headless（AX） | mirror（像素） |
