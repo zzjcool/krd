@@ -169,8 +169,21 @@ Shift/Option/Control 带到事件上；水平滚轮（`& 64` 且 `& 3` = 2/3）�
 
 ### 20. 用 `--window` 时，点击打到了最上面的窗口而不是被镜像的那个
 
-**根因。** `--window` 只过滤*采集*；注入是全局的 `CGEvent.post(tap: .cghidEventTap)`，谁在最上面谁来接。
-**对策。** 让被镜像的窗口保持在前台，或者等 `CGEventPostToPid`（Roadmap）。
+**根因（#17 已修）。** `--window` 过去只过滤*采集*：注入仍是全局的 `CGEvent.post(tap: .cghidEventTap)`，
+谁在最上面谁来接，所以被遮住一半的窗口每一个点击都会丢。
+
+**对策。** 窗口模式下 krd 改用 `CGEventPostToPid` 把事件投给目标进程——鼠标、滚轮、键盘都一样——所以
+不管前面挡着什么，点击都会到被镜像的窗口。坐标仍是屏幕点，取自窗口自己的 frame，目标 app 就是拿它
+在自己的窗口里做命中的。
+
+两点值得知道：
+
+- 目标 app 退出或窗口关闭后就没有 pid 可投了。krd 只打一次
+  `the mirrored window is gone (no pid) — falling back to global injection`，之后点击重新交给最上面的窗口；
+  要重新挂上用 `--window <id>` 重启。
+- `--debug` 会记下真正用的 pid（`window mode — events go to pid 1234`，之后每条事件
+  `posting to pid 1234 (window mode)`、`pid 1234 <- 1 at 804,298`），所以「这次点击去哪了」是可查的，
+  不用猜。
 
 ### 21. `KRD_Q=0` 往桌面里打了一堆乱码
 

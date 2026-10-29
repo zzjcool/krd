@@ -108,7 +108,7 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 
 | | |
 |---|---|
-| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode, SSH |
+| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, SSH |
 | Rough | colour-heavy full-screen motion (no codec yet), Herdr's image-delete semantics |
 | Not yet | clipboard, IME input, multi-display hot switch |
 

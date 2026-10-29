@@ -264,11 +264,6 @@ the same numbers as one NDJSON object per second (`bench/soak-report.py` reads t
 
 ## 10. Extension points
 
-- **kitty keyboard protocol** — `InputReader.handleCSI`/`handleKey`; the flags parser already
-  decodes modifier bits from `CSI 1; <mods> <final>`, so a `CSI > 9 u` handshake and `CSI <code>;mods u`
-  decoding would slot in beside it.
-- **Window-targeted injection** — `InputReader.postMouse`/`postKey`: replace
-  `event.post(tap: .cghidEventTap)` with `CGEventPostToPid` when `--window` selected a process.
 - **Clipboard** — `InputReader` (OSC 52 in) and `ScreenWriter` (OSC 52 out); nothing in the render
   path assumes the stream is image-only apart from the "no text" rule.
 - **Another encoder** — `ScreenWriter.compress`/`emit` is the only place that knows the payload format;

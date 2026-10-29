@@ -233,10 +233,6 @@ status 区分（`idle` = 状态这么说或者根本没有状态，`bad` = 它�
 
 ## 10. 扩展点
 
-- **kitty 键盘协议** —— `InputReader.handleCSI`/`handleKey`；修饰键的位解析
-  （`CSI 1; <mods> <final>`）已经在了，加一个 `CSI > 9 u` 握手和 `CSI <code>;mods u` 解码即可并排插入。
-- **窗口定向注入** —— `InputReader.postMouse`/`postKey`：当 `--window` 选中了某个进程时，把
-  `event.post(tap: .cghidEventTap)` 换成 `CGEventPostToPid`。
 - **剪贴板** —— 入口是 `InputReader`（OSC 52 入）和 `ScreenWriter`（OSC 52 出）；除了「不写文字」这条，
   渲染路径并不假设这条流只能是图像。
 - **换编码器** —— `ScreenWriter.compress`/`emit` 是唯一知道负载格式的地方；`--full-frame` 已经演示了在同一套

@@ -223,6 +223,8 @@ final class Desk {
     private var captureRestarting = false
     private var restartPending = false
     private var followTimer: DispatchSourceTimer?
+    /// The `--window` target: events go to this process instead of the window manager (issue #17).
+    private var windowTarget: (pid: pid_t, id: CGWindowID, name: String)?
 
     private let stateLock = NSLock()
     private var grid: TileGrid?
@@ -374,6 +376,9 @@ final class Desk {
             }
             filter = SCContentFilter(desktopIndependentWindow: window)
             sourceRect = window.frame
+            if let app = window.owningApplication, app.processID > 0 {
+                windowTarget = (app.processID, window.windowID, app.applicationName)
+            }
         } else {
             let mainID = CGMainDisplayID()
             let pointer = CGEvent(source: nil)?.location ?? .zero
@@ -431,6 +436,13 @@ final class Desk {
             let reader = InputReader(viewport: { [weak self] in self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero) },
                                      dryRun: options.dryRun) { [weak self] in self?.shutdown() }
             reader.trace = options.debug
+            if let target = windowTarget {
+                reader.targetPid = { [weak self] in self?.aliveWindowPid() }
+                if options.debug {
+                    Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
+                              + "window \(target.id); a closed window falls back to global injection\n")
+                }
+            }
             let active = reader.start()
             input = reader
             if options.debug {
@@ -786,6 +798,20 @@ final class Desk {
     }
 
     // MARK: frame handling
+
+    /// The pid events should be posted to, or nil once the target is gone.
+    ///
+    /// Two things can happen to a `--window` target: the app quits (pid gone) or the window closes
+    /// while the app keeps running (pid alive, window gone — clicks would land on another window of
+    /// that app or nowhere). Both downgrade to global injection, which the reader logs once.
+    /// The window query is one entry, human-paced: a drag is tens of events per second, not thousands.
+    private func aliveWindowPid() -> pid_t? {
+        guard let target = windowTarget else { return nil }
+        guard kill(target.pid, 0) == 0 else { return nil }
+        let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], target.id) as? [[String: Any]]
+        guard let info, !info.isEmpty else { return nil }
+        return target.pid
+    }
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
