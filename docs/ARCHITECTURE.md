@@ -67,6 +67,8 @@ Two consequences worth knowing:
   sets it to collect the stream in memory. `discardOutput` (bench) is unchanged: it still drops
   bytes before they would reach the dump.
 
+Why this is *not* written in Rust, and what would change that: [decision-rust](decision-rust.md).
+
 The extraction changed no bytes: `--selftest --pane 80x24 --cell 17x33` with `KRD_DUMP` produced
 identical dumps from the pre-refactor and post-refactor binaries (118 087 bytes,
 sha256 `f18475a2596aeeab522fb3037bed0ab4c90d99d325dff4346599abaf9123aa11`), and `otool -L` is
