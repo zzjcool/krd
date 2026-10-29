@@ -35,7 +35,7 @@ enum AXText {
     ]
 
     /// Lowest depth always shown, even when empty, so the reader sees the skeleton.
-    static let alwaysShowRoles: Set<String> = ["AXWindow", "AXSheet", "AXDialog", "AXWebArea", "AXMenuBar"]
+    static let alwaysShowRoles: Set<String> = ["AXWindow", "AXSheet", "AXDialog", "AXWebArea"]
 
     /// Replace anything a terminal would interpret, then clamp.
     ///

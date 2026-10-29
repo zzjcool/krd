@@ -441,6 +441,7 @@ enum AXCommand {
         var reader = AXWalker(
             interactiveOnly: options.interactiveOnly && !options.all,
             emitEverything: options.all,
+            includeMenus: options.menuBar,
             maxDepth: options.depth,
             maxShown: options.maxNodes,
             maxVisited: max(options.maxNodes * 8, 2000),
@@ -602,6 +603,9 @@ enum AXCommand {
 struct AXWalker {
     let interactiveOnly: Bool
     let emitEverything: Bool
+    /// Menu bars are walked only when asked: they are hundreds of nodes and, on a Finder
+    /// desktop, reachable through a back-reference from the window tree itself.
+    let includeMenus: Bool
     let maxDepth: Int
     let maxShown: Int
     let maxVisited: Int
@@ -612,6 +616,10 @@ struct AXWalker {
     var nodes: [AXNode] = []
     var visited = 0
     var truncated = false
+    /// The tree is not a tree: Finder's desktop window contains `AXApplication` children that
+    /// point back at the app, whose children are the very window we started from. Measured on
+    /// this machine -- without this set the walk loops and burns its whole budget on a loop.
+    private var seen = Set<CFHashCode>()
 
     private static let attributeNames: [String] = [
         kAXRoleAttribute as String, kAXTitleAttribute as String, kAXValueAttribute as String,
@@ -627,6 +635,7 @@ struct AXWalker {
                 return
             }
             let (element, depth) = queue.removeFirst()
+            guard seen.insert(CFHash(element)).inserted else { continue }
             visited += 1
             let values = AXCommand.multi(element, AXWalker.attributeNames)
             let role = (values[0] as? String) ?? ""
@@ -639,12 +648,18 @@ struct AXWalker {
             let frame = origin.flatMap { point in size.map { CGRect(origin: point, size: $0) } }
 
             let cleanName = AXText.sanitize(name)
+            let actions = AXCommand.actionNames(element).map(AXText.shortAction)
             // The first element of a walk is the thing the caller asked about (a window, a menu
             // bar). It earns a line even when its role is not in any list, otherwise a filter
             // can make a whole window look empty.
             let isRoot = element == root
-            let shouldEmit = isRoot || emitEverything
-                || AXText.isEmittable(role: role, name: cleanName, interactiveOnly: interactiveOnly)
+            let isMenu = role == "AXMenuBar" || role == "AXMenu"
+            // "Actionable" is checked by capability, not only by role name: Finder's desktop
+            // icons are AXImage nodes that answer to open/showmenu, and a role table would
+            // hide exactly the things the user wants to click.
+            let shouldEmit = (isRoot || emitEverything || !actions.isEmpty
+                || AXText.isEmittable(role: role, name: cleanName, interactiveOnly: interactiveOnly))
+                && (!isMenu || includeMenus || isRoot)
             if shouldEmit {
                 var detail = ""
                 if !valueText.isEmpty {
@@ -659,9 +674,9 @@ struct AXWalker {
                     name: cleanName,
                     detail: detail,
                     frame: frame,
-                    actions: AXCommand.actionNames(element).map(AXText.shortAction)))
+                    actions: actions))
             }
-            if depth >= maxDepth { continue }
+            if depth >= maxDepth || (isMenu && !includeMenus) { continue }
             for child in (AXCommand.value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
                 queue.append((child, depth + 1))
             }
