@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Terminal geometry and the pixel/cell/point conversions everything else depends on.
 struct TermGeometry {
@@ -86,6 +87,25 @@ struct Viewport {
 
     func contains(pixel px: Int, _ py: Int) -> Bool {
         px >= 0 && py >= 0 && px <= pixelWidth && py <= pixelHeight
+    }
+
+    /// The part of `full` a `scale`-times zoom shows, centred on `focus`.
+    ///
+    /// Total by construction, because every input here comes from a display or from a pointer
+    /// that may be on another monitor: a non-finite scale or focus falls back to the whole
+    /// rect, a scale below 1 means "no zoom", and the origin is clamped so the crop never
+    /// leaves `full`. A crop smaller than one point is widened to one point -- ScreenCaptureKit
+    /// rejects a zero-sized sourceRect and a 1-point crop still fills the pane.
+    static func crop(full: CGRect, scale: Double, focus: CGPoint) -> CGRect {
+        guard full.width > 0, full.height > 0 else { return full }
+        let factor = (scale.isFinite && scale > 1) ? scale : 1
+        let width = min(max(full.width / factor, 1), full.width)
+        let height = min(max(full.height / factor, 1), full.height)
+        let fx = focus.x.isFinite ? focus.x : full.midX
+        let fy = focus.y.isFinite ? focus.y : full.midY
+        let x = min(max(fx - width / 2, full.minX), full.maxX - width)
+        let y = min(max(fy - height / 2, full.minY), full.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 }
 

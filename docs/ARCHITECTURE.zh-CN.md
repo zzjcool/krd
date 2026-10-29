@@ -59,11 +59,12 @@ Desk.run():
   SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
   if --list:                              → 打印显示器/窗口后 exit(0)
   geometry = TermGeometry.query() ?? TermGeometry.read()
-  filter + sourceRect                     → 一个窗口，或一块显示器
-  applyLayout(geometry)                   → TileGrid + Viewport，previousFrame = []
+  filter + fullRect                       → 一个窗口，或一块显示器
+  configureSource(rect)                   → 缩放焦点：--zoom-at，否则指针，否则中心
+  applyLayout(geometry)                   → Viewport.crop(full, zoom, focus) → TileGrid + Viewport，previousFrame = []
   writer.beginSession()                   → 自愈、备用屏、归位、隐藏光标
   installSignalCleanup(); installResizeHandler(); if --debug startStats()
-  capturer.start(filter:width:height:fps:)  （width/height 来自布局）
+  capturer.start(filter:sourceRect:width:height:fps:)  （width/height 来自布局，sourceRect = 裁剪区）
   if !--no-input: InputReader.start()     → raw tty、?1003h ?1002h ?1006h ?1016h
   while true { sleep 1 s }
 ```
@@ -128,6 +129,35 @@ y0 = round(ty*tileRows * cellH);  y1 = round((ty*tileRows + cy) * cellH)
 四舍五入只发生在矩形边界上，所以瓦片正好铺满画面，既不留缝也不重叠；`cols`/`rows` 永远是整数格，
 因此任何 placement 都不需要亚格偏移，终端也不需要重采样。
 
+### 缩放：少看一点，但按原密度看
+
+把整个桌面塞进小 pane 是一个**选择**，不是定律：`--zoom <f>` 只显示源区域的 `1/f`，并把 pane 映射到
+这块裁剪区。60x24 的 pane 在 `--zoom 2` 下是 1.35 px/pt，而不是 0.67（1512x982 pt 屏幕、1020x792 px
+pane 的实测值，见 `--debug` 那行）。
+
+```
+fullRect   = 显示器 bounds，或 --window 的窗口 frame
+focus      = --zoom-at x,y  |  指针（若在 fullRect 内）  |  中心
+sourceRect = Viewport.crop(full: fullRect, scale: zoom, focus: focus)      // 始终 clamp 在 fullRect 内
+pixelW/H   = pane 的像素数，不变          // 变小的是**源**，不是输出
+```
+
+三个值得知道的后果：
+
+1. **裁剪发生在采集端**（`SCStreamConfiguration.sourceRect`，macOS 14+），所以放大后每帧拷贝的像素
+   比「整屏塞进 pane」更少，没有任何 CPU 放大。
+2. **交互只会更准，而且输入代码一行没改。** `Viewport.point(forCell:)` / `point(forPixel:)` 本来就按
+   `sourceRect` 归一化，裁剪区一变，点击就自动落在正确位置：`--zoom 2` 下一个格子覆盖的桌面点少一半。
+3. **输出尺寸仍是 pane 尺寸。** 「放大后采集尺寸减半」说的是以 pt 计的源矩形；`pixelW`/`pixelH` 是终端
+   能显示的像素数，不会跟着变。Retina 上超过约 2.7x 后，pane 的像素比裁剪区的点还多，画面会被轻微放大
+   —— 真正的 1:1 密度在 `屏幕像素 / pane 像素` 处到达，不在无穷远。
+
+`--zoom-follow` 在指针进入画面外圈 15% 时平移裁剪区，而且只平移到刚好把指针放回那条边上（平移，不是追着
+跑）。平移会重启采集流：裁剪区是采集端设置，重启会清空 `previousFrame`（一次全屏重绘）并付出一次
+`capturer.stop()`/`start()` 的往返。这就是「不每帧付全屏代价」的代价；`KRD_ZOOM_GLOBAL_RECT=1` 的存在
+是因为副屏上的 display filter 可能想要全局坐标而不是相对 filter 的坐标。
+
+
 所有实测数据用的那套配置：
 
 ```
@@ -180,6 +210,9 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `--debug` | `Log.configure` + `startStats()` + `reader.trace` + 几何/辅助功能那几行日志 |
 | `--log <path>` | 只有 `Log.configure`（没有统计，没有输入轨迹） |
 | `--dry-run` | `InputReader(dryRun:)`：解析并记日志，绝不调用 `CGEvent.post` |
+| `--zoom <f>` | `applyLayout` → `Viewport.crop`；`Capturer.start(sourceRect:)` 在采集端裁剪 |
+| `--zoom-at <x,y>` | `configureSource`：裁剪区的中心，全局屏幕点 |
+| `--zoom-follow` | `followPointerIfNeeded`：指针进入 15% 外圈时平移裁剪区，然后重启采集流 |
 | `--selftest` | `runSelfTest(layout:)`：合成帧（按当前 `--format`）走真正的 `handleFrame`/`emit` |
 | `KRD_DUMP` | `ScreenWriter.flush` 把每次 flush 的缓冲同时写一份到文件 |
 | `KRD_Q` | 每条转义里的 `q=` 字段（默认 `2` = 静默） |

@@ -45,6 +45,9 @@ curl -fsSL … | sh -s -- --from-source                # 直接从源码编译
 krd --fps 20                 # 镜像指针所在的那块屏
 krd --list                   # 列出显示器与窗口，背板条目会标出来
 krd --window Safari          # 只镜像一个窗口（背板窗口会被拒绝，而不是给黑屏）
+krd --zoom 2                 # 看一半的屏幕、按两倍密度显示（在采集端裁剪）
+krd --zoom 3 --zoom-at 200,300   # ……以某个全局屏幕点为焦点
+krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
 krd --no-cursor              # 画面里不画指针，鼠标移动也就不会再弄脏瓦片
@@ -113,7 +116,7 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 | [TESTING](docs/TESTING.zh-CN.md) | 自检、瓦片定位标定、怎么验一个新终端 |
 | [ENCODING](docs/ENCODING.zh-CN.md) | 字节和毫秒花在哪，以及背后的基准测试 |
 | [BENCHMARK](docs/BENCHMARK.md) | 基准分层、预算阈值，以及这里「快」到底指什么 |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 39 个现象及其根因 |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 41 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 
 ## 参与

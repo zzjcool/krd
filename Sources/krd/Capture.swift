@@ -32,8 +32,14 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Called with (pixels, width, height) for every visually changed frame.
     var onFrame: (([UInt8], Int, Int) -> Void)?
 
-    func start(filter: SCContentFilter, width: Int, height: Int, fps: Int) async throws {
+    /// `sourceRect` crops on the server (macOS 14+), so a zoomed capture copies *fewer* pixels per
+    /// frame instead of being upscaled on the CPU. It is relative to the filter's content origin
+    /// (see `Desk.cropForFilter`).
+    func start(filter: SCContentFilter, sourceRect: CGRect?, width: Int, height: Int, fps: Int) async throws {
         let config = SCStreamConfiguration()
+        if let sourceRect, sourceRect.width >= 1, sourceRect.height >= 1 {
+            config.sourceRect = sourceRect
+        }
         config.width = width
         config.height = height
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1)))

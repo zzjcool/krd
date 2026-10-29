@@ -338,3 +338,19 @@ macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、
 **对策。** 别把「树很小」当成「应用很简单」。浏览器走 CDP（`--remote-debugging-port`）或用
 `--force-renderer-accessibility` 启动；Electron 应用同理。详见
 [research-ax-text-channel.md](research-ax-text-channel.md) §5.3。
+
+### 40. `--zoom 2` 还是显示整个桌面
+
+**根因。** 裁剪靠 `SCStreamConfiguration.sourceRect`，它是相对于 filter 内容的坐标——display filter 是
+显示器，`--window` 是窗口 frame。**副屏**上某些版本要的是全局坐标，于是按显示器原点算出来的裁剪会落到
+别处（很老的 macOS 上也可能被直接忽略）。
+**对策。** 先看 `--debug` 那行：`source <w>x<h> pt (zoom <f> of <W>x<H> centred <x>,<y>)`。如果裁剪矩形
+是对的但画面不对，试 `KRD_ZOOM_GLOBAL_RECT=1`；如果裁剪矩形就错了，那多半是 `--zoom-at` 给了别的坐标系
+的点（它要的是全局屏幕点，和 `CGEvent.location` 同一套）。
+
+### 41. `--zoom-follow` 拖动时卡顿
+
+**根因。** 设计如此：平移改变的是裁剪区，而裁剪区是**采集端**设置，所以必须重启采集流
+（`capturer.stop()` + `start()`），下一帧是全屏重绘。
+**对策。** 没有要修的东西——需要平滑就固定用 `--zoom-at`，或者少放大一档，让指针整段拖动都待在可视区内。
+重启失败时日志会写 `krd: could not restart capture after a zoom pan: …`，画面保持旧裁剪。
