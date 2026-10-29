@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish, e.g. v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: universal binary and GitHub Release
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Tag push -> that tag; manual dispatch -> the tag being republished.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag and version
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${INPUT_TAG:-}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *)
+              echo "::error::tag must look like vX.Y.Z (got '$tag')"
+              exit 1
+              ;;
+          esac
+          version="${tag#v}"
+          if [ "$(cat VERSION)" != "$version" ]; then
+            echo "::error::VERSION is '$(cat VERSION)' but the tag says '$version'; run scripts/release.sh instead of tagging by hand"
+            exit 1
+          fi
+          if ! grep -q "let krdVersion = \"$version\"" Sources/krd/Version.swift; then
+            echo "::error::Sources/krd/Version.swift does not carry $version; run scripts/release.sh"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Build universal binary (arm64 + x86_64)
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Package
+        id: package
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${TAG:?tag output is empty}"
+          name="krd-${tag}-macos-universal"
+
+          # SwiftPM moved the multi-arch products directory around; ask it and
+          # keep the known locations as fallbacks, then insist on a fat binary.
+          bin=""
+          for candidate in \
+            "$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/krd" \
+            ".build/apple/Products/Release/krd" \
+            ".build/out/Products/Release/krd" \
+            ".build/release/krd"; do
+            [ -x "$candidate" ] || continue
+            archs=$(lipo -archs "$candidate")
+            if printf '%s' "$archs" | grep -q arm64 && printf '%s' "$archs" | grep -q x86_64; then
+              bin="$candidate"
+              break
+            fi
+          done
+          if [ -z "$bin" ]; then
+            echo "::error::no universal (arm64 + x86_64) krd binary was produced"
+            exit 1
+          fi
+          echo "universal binary: $bin ($(lipo -archs "$bin"))"
+
+          mkdir -p "dist/${name}"
+          cp "$bin" "dist/${name}/krd"
+          cp README.md LICENSE "dist/${name}/"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+          shasum -a 256 "dist/${name}.tar.gz" | sed 's|  dist/|  |' > "dist/${name}.tar.gz.sha256"
+          cat "dist/${name}.tar.gz.sha256"
+
+          echo "tarball=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: krd ${{ steps.meta.outputs.tag }}
+          files: |
+            ${{ steps.package.outputs.tarball }}
+            ${{ steps.package.outputs.checksum }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.version, '-') }}

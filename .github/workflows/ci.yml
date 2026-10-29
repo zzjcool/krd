@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build and test (macos-14)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Run tests
+        run: |
+          if [ -d Tests ]; then
+            swift test
+          else
+            echo "Tests/ does not exist yet -- skipping swift test"
+          fi
+
+      - name: Build universal binary (arm64 + x86_64)
+        run: swift build -c release --arch arm64 --arch x86_64

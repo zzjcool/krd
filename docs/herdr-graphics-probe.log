@@ -1,0 +1,16 @@
+WINSIZE rows=54 cols=141 xpixel=1128 ypixel=1080  cell=8.0x20.0px
+00 support query a=q               Gi=1;OK\
+01 transmit a=t PNG                Gi=50;OK\
+02 place c,r                       Gi=50;OK\
+03 place + x,y (cells)             Gi=50;OK\
+04 place + X,Y (pixels)            Gi=50;OK\
+05 place + z index                 Gi=50;OK\
+06 anim frame a=f z=200            Gi=50,r=2;OK\
+07 o=z zlib png                    Gi=51;OK\
+08 t=f file medium                 (no reply)
+09 t=t tempfile                    (no reply)
+10 f=24 raw rgb                    Gi=54;OK\
+11 chunk > 4096 (invalid)          (no reply)
+12 big chunk 4096 ok?              (no reply)
+13 delete image                    (no reply)
+14 bad base64                      (no reply)
