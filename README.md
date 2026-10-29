@@ -49,9 +49,11 @@ krd --list                   # displays and windows
 krd --window Safari          # mirror a single window
 krd --display 1 --fps 30
 krd --no-input               # watch only
+krd --no-cursor              # no pointer in the picture, and a moving mouse stops dirtying tiles
 krd --debug                  # stats to a log file, never to the screen
 krd --format rgba            # fall back to f=32 if the terminal rejects f=24
 krd --bench                  # time the encoder on synthetic frames, no terminal needed
+make bench                   # every layer + budget verdicts -> bench/report.md
 ```
 
 Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a real machine.
@@ -82,6 +84,7 @@ Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/AR
 | [PROTOCOL](docs/PROTOCOL.md) | every escape sequence krd sends, and why |
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
+| [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 36 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 

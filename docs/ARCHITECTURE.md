@@ -2,7 +2,7 @@
 
 English | [简体中文](ARCHITECTURE.zh-CN.md)
 
-krd is a single Swift executable, ~1.6 kLOC in seven files, no dependencies outside the system
+krd is a single Swift executable, ~2.9 kLOC in ten files, no dependencies outside the system
 frameworks (`ScreenCaptureKit`, `CoreGraphics`, `AppKit`, `Accelerate`, `libz`). This document
 describes how the pieces fit and which invariants must not be broken.
 
@@ -28,6 +28,8 @@ Sources/krd/
   Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP
   Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy (the encoding policy)
   Input.swift     InputReader: raw tty, SGR/SGR-Pixels mouse, keys → CGEvent
+  Bench.swift     synthetic corpus, staged timings, JSON, --bench-wire, --stats-json
+  Replay.swift    --record / --replay of real frames (raw + manifest.jsonl)
   Log.swift       File logger (never the tty)
 ```
 
@@ -193,6 +195,11 @@ which is why §7.6 exists.
 | `--log <path>` | `Log.configure` only (no stats, no input trace) |
 | `--dry-run` | `InputReader(dryRun:)`: parse and log, never call `CGEvent.post` |
 | `--selftest` | `runSelfTest(layout:)`: synthetic frames (in the active `--format`) through the real `handleFrame`/`emit` |
+| `--bench` | `Bench.runStages`: dedupe → dirty → extract → zlib → base64 → escapes, staged timings, `--json` |
+| `--bench-wire` | `Bench.runWire`: one case at `--fps` through the real `handleFrame`, per-frame JSON on stderr |
+| `--record` | `FrameRecorder` in `handleFrame`: writes raw frames + a manifest header (layout included) |
+| `--replay` | `runReplay`: recorded frames through the real pipeline, at the recorded pace |
+| `--stats-json` | `StatsJSONWriter` in `startStats`: one NDJSON line per second |
 | `KRD_DUMP` | `ScreenWriter.flush` tees every flushed buffer to a file |
 | `KRD_Q` | the `q=` field of every escape (default `2` = silent) |
 | `KRD_FORMAT` | `rgb` (default, `f=24`) or `rgba` (`f=32`) |
@@ -202,13 +209,15 @@ which is why §7.6 exists.
 The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
 
 ```
-stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms>]  <WxH> px <CxR> cells  idle=<n> bad=<n>
+stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  cap=<d>/<s>/<c> idle=<n> bad=<n> pipe=<ms>
 ```
 
 `tiles/s` is the delta of `framesEmitted` (tiles, not frames), `KB` is the last frame's compressed
 payload, `MB/s` is bytes written in the last second, `cap` is ScreenCaptureKit's
 delivered/skipped/callback counts, `idle`/`bad` are frames without a pixel buffer split by the
-status attachment.
+status attachment, `write max`/`over5` are the worst `write(2)` block of the second and how many
+frames exceeded 5 ms, and `pipe` is capture callback → last byte out. `--stats-json <path>` writes
+the same numbers as one NDJSON object per second (`bench/soak-report.py` reads them).
 
 ## 10. Extension points
 

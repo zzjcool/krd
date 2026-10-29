@@ -235,6 +235,25 @@ grant no longer matches.
 default (or `KRD_SIGN_IDENTITY="Apple Development: …" ./install.sh`). Keep the identifier `com.kkrt.macdesk`
 frozen — changing it creates a new TCC record and requires a new approval.
 
+### 26b. After an update the remote binary dies instantly: `Killed: 9`, exit 137, no output
+
+**Cause.** The new binary was written **in place** over the old one (`cat > ~/bin/krd`, `cp krd
+~/bin/krd`, or any script that does the same). Truncating a file reuses its inode, and AMFI keeps
+the previous binary's dynamic code-signing validation result cached per vnode: the new bytes are
+valid (`codesign -v` passes, and the same bytes run fine from `/tmp`) but the first exec is killed
+by the kernel, silently.
+**Fix.** Replace, never truncate: `rm ~/bin/krd` and copy again, or write `~/bin/krd.new` and
+`mv` it into place. `deploy.sh` / `install.sh` do this since 0.1.2 — if you copied by hand, that is
+the whole bug. Repro that tells the two apart without guessing:
+
+```bash
+cp ~/bin/krd /tmp/krd2 && /tmp/krd2 --version   # works  -> the file is fine
+~/bin/krd --version                            # killed -> the inode is the problem
+log show --last 1m --style compact --predicate 'senderImagePath CONTAINS "AMFI"' | grep krd
+#   AMFI: '/private/tmp/krd2' is adhoc signed.
+#   AMFI: code signature validation failed.
+```
+
 ### 27. Clicks and keys are ignored, capture works
 
 **Cause.** Accessibility (event injection) was never granted. `AXIsProcessTrusted()` is logged with

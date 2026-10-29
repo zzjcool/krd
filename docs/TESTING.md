@@ -122,16 +122,30 @@ KRD_Q=0 krd --selftest --no-input      # watch replies in the pane, nothing is t
 
 ## 5. `--bench` — the encoder, without a terminal
 
-`krd --bench` runs the real tile pipeline (extract → zlib → base64 → escapes) on synthetic
-frames and prints bytes and milliseconds per case. It exits by itself and needs no tty, so it is
-the way to compare two builds:
+`krd --bench` runs the real tile pipeline (dedupe → dirty → extract → zlib → base64 → escapes) on
+synthetic frames and prints bytes and milliseconds per case, with p50/p99 over `--rounds` frames. It
+exits by itself and needs no tty, so it is the way to compare two builds:
 
 ```sh
-.build/release/krd --bench --pane 137x44 --cell 17x33 --log /tmp/bench.log; cat /tmp/bench.log
+swift build -c release
+.build/release/krd --bench --pane 137x44 --cell 17x33 --source 1920x1200
 ```
 
-The case list and the pane size are fixed on purpose; `--tile` and `--format` change what is
-measured. Current numbers and the reasoning behind them: [ENCODING.md](ENCODING.md).
+`--source` is not optional decoration: without it `--bench` fits a portrait 1440×2560 source into
+the pane, so `--pane 137x44` measures a 48-column picture. Whatever the effective layout is, the
+harness prints it and `bench/check-docs.py` fails when `docs/ENCODING.md` quotes a different one.
+
+The whole suite (encoder + pty harness + budget verdicts + `bench/report.md`) is one command:
+
+```sh
+make bench            # or: make bench-quick
+```
+
+Related switches: `--json` (machine-readable on stdout, table on stderr), `--bench-wire <case>`
+(per-frame JSON on stderr, used by `bench/wire.py`), `--record <dir>` / `--replay <dir>` (real
+frames), `--stats-json <path>` (per-second NDJSON during a live run). Layers, budgets and what is
+deliberately *not* measured: [BENCHMARK.md](BENCHMARK.md). Current numbers and the reasoning behind
+them: [ENCODING.md](ENCODING.md).
 
 ## 6. `KRD_DUMP=<path>` — every byte, offline
 
@@ -194,7 +208,7 @@ picture) or the parser dropped it.
 [ARCHITECTURE §9](ARCHITECTURE.md#9-diagnostics-wiring)):
 
 ```
-stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 137x44 cells  idle=3 bad=0
+stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0 max=3 over5=0]  2329x1452 px 137x44 cells  cap=120/4/124 idle=3 bad=0 pipe=4.1
 ```
 
 Reading it: `tiles/s 0` and `dirty 0` for several seconds = nothing changed (or nothing arrives);

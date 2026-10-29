@@ -29,7 +29,13 @@ codesign --force --sign "$identity" --identifier com.kkrt.macdesk "$bin" >/dev/n
 echo "built: $(file -b "$bin" | cut -d, -f1-2)  ($(du -h "$bin" | cut -f1))"
 # `cat | ssh` instead of scp: scp/sftp is disabled on some servers, and this keeps the
 # signature intact (the file is copied byte for byte).
-cat "$bin" | ssh "$target" "cat > $remote && chmod +x $remote" 
+#
+# Write to a temp path and rename: a plain `cat > $remote` truncates the existing file *in
+# place*, reusing its inode, and AMFI still has the previous binary's dynamic-validation
+# result cached for that vnode -- the target then kills the new binary at exec with
+# `Killed: 9` (exit 137) and no message anywhere. Rename gives a fresh inode. See
+# docs/TROUBLESHOOTING.md §26b.
+cat "$bin" | ssh "$target" "cat > $remote.new && chmod +x $remote.new && mv -f $remote.new $remote"
 ssh "$target" "echo installed $remote \$(ls -l $remote | awk '{print \$5}') bytes; codesign -dv $remote 2>&1 | sed -n 's/^Identifier=/  identifier: /p'"
 cat <<EOF
 

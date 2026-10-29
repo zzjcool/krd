@@ -33,9 +33,35 @@ final class ScreenWriter {
 
     private(set) var framesEmitted = 0
     private(set) var lastFrameBytes = 0
+    /// Bytes that actually left the process for the last frame (escapes + base64 + headers).
+    /// Accumulated across every flush of the frame, so the `?2026h`/`?2026l` wrapper and a
+    /// nudge are counted too -- one flush in the middle of a frame is not the frame.
+    private(set) var lastWireBytes = 0
+    private var frameWireBytes = 0
     private(set) var totalBytes = 0
     private(set) var lastCompressMs = 0.0
     private(set) var lastWriteMs = 0.0
+
+    // Write-path distribution. `lastWriteMs` is one sample; a stutter is a p99, and the
+    // stats line used to average a number that spikes (docs/BENCHMARK.md, Q3).
+    private(set) var writeSamples = 0
+    private(set) var writeSumMs = 0.0
+    private(set) var writeMaxMs = 0.0
+    private(set) var writeOver5Ms = 0
+
+    func resetWriteStats() {
+        writeSamples = 0
+        writeSumMs = 0
+        writeMaxMs = 0
+        writeOver5Ms = 0
+    }
+
+    private func recordWrite(_ ms: Double) {
+        writeSamples += 1
+        writeSumMs += ms
+        if ms > writeMaxMs { writeMaxMs = ms }
+        if ms > 5 { writeOver5Ms += 1 }
+    }
 
     /// Per-tile zlib level, learned from the previous frame's compression ratio.
     private var levels = LevelPolicy(tiles: 0)
@@ -134,6 +160,7 @@ final class ScreenWriter {
         lastCompressMs = 0
         lastWriteMs = 0
         lastCompressedTiles = 0
+        frameWireBytes = 0
         if syncMode == .frame && !batchOpen {
             append("\u{1B}[?2026h")
             batchOpen = true
@@ -146,13 +173,16 @@ final class ScreenWriter {
             append("\u{1B}[?2026l")
             batchOpen = false
         }
-        let t0 = Date()
+        let t0 = benchNowMs()
         flush()
-        lastWriteMs = Date().timeIntervalSince(t0) * 1000
+        lastWriteMs = benchNowMs() - t0
+        recordWrite(lastWriteMs)
+        lastWireBytes = frameWireBytes
     }
 
     func beginBatch() {
         out.removeAll(keepingCapacity: true)
+        frameWireBytes = 0
         append("\u{1B}[?2026h")
         batchOpen = true
         lastFrameBytes = 0
@@ -162,9 +192,11 @@ final class ScreenWriter {
     func endBatch() {
         append("\u{1B}[?2026l")
         batchOpen = false
-        let t0 = Date()
+        let t0 = benchNowMs()
         flush()
-        lastWriteMs = Date().timeIntervalSince(t0) * 1000
+        lastWriteMs = benchNowMs() - t0
+        recordWrite(lastWriteMs)
+        lastWireBytes = frameWireBytes
     }
 
     // MARK: tiles
@@ -186,7 +218,7 @@ final class ScreenWriter {
 
     /// Turn an already compressed tile into escapes. Single-threaded: the order of the tiles
     /// (and therefore the cursor moves) has to stay deterministic.
-    func emit(_ tile: CompressedTile, sync: Bool) {
+    func emit(_ tile: CompressedTile, sync: Bool, timing: UnsafeMutablePointer<EmitTiming>? = nil) {
         let r = tile.rect
         let iid = 100 + tile.index
         let pid = 1000 + tile.index
@@ -197,8 +229,17 @@ final class ScreenWriter {
         framesEmitted += 1
         lastCompressedTiles += 1
 
+        // Two `now` calls per tile, and only when a benchmark asked for the split: the live
+        // path pays one nil check per tile, nothing else.
+        var mark = 0.0
+        if timing != nil { mark = benchNowMs() }
         let b64 = Data(tile.payload).base64EncodedString()
         let chars = Array(b64.utf8)
+        if let timing {
+            let now = benchNowMs()
+            timing.pointee.base64Ms += now - mark
+            mark = now
+        }
 
         if sync { append("\u{1B}[?2026h") }
         append("\u{1B}[\(r.row);\(r.col)H")
@@ -217,6 +258,7 @@ final class ScreenWriter {
         }
         append("\u{1B}_Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(r.cols),r=\(r.rows)\u{1B}\\")
         if sync { append("\u{1B}[?2026l") }
+        if let timing { timing.pointee.assembleMs += benchNowMs() - mark }
     }
 
     /// Should `emit` wrap this tile in its own synchronized block?
@@ -315,6 +357,7 @@ final class ScreenWriter {
 
     private func flush() {
         guard !out.isEmpty else { return }
+        frameWireBytes += out.count
         if discardOutput {
             out.removeAll(keepingCapacity: true)
             return

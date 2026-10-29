@@ -9,6 +9,8 @@ struct Options {
     var displayIndex: Int? = nil
     var windowQuery: String? = nil
     var noInput = false
+    /// Do not paint the pointer into the mirrored picture (see Capturer.showsCursor).
+    var noCursor = false
     var selftest = false
     var bench = false
     var logPath: String? = nil
@@ -25,6 +27,20 @@ struct Options {
     var cell: (w: Double, h: Double)? = nil
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
+
+    // benchmarks (docs/BENCHMARK.md)
+    /// Source aspect for --bench/--selftest: the display the tiles are fitted into.
+    var source: (w: Int, h: Int)? = nil
+    /// Machine-readable results on stdout instead of the human table.
+    var benchJSON = false
+    var benchWire: String? = nil
+    var benchSeconds = 5.0
+    var rounds = 30
+    var noSerial = false
+    var replay: String? = nil
+    var record: String? = nil
+    var recordFrames = 60
+    var statsJSON: String? = nil
 }
 
 func usage() -> String {
@@ -41,6 +57,8 @@ func usage() -> String {
       --log <path>        write diagnostics to a file instead of over the picture
       --full-frame        disable tiling, always resend the whole frame
       --no-input          view only, do not inject events
+      --no-cursor         do not draw the pointer into the picture (also stops a moving
+                          mouse from dirtying tiles every frame)
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
       --list              list displays and windows, then exit
@@ -49,7 +67,18 @@ func usage() -> String {
     test modes (no screen access, no terminal needed):
       --selftest          paint a synthetic pattern through the tile pipeline
       --bench             time the encoder on synthetic frames, then exit
+      --bench-wire <case> emit one case at --fps to stdout, per-frame JSON on stderr
+                          (bench/wire.py puts a rate-limited drain behind it)
+      --json              with --bench: results on stdout, table on stderr
       --pane <c>x<r>      force the pane size in cells (bench/selftest only)
+      --source <w>x<h>    source aspect for --bench/--selftest (default 1440x2560)
+      --rounds <n>        measured rounds per bench case (default 30)
+      --seconds <n>       duration of --bench-wire (default 5)
+      --no-serial         skip the single-threaded reference run
+      --record <dir>      record captured frames for --replay
+      --record-frames <n> stop recording after n frames (default 60)
+      --replay <dir>      feed recorded frames through the real pipeline
+      --stats-json <path> per-second stats as NDJSON (implies the --debug stats)
 
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
     """
@@ -91,8 +120,35 @@ func parseArguments() -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
+        case "--no-cursor": options.noCursor = true
         case "--selftest": options.selftest = true
         case "--bench": options.bench = true
+        case "--json": options.benchJSON = true
+        case "--bench-wire":
+            options.benchWire = args[safe: i + 1]
+            i += 1
+        case "--source":
+            if let spec = args[safe: i + 1], let size = parseSize(spec) { options.source = (size.0, size.1) }
+            i += 1
+        case "--rounds":
+            if let n = Int(args[safe: i + 1] ?? ""), n > 0 { options.rounds = n }
+            i += 1
+        case "--seconds":
+            if let n = Double(args[safe: i + 1] ?? ""), n > 0 { options.benchSeconds = n }
+            i += 1
+        case "--no-serial": options.noSerial = true
+        case "--record":
+            options.record = args[safe: i + 1]
+            i += 1
+        case "--record-frames":
+            if let n = Int(args[safe: i + 1] ?? ""), n > 0 { options.recordFrames = n }
+            i += 1
+        case "--replay":
+            options.replay = args[safe: i + 1]
+            i += 1
+        case "--stats-json":
+            options.statsJSON = args[safe: i + 1]
+            i += 1
         case "--log":
             options.logPath = args[safe: i + 1]
             i += 1
@@ -114,6 +170,13 @@ extension Array {
     }
 }
 
+/// "137x44" -> (137, 44). Used by --pane, --source and the replay header.
+func parseSize(_ spec: String) -> (Int, Int)? {
+    let parts = spec.split(separator: "x")
+    guard parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w > 0, h > 0 else { return nil }
+    return (w, h)
+}
+
 final class Desk {
     private let options: Options
     private let writer = ScreenWriter()
@@ -133,29 +196,61 @@ final class Desk {
 
     private var resizeSource: DispatchSourceSignal?
     private var statsTimer: DispatchSourceTimer?
+    /// Wall time from capture callback to last byte out, per frame.
+    private(set) var lastPipeMs = 0.0
+    private var recorder: FrameRecorder?
 
     init(options: Options) {
         self.options = options
         if let format = options.pixelFormat { writer.format = format }
         capturer.format = writer.format
+        capturer.showsCursor = !options.noCursor
         writer.resize(tiles: 0)
     }
 
     func run() async throws {
         // Diagnostics never go over the picture: they land in a file instead.
-        Log.configure(explicitPath: options.logPath, wantsLogging: options.debug || options.logPath != nil)
+        // `--stats-json` implies stats, and stats must never land on the tty: without an
+        // explicit destination they go to a temp file like `--debug` does.
+        Log.configure(explicitPath: options.logPath,
+                      wantsLogging: options.debug || options.logPath != nil || options.statsJSON != nil)
         if let where_ = Log.path {
             FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
         }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
+        if let dir = options.replay, options.bench {
+            try await runReplay(dir: dir, discard: true)
+            return
+        }
         if options.bench {
             if let cell = options.cell { TermGeometry.fallbackCell = cell }
             var geometry = TermGeometry.read()
             if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
-            self.sourceRect = CGRect(x: 0, y: 0, width: 1440, height: 2560)
+            let source = options.source ?? (w: 1440, h: 2560)
+            self.sourceRect = CGRect(x: 0, y: 0, width: source.w, height: source.h)
             applyLayout(geometry: geometry)
             guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
-            runBench(layout: layout)
+            Bench.runStages(layout: layout, writer: writer, rounds: options.rounds,
+                            serial: !options.noSerial, source: sourceRect.size, json: options.benchJSON)
+        }
+
+        if let caseName = options.benchWire {
+            if let cell = options.cell { TermGeometry.fallbackCell = cell }
+            var geometry = TermGeometry.read()
+            if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
+            let source = options.source ?? (w: 1440, h: 2560)
+            self.sourceRect = CGRect(x: 0, y: 0, width: source.w, height: source.h)
+            applyLayout(geometry: geometry)
+            guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
+            writer.beginSession()
+            Bench.runWire(layout: layout, writer: writer, caseName: caseName, fps: options.fps,
+                          seconds: options.benchSeconds, source: sourceRect.size) { pixels, w, h in
+                self.handleFrame(pixels: pixels, width: w, height: h)
+            }
+        }
+
+        if let dir = options.replay {
+            try await runReplay(dir: dir, discard: false)
             return
         }
 
@@ -242,10 +337,22 @@ final class Desk {
             self.handleFrame(pixels: pixels, width: width, height: height)
         }
 
+        if let dir = options.record {
+            recorder = FrameRecorder(dir: dir, limit: options.recordFrames,
+                                     header: ReplayHeader(pane: (layout.paneCols, layout.paneRows),
+                                                          cell: (layout.cellW, layout.cellH),
+                                                          tile: (layout.tileCols, layout.tileRows),
+                                                          source: (Int(sourceRect.width), Int(sourceRect.height)),
+                                                          format: writer.format == .rgb ? "rgb" : "rgba"))
+            if recorder == nil {
+                Log.write("record: could not write to \(dir)\n")
+            }
+        }
+
         writer.beginSession()
         installSignalCleanup()
         installResizeHandler()
-        if options.debug { startStats() }
+        if options.debug || options.statsJSON != nil { startStats() }
 
         try await capturer.start(filter: filter, width: layout.pixelW, height: layout.pixelH, fps: options.fps)
 
@@ -278,125 +385,89 @@ final class Desk {
         }
     }
 
-    // MARK: bench
+    // MARK: replay
 
-    /// Time the encoder on synthetic content, with no terminal attached: this is what
-    /// `docs/ENCODING.md` quotes, and the only way to compare two builds on equal terms.
-    private func runBench(layout: TileGrid) {
-        writer.discardOutput = true
-        let w = layout.pixelW, h = layout.pixelH, bpp = layout.bpp
-        func makeFrame(_ paint: (Int, Int) -> (UInt8, UInt8, UInt8)) -> [UInt8] {
-            var px = [UInt8](repeating: 0, count: w * h * bpp)
-            px.withUnsafeMutableBufferPointer { buf in
-                for y in 0..<h {
-                    for x in 0..<w {
-                        let c = paint(x, y)
-                        let o = (y * w + x) * bpp
-                        buf[o] = c.0; buf[o + 1] = c.1; buf[o + 2] = c.2
-                        if bpp == 4 { buf[o + 3] = 255 }
-                    }
-                }
-            }
-            return px
+    /// Feed recorded frames through the real pipeline. With `--bench` the output is discarded
+    /// and only the summary is printed; without it the frames are painted into the terminal at
+    /// the recorded pace, which is how a "it stutters when I scroll" report gets reproduced.
+    private func runReplay(dir: String, discard: Bool) async throws {
+        guard let replay = FrameReplay.open(dir), let header = replay.header else {
+            throw DeskError.message("no usable manifest.jsonl in \(dir) (record one with --record <dir>)")
         }
+        TermGeometry.fallbackCell = header.cell
+        var geometry = TermGeometry.read()
+        geometry.cols = header.pane.cols
+        geometry.rows = header.pane.rows
+        geometry.pixelWidth = 0                     // make cellSize return the header's cell
+        geometry.pixelHeight = 0
+        self.sourceRect = CGRect(x: 0, y: 0, width: header.source.w, height: header.source.h)
+        applyLayout(geometry: geometry)
+        guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
+        guard layout.pixelW == replay.width, layout.pixelH == replay.height else {
+            throw DeskError.message("replay is \(replay.width)x\(replay.height) px but the header layout "
+                                    + "computes \(layout.pixelW)x\(layout.pixelH) (tile \(header.tile.cols)x\(header.tile.rows))")
+        }
+        // A bpp mismatch would read past the end of every frame buffer (`extract` uses the
+        // grid's bpp), so it has to be refused before the first frame, not diagnosed after a
+        // crash deep inside memcpy.
+        guard layout.bpp == replay.bpp else {
+            throw DeskError.message("replay frames are \(replay.bpp) bpp but this build renders \(layout.bpp) bpp "
+                                    + "(the recording was made with --format \(header.format)); replay with "
+                                    + (replay.bpp == 4 ? "--format rgba" : "--format rgb"))
+        }
+        writer.resize(tiles: layout.count)
+        writer.discardOutput = discard
+        writer.beginSession()
 
-        // Flat UI with glyph-like strokes: what a text editor / browser looks like to zlib.
-        func textPixel(_ x: Int, _ y: Int) -> (UInt8, UInt8, UInt8) {
-            let glyph = (x % 23 < 3 || y % 41 < 2) ? UInt8(20) : UInt8(245)
-            return (glyph, glyph, y % 97 < 2 ? 0 : glyph)
+        var payload: [Double] = [], zlib: [Double] = [], writes: [Double] = []
+        var wire: [Double] = [], wall: [Double] = []
+        for i in 0..<replay.entries.count {
+            guard let pixels = replay.frame(i) else {
+                Log.write("replay: frame \(i) is missing or truncated, stopping\n")
+                break
+            }
+            let t0 = benchNowMs()
+            handleFrame(pixels: pixels, width: replay.width, height: replay.height)
+            wall.append(benchNowMs() - t0)
+            payload.append(Double(writer.lastFrameBytes))
+            wire.append(Double(writer.lastWireBytes))
+            zlib.append(writer.lastCompressMs)
+            writes.append(writer.lastWriteMs)
+            if !discard {
+                let delay = replay.delayMs(from: i)
+                if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000)) }
+            }
         }
-        // Real sensor noise: no LZ77 matches at all, so only the 25 % fewer bytes of RGB help.
-        func photoPixel(_ x: Int, _ y: Int) -> (UInt8, UInt8, UInt8) {
-            var h = UInt32(truncatingIfNeeded: x &* 73856093) ^ UInt32(truncatingIfNeeded: y &* 19349663)
-            h ^= h >> 13; h = h &* 1274126177; h ^= h >> 16
-            return (UInt8(truncatingIfNeeded: h), UInt8(truncatingIfNeeded: h >> 8), UInt8(truncatingIfNeeded: h >> 16))
-        }
+        writer.endSession()
 
-        struct Case { let name: String; let pixels: (Int, Int) -> (UInt8, UInt8, UInt8); let dirty: (TileGrid) -> [Int] }
-        let rectDirty: (Int, Int, Int, Int) -> ((TileGrid) -> [Int]) = { x, y, rw, rh in
-            { grid in
-                var out: [Int] = []
-                for ty in 0..<grid.tilesY {
-                    for tx in 0..<grid.tilesX {
-                        let r = grid.rect(tx, ty)
-                        if r.x < x + rw, r.x + r.w > x, r.y < y + rh, r.y + r.h > y {
-                            out.append(ty * grid.tilesX + tx)
-                        }
-                    }
-                }
-                return out
-            }
+        let bytes = payload.reduce(0, +)
+        let wireBytes = wire.reduce(0, +)
+        let wallSeconds = wall.reduce(0, +) / 1000
+        var text = "krd: replay \(dir) — \(replay.entries.count) frames, \(replay.width)x\(replay.height) px, "
+            + "\(layout.tilesX)x\(layout.tilesY) tiles\n"
+        // `%s` needs a C string; a Swift `String` passed to it is an NSString and
+        // strlen() on an object header is a segfault. Bench.pad does the same job safely.
+        text += "  " + Bench.pad("", 10, left: true) + " "
+            + Bench.pad("p50", 10) + " " + Bench.pad("p95", 10) + " "
+            + Bench.pad("p99", 10) + " " + Bench.pad("max", 10) + "\n"
+        func row(_ name: String, _ p: Percentiles) {
+            text += String(format: "  %-10s %10.2f %10.2f %10.2f %10.2f\n",
+                           (name as NSString).utf8String!, p.p50, p.p95, p.p99, p.max)
         }
-        let cases = [
-            Case(name: "one character", pixels: textPixel, dirty: rectDirty(w / 2, h / 2, 24, 48)),
-            Case(name: "one text line", pixels: textPixel, dirty: rectDirty(0, h / 3, w, 48)),
-            Case(name: "text repaint", pixels: textPixel, dirty: { Array(0..<$0.count) }),
-            Case(name: "photo repaint", pixels: photoPixel, dirty: { Array(0..<$0.count) }),
-            Case(name: "600x400 drag", pixels: photoPixel, dirty: rectDirty(w / 4, h / 4, 600, 400)),
-        ]
-
-        let formatLabel = writer.format == .rgb ? "rgb (f=24)" : "rgba (f=32)"
-        Log.write("krd: bench \(w)x\(h) px, \(layout.tilesX)x\(layout.tilesY) tiles of "
-                  + "\(layout.tileCols)x\(layout.tileRows) cells, \(formatLabel)\n")
-        Log.write("\n  case                 tiles   bytes/frame   serial ms   parallel ms   MB/s\n")
-        for c in cases {
-            let frame = makeFrame(c.pixels)
-            let dirty = c.dirty(layout)
-            let rects = dirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
-            let levels = dirty.map { writer.level(for: $0) }
-            func compressAll(parallel: Bool) -> ([CompressedTile?], Double) {
-                let t0 = Date()
-                var packed = [CompressedTile?](repeating: nil, count: dirty.count)
-                if parallel {
-                    packed.withUnsafeMutableBufferPointer { buffer in
-                        let base = buffer.baseAddress!
-                        DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
-                            base[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
-                                                            pixels: layout.extract(frame, rect: rects[i]),
-                                                            level: levels[i])
-                        }
-                    }
-                } else {
-                    for i in 0..<dirty.count {
-                        packed[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
-                                                          pixels: layout.extract(frame, rect: rects[i]),
-                                                          level: levels[i])
-                    }
-                }
-                return (packed, Date().timeIntervalSince(t0) * 1000)
-            }
-            var bytes = 0
-            var tiles = 0
-            var serialMs = Double.infinity
-            var parallelMs = Double.infinity
-            for round in 0..<6 {
-                let (packed, ms) = compressAll(parallel: round % 2 == 1)
-                if round % 2 == 1 { parallelMs = min(parallelMs, ms) } else { serialMs = min(serialMs, ms) }
-                writer.beginFrame()
-                for case let tile? in packed {
-                    writer.emit(tile, sync: writer.perTileSync)
-                    writer.observe(index: tile.index, ratio: tile.ratio)
-                }
-                writer.endFrame()
-                bytes = writer.lastFrameBytes
-                tiles = packed.compactMap { $0 }.count
-            }
-            // the two runs compress the same content; keep the level policy in sync afterwards
-            for (i, index) in dirty.enumerated() {
-                _ = i
-                if let packed = ScreenWriter.compress(index: index, rect: rects[dirty.firstIndex(of: index) ?? 0],
-                                                     pixels: layout.extract(frame, rect: rects[dirty.firstIndex(of: index) ?? 0]),
-                                                     level: writer.level(for: index)) {
-                    writer.observe(index: index, ratio: packed.ratio)
-                }
-            }
-            let mbps = Double(bytes) / parallelMs / 1000.0
-            Log.write(String(format: "  %-18s  %5d  %10d  %10.2f  %11.2f  %6.1f\n",
-                             (c.name as NSString).utf8String!, tiles, bytes, serialMs, parallelMs, mbps))
+        text += "  " + Bench.pad("bytes", 10, left: true) + " " + Bench.pad("\(Int(Percentiles(payload).p50))", 10)
+            + " " + Bench.pad("\(Int(Percentiles(payload).p95))", 10)
+            + " " + Bench.pad("\(Int(Percentiles(payload).p99))", 10)
+            + " " + Bench.pad("\(Int(Percentiles(payload).max))", 10) + "\n"
+        row("zlib ms", Percentiles(zlib))
+        row("write ms", Percentiles(writes))
+        row("wall ms", Percentiles(wall))
+        if wallSeconds > 0 {
+            text += String(format: "  wire %.1f MB/s over %.2f s of frame time (%@ payload, %@ on the wire)\n",
+                           Double(wireBytes) / 1_048_576.0 / wallSeconds, wallSeconds,
+                           String(format: "%.1f MB", Double(bytes) / 1_048_576.0) as NSString,
+                           String(format: "%.1f MB", Double(wireBytes) / 1_048_576.0) as NSString)
         }
-        Log.write("\nkrd: bench done, \(writer.framesEmitted) tile emissions\n")
-        writer.discardOutput = false
-        fflush(stdout); fflush(stderr)
+        FileHandle.standardOutput.write(Data(text.utf8))
         exit(0)
     }
 
@@ -528,6 +599,10 @@ final class Desk {
     // MARK: frame handling
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
+        let started = benchNowMs()
+        // capture callback -> last byte out: the number that is actually felt (Q4 in
+        // docs/BENCHMARK.md). `defer` so every early return is measured too.
+        defer { lastPipeMs = benchNowMs() - started }
         guard let grid = currentGrid() else { return }
         guard width == grid.pixelW, height == grid.pixelH else {
             if !reportedFrameMismatch {
@@ -536,6 +611,12 @@ final class Desk {
                     "krd: dropping frames: got \(width)x\(height), layout expects \(grid.pixelW)x\(grid.pixelH)\n")
             }
             return
+        }
+
+        // Recording happens before the dirty pass, i.e. it captures exactly the frames the
+        // pipeline would render (post-dedupe, post-resize).
+        if let recorder, !recorder.isFull {
+            recorder.record(pixels, width: width, height: height, bpp: grid.bpp)
         }
 
         let dirty: [Int]
@@ -633,6 +714,7 @@ final class Desk {
     private func startStats() {
         let writer = self.writer
         let capturer = self.capturer
+        let statsJSON = StatsJSONWriter(path: options.statsJSON)
         var lastBytes = 0
         var lastFrames = 0
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -642,19 +724,31 @@ final class Desk {
             let bytes = writer.totalBytes
             let frames = writer.framesEmitted
             let layout = self.currentGrid()
+            let tiles = frames - lastFrames
+            let mbps = Double(bytes - lastBytes) / 1_048_576.0
             let line = String(
-                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d\n",
-                frames - lastFrames,
+                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f max=%.0f over5=%d]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d pipe=%.1f\n",
+                tiles,
                 self.lastDirtyCount,
                 writer.lastFrameBytes / 1024,
-                Double(bytes - lastBytes) / 1_048_576.0,
-                writer.lastCompressMs, writer.lastWriteMs,
+                mbps,
+                writer.lastCompressMs, writer.lastWriteMs, writer.writeMaxMs, writer.writeOver5Ms,
                 layout?.pixelW ?? 0, layout?.pixelH ?? 0,
                 layout?.paneCols ?? 0, layout?.paneRows ?? 0,
                 capturer.framesDelivered, capturer.framesSkipped, capturer.callbacks,
-                capturer.idleFrames, capturer.badFrames
+                capturer.idleFrames, capturer.badFrames,
+                self.lastPipeMs
             )
             Log.write(line)
+            statsJSON?.write(tiles: tiles, dirty: self.lastDirtyCount, kb: writer.lastFrameBytes / 1024,
+                             mbps: mbps, zlibMs: writer.lastCompressMs, writeMs: writer.lastWriteMs,
+                             writeMaxMs: writer.writeMaxMs, writeOver5: writer.writeOver5Ms,
+                             px: (layout?.pixelW ?? 0, layout?.pixelH ?? 0),
+                             cells: (layout?.paneCols ?? 0, layout?.paneRows ?? 0),
+                             delivered: capturer.framesDelivered, skipped: capturer.framesSkipped,
+                             callbacks: capturer.callbacks, idle: capturer.idleFrames,
+                             bad: capturer.badFrames, pipeMs: self.lastPipeMs)
+            writer.resetWriteStats()
             lastBytes = bytes
             lastFrames = frames
         }

@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "note": [
+    "Absolute budgets, deliberately loose: they exist to catch a 2x regression, not a 5% one.",
+    "Bytes are content, so they are machine-independent and can be tight. Timings are not: on a",
+    "macOS runner everything is 1.5-2x slower than on the laptop these were set from, so the",
+    "timing budgets carry that headroom and a real regression still trips them.",
+    "docs/BENCHMARK.md section 6 explains why there is no committed timing baseline."
+  ],
+  "encode": [
+    {"case": "char",     "field": "bytes.payload", "max": 900},
+    {"case": "char",     "field": "ms.total.p99",  "max": 3.0},
+    {"case": "line",     "field": "bytes.payload", "max": 12000},
+    {"case": "line",     "field": "ms.total.p99",  "max": 8.0},
+    {"case": "full",     "field": "bytes.payload", "max": 120000},
+    {"case": "photo",    "field": "bytes.payload", "max": 20000000},
+    {"case": "photo",    "field": "ms.total.p99",  "max": 120.0},
+    {"case": "gradient", "field": "bytes.payload", "max": 600000},
+    {"case": "ui",       "field": "bytes.payload", "max": 160000},
+    {"case": "drag",     "field": "bytes.payload", "max": 2000000},
+    {"case": "none",     "field": "bytes.payload", "max": 0},
+    {"case": "none",     "field": "bytes.wire",    "max": 64}
+  ],
+  "wire": [
+    {"case": "none@unlimited", "field": "bytes_after_first_frame", "max": 0},
+    {"case": "line@unlimited", "field": "write_ms.p99", "max": 10.0},
+    {"case": "line@unlimited", "field": "late", "max": 3}
+  ]
+}

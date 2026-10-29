@@ -145,8 +145,13 @@ have_at=$( [ -x "$installed" ] && "$installed" --version 2>/dev/null | awk '{pri
 if [ "$have_at" = "${VERSION#v}" ]; then
     say "==> $installed is already ${VERSION#v}"
 else
-    cp "$work/krd" "$installed"
-    chmod 755 "$installed"
+    # Copy to a temp name and rename, never `cp` straight onto the existing file: an in-place
+    # truncation reuses the inode, AMFI keeps the old binary's validation result cached for that
+    # vnode, and the new file dies at exec with `Killed: 9` (exit 137). See
+    # docs/TROUBLESHOOTING.md §26b.
+    cp "$work/krd" "$installed.new"
+    chmod 755 "$installed.new"
+    mv -f "$installed.new" "$installed"
     say "==> installed $installed ($VERSION)"
 fi
 

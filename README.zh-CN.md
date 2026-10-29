@@ -47,6 +47,7 @@ krd --list                   # 列出显示器与窗口
 krd --window Safari          # 只镜像一个窗口
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
+krd --no-cursor              # 画面里不画指针，鼠标移动也就不会再弄脏瓦片
 krd --debug                  # 统计写日志文件，不会打到画面上
 krd --format rgba            # 终端不认 f=24 时退回 f=32
 krd --bench                  # 在合成帧上给编码器计时，不需要终端
@@ -79,6 +80,7 @@ krd --bench                  # 在合成帧上给编码器计时，不需要终�
 | [PROTOCOL](docs/PROTOCOL.zh-CN.md) | 每一条发出去的转义序列，以及为什么 |
 | [TESTING](docs/TESTING.zh-CN.md) | 自检、瓦片定位标定、怎么验一个新终端 |
 | [ENCODING](docs/ENCODING.zh-CN.md) | 字节和毫秒花在哪，以及背后的基准测试 |
+| [BENCHMARK](docs/BENCHMARK.md) | 基准分层、预算阈值，以及这里「快」到底指什么 |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 36 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 

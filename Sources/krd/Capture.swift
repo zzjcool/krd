@@ -17,6 +17,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var previous: [UInt8]?
     /// Matches ScreenWriter.format; set before start().
     var format: PixelFormat = .rgb
+    /// Draw the pointer into the captured frame. Off means the picture shows a bare desktop:
+    /// the mirrored cursor is redundant (the pane already follows the local pointer) and every
+    /// mouse move would otherwise dirty the tiles under it.
+    var showsCursor = true
 
     private(set) var framesDelivered = 0
     private(set) var framesSkipped = 0
@@ -34,7 +38,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1)))
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.queueDepth = 3   // queueDepth 1 stalls the stream on this macOS build
-        config.showsCursor = true
+        config.showsCursor = showsCursor
         config.colorSpaceName = CGColorSpace.sRGB
         config.capturesAudio = false
 

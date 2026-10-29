@@ -40,3 +40,6 @@ jobs:
 
       - name: Build universal binary (arm64 + x86_64)
         run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Benchmark budgets
+        run: python3 bench/bench.py --quick --rounds 8

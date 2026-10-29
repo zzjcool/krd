@@ -17,3 +17,8 @@ docs/media/raw/
 # agent harness scratch state (async task logs, subagent runs)
 .pi/
 .pi-subagents/
+
+# benchmark output (regenerate with `make bench`)
+/bench/results/
+/bench/report.md
+/bench/ab-report.md

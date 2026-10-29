@@ -135,6 +135,11 @@ macOS records these grants against the **code signature**, not the path. Consequ
   copy again.
 - Updating is therefore: stop krd → `./deploy.sh user@host` → run again. The grant survives,
   because the identity and the identifier did not change.
+- The copy is written to `krd.new` and **renamed** into place, never `cat >` onto the existing
+  file. Truncating in place keeps the inode, AMFI still has the old binary's validation result
+  cached for it, and the new binary is killed at exec (`Killed: 9`, exit 137, not a word
+  anywhere). If you copied by hand and the target dies instantly, see
+  [TROUBLESHOOTING §26b](TROUBLESHOOTING.md#26b-after-an-update-the-remote-binary-dies-instantly-killed-9-exit-137-no-output).
 
 Verify what is actually installed:
 
