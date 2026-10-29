@@ -1,8 +1,9 @@
 name: CI
 
+# Deliberately not on every push: pushing to main is a one-person affair here, and a macOS
+# runner costs minutes of queue for a build that already ran locally. A pull request still gets
+# checked, and every release tag is built and tested by release.yml before it is published.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:

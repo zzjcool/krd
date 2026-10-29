@@ -11,7 +11,8 @@ swift build -c release                 # the mechanical check
 .build/release/krd --selftest          # the renderer, end to end, no permissions
 ```
 
-CI（[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)）只负责机械的那一半：`swift build -c release`、
+CI（[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)）只负责机械的那一半，而且只在 PR 或手动触发时跑
+（不是每次 push）；发布 tag 走 [`release.yml`](../.github/workflows/release.yml)，同样是先构建再加 `swift test`：`swift build -c release`、
 只有存在 `Tests/` 目录时才跑 `swift test`（今天没有这个目录），再加一次 universal 的
 `--arch arm64 --arch x86_64` 构建，确认发布路径是通的。凡是跟协议、几何或输入有关的东西，仍然必须用下面
 这些开关在真实终端上验 —— CI 没有可以往里画图的 pty，也没有可以采集的屏幕。

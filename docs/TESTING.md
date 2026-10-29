@@ -12,7 +12,9 @@ swift build -c release                 # the mechanical check
 .build/release/krd --selftest          # the renderer, end to end, no permissions
 ```
 
-CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) does exactly the mechanical part:
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) does exactly the mechanical part, and
+only on pull requests or on demand (not on every push); release tags get the same build plus
+`swift test` from [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 `swift build -c release`, `swift test` only if a `Tests/` directory exists (there is none today), and a
 universal `--arch arm64 --arch x86_64` build so the release path is known to work. Anything
 protocol-, geometry- or input-related still has to be verified with the switches below on a real

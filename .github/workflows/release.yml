@@ -59,6 +59,14 @@ jobs:
       - name: Show Swift toolchain
         run: swift --version
 
+      - name: Test (if there is a test target)
+        run: |
+          if [ -d Tests ]; then
+            swift test
+          else
+            echo "Tests/ does not exist yet -- nothing to run"
+          fi
+
       - name: Build universal binary (arm64 + x86_64)
         run: swift build -c release --arch arm64 --arch x86_64
 

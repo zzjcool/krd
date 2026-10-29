@@ -85,9 +85,11 @@ way.
 - One concern per PR. Describe the failure you observed, the cause you found, and how you verified
   the fix (commands + what you saw).
 - If the change is user-visible, say which terminal you calibrated on.
-- CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `swift build -c release`, a
-  `swift test` only if a `Tests/` directory exists (it does not today), and a universal
-  `--arch arm64 --arch x86_64` build. A red build is not reviewable. CI cannot draw escapes into a
+- CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on **pull requests** (and on
+  demand), not on every push: `swift build -c release`, `swift test` only if a `Tests/` directory
+  exists (it does not today), and a universal `--arch arm64 --arch x86_64` build. Release tags are
+  built *and* tested by `.github/workflows/release.yml` before anything is published. A red build
+  is not reviewable. CI cannot draw escapes into a
   terminal, so protocol/geometry/input changes still need the manual checks above — say in the PR
   which ones you ran.
 
