@@ -392,3 +392,21 @@ macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、
 **对策。** 没有坏——退出码是 `6`，上面那行就是应用现在持有的值。读那个值、按它行动；
 `krd ax tree --app … | grep <你的文字>` 能从一次新 dump 确认。字段真的只读时，
 `AXUIElementIsAttributeSettable` 会提前发现，写请求根本不会发出去。
+
+### 45. 镜像桌面里复制的东西传不到本地终端，或者 `Ctrl-V` 没反应
+
+**根因。** 三件不同的事，日志会告诉你是哪一件：
+
+1. 桥是关的。`--clipboard` 默认 `off` 是故意的——悄悄改写一台机器的剪贴板太意外。`--clipboard=in`
+   是镜像端→终端，`out` 是终端→镜像端，`both` 是两边。
+2. 你的终端不实现 OSC 52 **写入**，于是 `in` 把序列发出去了但什么也没发生。Rex、Ghostty、kitty、
+   WezTerm 支持，Terminal.app 不支持。
+3. 你的终端不实现 OSC 52 **读取**（`ESC ] 52 ; c ; ? ST` 请求），于是 `Ctrl-V` 没有内容可粘。这一点
+   不是静默的：0.8 秒后日志会出现
+   `krd: this terminal did not answer the OSC 52 read, so Ctrl-V has nothing to paste.`，
+   兜底是 `--clipboard-paste <file>`——这条路只要目标端 pasteboard 和一次 `Cmd-V`，不需要终端配合。
+
+**对策。** `--debug` 每次同步打一行（`clipboard: 1234 B target -> terminal (OSC 52)`、
+`clipboard: 5678 B terminal -> target, Cmd-V posted`），**从不打内容**，所以"哪一半缺了"是可查的。
+如果看到 `dropped (limit 2097152 B)`，说明这次剪贴板超过 2 MB——这是有意的：终端会在粘贴前把整段
+payload 解码，而 krd 的 stdout 还要跑帧。只桥接文本，不桥接图片。

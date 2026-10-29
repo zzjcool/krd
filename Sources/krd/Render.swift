@@ -120,6 +120,11 @@ final class ScreenWriter {
     /// that belongs to the shell (or the terminal's own UI).
     private static var keyboardPushed = false
 
+    /// One lock for everything that reaches the terminal. The frame path flushes a whole frame
+    /// through several `write(2)` calls, so a concurrent OSC 52 (clipboard) or mouse-mode sequence
+    /// (input) could otherwise land between two tiles of the same image.
+    static let outLock = NSLock()
+
     static func writeKeyboardProtocol(_ on: Bool) {
         if on {
             keyboardPushed = true
@@ -130,9 +135,13 @@ final class ScreenWriter {
         }
     }
 
-    /// Straight to the tty, bypassing the frame buffer: input-mode sequences must not land in the
-    /// middle of a placement (and must work before the first frame exists).
+    /// Straight to the tty, bypassing the frame buffer: input-mode sequences, OSC 52 and the like
+    /// must not land in the middle of a placement (and must work before the first frame exists).
     static func writeRaw(_ text: String) {
+        // Same lock as the frame path: an OSC 52 or a mouse-mode change landing in the middle of a
+        // tile image would be decoded as image data and corrupt that tile.
+        outLock.lock()
+        defer { outLock.unlock() }
         Array(text.utf8).withUnsafeBufferPointer { buf in
             var off = 0
             while off < buf.count {
@@ -398,6 +407,8 @@ final class ScreenWriter {
         if let dump = ScreenWriter.dumpHandle {
             dump.write(Data(out))
         }
+        ScreenWriter.outLock.lock()
+        defer { ScreenWriter.outLock.unlock() }
         out.withUnsafeBytes { buf in
             var off = 0
             while off < buf.count {

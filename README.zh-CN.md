@@ -105,7 +105,10 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 |---|---|
 | 可用 | 瓦片脏更新（静止画面 0 字节/秒）、指针跟随、左中右三键、双击、滚轮、键盘、应答握手的终端上的 kitty 键盘协议（`Cmd`、连发、释放）、窗口级镜像（输入直接投给该窗口所属进程）、SSH |
 | 粗糙 | 大面积高速运动（还没有编解码器）、Herdr 的图像删除语义 |
-| 还没做 | 剪贴板、输入法、多显示器热切换 |
+| 可用（剪贴板） | 剪贴板桥，`--clipboard=in|out|both` 显式打开：镜像桌面里复制 = 给本地终端发一条 OSC 52
+（`in`）；`Ctrl-V` = 向终端索取剪贴板、放进镜像端 pasteboard 再投 `Cmd-V`（`out`，需要终端支持 OSC 52 读回，
+不支持就用 `--clipboard-paste <file>`） |
+| 还没做 | 输入法、多显示器热切换 |
 
 ## 文档
 
@@ -116,7 +119,7 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 | [TESTING](docs/TESTING.zh-CN.md) | 自检、瓦片定位标定、怎么验一个新终端 |
 | [ENCODING](docs/ENCODING.zh-CN.md) | 字节和毫秒花在哪，以及背后的基准测试 |
 | [BENCHMARK](docs/BENCHMARK.md) | 基准分层、预算阈值，以及这里「快」到底指什么 |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 44 个现象及其根因 |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 45 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 
 ## 参与

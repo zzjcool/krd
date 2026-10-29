@@ -16,6 +16,12 @@ struct Options {
     /// Pan the crop when the pointer reaches the edge of the picture (`--zoom-follow`).
     var zoomFollow = false
     var noInput = false
+    /// Clipboard bridge (issue #18). Off by default: silently rewriting a machine's clipboard is a
+    /// surprise, and the terminal-to-target half presses keys into the mirrored app.
+    var clipboard: ClipboardPolicy = .off
+    /// One-shot terminal-to-target paste from a file, for terminals that cannot answer an OSC 52
+    /// read (the explicit, testable half of that direction).
+    var clipboardPaste: String? = nil
     /// Do not paint the pointer into the mirrored picture (see Capturer.showsCursor).
     var noCursor = false
     var selftest = false
@@ -68,6 +74,10 @@ func usage() -> String {
       --log <path>        write diagnostics to a file instead of over the picture
       --full-frame        disable tiling, always resend the whole frame
       --no-input          view only, do not inject events
+      --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
+                          out (Ctrl-V: terminal -> target), both
+      --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
+                          (for terminals that cannot answer an OSC 52 read)
       --no-cursor         do not draw the pointer into the picture (also stops a moving
                           mouse from dirtying tiles every frame)
       --dry-run           parse input but only log it, never post CGEvent
@@ -100,6 +110,16 @@ func usage() -> String {
 
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
     """
+}
+
+/// `--clipboard <spec>`, or a usage error: a typo must not read as "off".
+func parseClipboardSpec(_ spec: String) -> ClipboardPolicy {
+    guard let policy = ClipboardPolicy(spec: spec) else {
+        FileHandle.standardError.write(
+            Data("krd: --clipboard wants off|in|out|both (in = target to terminal, out = terminal to target), got \"\(spec)\"\n".utf8))
+        exit(2)
+    }
+    return policy
 }
 
 func parseArguments() -> Options {
@@ -181,6 +201,18 @@ func parseArguments() -> Options {
             options.logPath = args[safe: i + 1]
             i += 1
         case "--dry-run": options.dryRun = true
+        case "--clipboard":
+            options.clipboard = parseClipboardSpec(args[safe: i + 1] ?? "")
+            i += 1
+        case "--clipboard-paste":
+            options.clipboardPaste = args[safe: i + 1]
+            i += 1
+        // The `--flag=value` spelling too: people type it, and a flag that silently does nothing
+        // when typed the natural way is worse than a usage error.
+        case let arg where arg.hasPrefix("--clipboard="):
+            options.clipboard = parseClipboardSpec(String(arg.dropFirst("--clipboard=".count)))
+        case let arg where arg.hasPrefix("--clipboard-paste="):
+            options.clipboardPaste = String(arg.dropFirst("--clipboard-paste=".count))
         case "--debug": options.debug = true
         case "--list": options.listOnly = true
         case "-v", "--version": print("krd \(krdVersion)"); exit(0)
@@ -225,6 +257,9 @@ final class Desk {
     private var followTimer: DispatchSourceTimer?
     /// The `--window` target: events go to this process instead of the window manager (issue #17).
     private var windowTarget: (pid: pid_t, id: CGWindowID, name: String)?
+    /// Clipboard bridge (issue #18) and the 4 Hz timer that watches the target pasteboard.
+    private var clipboard: ClipboardBridge?
+    private var clipboardTimer: DispatchSourceTimer?
 
     private let stateLock = NSLock()
     private var grid: TileGrid?
@@ -452,6 +487,60 @@ final class Desk {
                 let trusted = AXIsProcessTrusted()
                 Log.write(
                     "krd: accessibility trusted=\(trusted) (clicks/keys need it; see System Settings > Privacy > Accessibility)\n")
+            }
+        }
+
+        // Clipboard bridge (issue #18). `--no-input` keeps the target-to-terminal half only: the
+        // other half presses keys into the mirrored machine, so it is dropped rather than trusted.
+        let clipboardPolicy = options.clipboard.allowing(noInput: options.noInput)
+        if options.clipboardPaste != nil, options.noInput {
+            throw DeskError.message("--clipboard-paste needs input: it posts Cmd-V. Drop --no-input, "
+                                    + "or use --clipboard=in to only read the target's clipboard")
+        }
+        if !clipboardPolicy.isOff || options.clipboardPaste != nil {
+            let bridge = ClipboardBridge(policy: clipboardPolicy)
+            clipboard = bridge
+            input?.clipboard = clipboardPolicy
+            input?.onClipboardFromTerminal = { [weak self] text in
+                guard let self, let bridge = self.clipboard else { return }
+                guard let bytes = bridge.setTarget(text) else {
+                    Log.write("krd: clipboard: \(text.utf8.count) B from the terminal dropped "
+                              + "(limit \(OSC52.maxBytes) B)\n")
+                    return
+                }
+                self.input?.postPasteCommand()
+                if self.options.debug {
+                    Log.write("clipboard: \(bytes) B terminal -> target, Cmd-V posted\n")
+                }
+            }
+            if options.debug {
+                Log.write("krd: clipboard \(clipboardPolicy) (target -> terminal: "
+                          + "\(clipboardPolicy.toTerminal), Ctrl-V terminal -> target: "
+                          + "\(clipboardPolicy.toTarget))\n")
+            }
+        }
+        if clipboardPolicy.toTerminal {
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
+            timer.setEventHandler { [weak self] in
+                guard let self, let line = self.clipboard?.poll() else { return }
+                if self.options.debug { Log.write(line + "\n") }
+            }
+            timer.resume()
+            clipboardTimer = timer
+        }
+        if let path = options.clipboardPaste {
+            let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            if text.isEmpty {
+                Log.write("krd: --clipboard-paste \(path): no UTF-8 text read\n")
+            } else if let bytes = clipboard?.setTarget(text) {
+                input?.postPasteCommand()
+                if options.debug {
+                    Log.write("clipboard: \(bytes) B \(path) -> target, Cmd-V posted\n")
+                }
+            } else {
+                Log.write("krd: --clipboard-paste \(path): \(text.utf8.count) B is over the "
+                          + "\(OSC52.maxBytes) B limit\n")
             }
         }
 
@@ -998,6 +1087,7 @@ final class Desk {
         guard !cleanedUp else { return }
         cleanedUp = true
         followTimer?.cancel()
+        clipboardTimer?.cancel()
         input?.restore()
         writer.endSession()
         exit(0)

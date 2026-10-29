@@ -106,6 +106,16 @@ final class InputReader {
     var targetPid: (() -> pid_t?)?
     private var loggedTarget = false
     private var loggedFallback = false
+
+    /// Clipboard directions (issue #18). `toTarget` gates `Ctrl-V` here; the target→terminal half
+    /// lives in `ClipboardBridge`, because this class never reads the pasteboard itself.
+    var clipboard: ClipboardPolicy = .off
+    /// A clipboard the terminal handed back after an OSC 52 read.
+    var onClipboardFromTerminal: ((String) -> Void)?
+    /// Generation counter, so a late answer does not clear a newer request's timeout.
+    private var pasteRequests = 0
+    private var pendingPaste = 0
+    private var loggedNoPasteAnswer = false
     /// With --debug every recognised event is logged, so "nothing happens" can be split
     /// into "the terminal never sent it" vs "the click went to the wrong place".
     var trace = false
@@ -255,6 +265,28 @@ final class InputReader {
             guard buffer.count >= 3 else { return nil }
             handleSS3(buffer[2])
             return 3
+        case 0x5D:                                  // OSC: ESC ] ... BEL | ST
+            var i = 2
+            while i < buffer.count {
+                if buffer[i] == 0x07 {
+                    handleOSC(String(bytes: buffer[2..<i], encoding: .utf8) ?? "")
+                    return i + 1
+                }
+                if buffer[i] == 0x1B, i + 1 < buffer.count, buffer[i + 1] == 0x5C {
+                    handleOSC(String(bytes: buffer[2..<i], encoding: .utf8) ?? "")
+                    return i + 2
+                }
+                i += 1
+            }
+            // A clipboard reply is megabytes of base64 and arrives in one piece; anything longer
+            // than that without a terminator is not ours, so drop the head instead of buffering
+            // forever.
+            if buffer.count > OSC52.maxEncodedBytes + 32 {
+                buffer.removeFirst(2)
+                if trace { log("osc dropped: no terminator") }
+                return 2
+            }
+            return nil
         default:
             if buffer[1] < 0x20 {
                 postKey(Keys.esc, [])
@@ -290,6 +322,12 @@ final class InputReader {
         if trace {
             log("key \(report.code) mods=\(report.mods) \(report.phase)"
                 + (report.base.map { " base=\($0)" } ?? ""))
+        }
+        // Ctrl-V is krd's paste key (issue #18) and has to work in both encodings: a terminal that
+        // answered the kitty handshake reports it as `CSI 118;5 u`, never as the 0x16 byte.
+        if let v = Keys.map["v"], report.code == v, report.mods == 4, report.phase != .release {
+            requestPaste()
+            return
         }
         if report.isQuitChord {
             if report.isQuit { onQuit() }
@@ -490,10 +528,65 @@ final class InputReader {
 
     // MARK: keys
 
+    /// `OSC ... BEL|ST` from the terminal. Only OSC 52 is ours; a title change or a hyperlink used
+    /// to be typed into the mirrored app as Alt+] text, so handling the whole sequence (and ignoring
+    /// the ones we do not implement) is a fix as much as a feature - but the payload never reaches
+    /// the log, whatever it is.
+    private func handleOSC(_ params: String) {
+        guard let data = OSC52.decode(parameters: params) else {
+            if trace { log("osc ignored (\(params.prefix(3)))") }
+            return
+        }
+        guard clipboard.toTarget else {
+            if trace { log("clipboard: terminal sent \(data.count) B, out direction off") }
+            return
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            if trace { log("clipboard: terminal sent \(data.count) B, not UTF-8") }
+            return
+        }
+        pendingPaste = 0                     // the answer arrived: the timeout must not fire
+        onClipboardFromTerminal?(text)
+    }
+
+    /// `Ctrl-V`: ask the terminal for its clipboard, then put it on the target's pasteboard and post
+    /// `Cmd-V` (the answer comes back as an OSC 52 on stdin, in `handleOSC`).
+    ///
+    /// Terminals that cannot read OSC 52 simply never answer - the timeout below says so once,
+    /// instead of leaving "Ctrl-V did nothing" to be diagnosed from scratch.
+    private func requestPaste() {
+        guard clipboard.toTarget else {
+            if trace { log("clipboard: Ctrl-V ignored, out direction off") }
+            return
+        }
+        pasteRequests += 1
+        let generation = pasteRequests
+        pendingPaste = generation
+        if trace { log("clipboard: asked the terminal for its clipboard (OSC 52 read)") }
+        ScreenWriter.writeRaw(OSC52.readRequest)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, self.pendingPaste == generation else { return }
+            self.pendingPaste = 0
+            guard !self.loggedNoPasteAnswer else { return }
+            self.loggedNoPasteAnswer = true
+            Log.write("krd: this terminal did not answer the OSC 52 read, so Ctrl-V has nothing to paste.\n"
+                      + "         Use --clipboard-paste <file> for the terminal-to-target direction (see --help).\n")
+        }
+    }
+
+    /// One `Cmd-V` into the target, through the same route as every other key - so in `--window`
+    /// mode it lands in that window's process (issue #17) instead of in whatever is frontmost.
+    func postPasteCommand() {
+        guard let v = Keys.map["v"] else { return }
+        postKey(v, .maskCommand)
+    }
+
     private func handleControl(_ byte: UInt8) {
         switch byte {
         case 0x1C:                                          // Ctrl-\ : leave
             onQuit()
+        case 0x16:                                          // Ctrl-V: paste the terminal's clipboard
+            requestPaste()
         case 0x00:
             postKey(Keys.space, .maskControl)
         case 0x1B:

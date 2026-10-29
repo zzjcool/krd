@@ -110,7 +110,11 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 |---|---|
 | Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, SSH |
 | Rough | colour-heavy full-screen motion (no codec yet), Herdr's image-delete semantics |
-| Not yet | clipboard, IME input, multi-display hot switch |
+| Solid (clipboard) | clipboard bridge, opt-in with `--clipboard=in|out|both`: a copy inside the mirrored
+desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the terminal
+for its clipboard, puts it on the target's pasteboard and posts `Cmd-V` (`out`, needs a terminal
+that answers the OSC 52 read — `--clipboard-paste <file>` is the path that always works) |
+| Not yet | IME input, multi-display hot switch |
 
 ## Docs
 
@@ -121,7 +125,7 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 44 symptoms with root causes |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 45 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
 ## Contributing
