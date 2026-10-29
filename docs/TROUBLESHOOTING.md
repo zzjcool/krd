@@ -458,3 +458,24 @@ field reformatted it, a rich text field wrapped it in its own attributes.
 Read that value and act on *it*; `krd ax tree --app … | grep <your text>` confirms it from a fresh
 dump. If the field is genuinely read-only, `AXUIElementIsAttributeSettable` says so up front and the
 write is refused before anything is sent.
+
+### 45. A copy in the mirrored desktop never reaches my terminal, or `Ctrl-V` does nothing
+
+**Cause.** Three separate things, and the log line says which:
+
+1. The bridge is off. `--clipboard` defaults to `off` on purpose — a mirror that silently rewrites a
+   machine's clipboard is a surprise. `--clipboard=in` is target → terminal, `out` is terminal →
+   target, `both` is both.
+2. Your terminal does not implement *writing* OSC 52, so `in` sends the sequence and nothing happens.
+   Rex, Ghostty, kitty and WezTerm do; Terminal.app does not.
+3. Your terminal does not implement *reading* OSC 52 (the `ESC ] 52 ; c ; ? ST` request), so `Ctrl-V`
+   has nothing to paste. That is not silent: after 0.8 s the log gets
+   `krd: this terminal did not answer the OSC 52 read, so Ctrl-V has nothing to paste.` and the
+   fallback is `--clipboard-paste <file>` — that path only needs the target's pasteboard and a
+   `Cmd-V`, no terminal cooperation.
+
+**Fix.** `--debug` prints one line per sync (`clipboard: 1234 B target -> terminal (OSC 52)`,
+`clipboard: 5678 B terminal -> target, Cmd-V posted`) and never the content, so "which half is
+missing" is answerable without guessing. If the line says `dropped (limit 2097152 B)`, the clip was
+over 2 MB — that is deliberate: the terminal decodes the whole payload before pasting anything, and
+krd shares that stdout with the frames. Only text is bridged; images are not.

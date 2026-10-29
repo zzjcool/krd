@@ -302,6 +302,51 @@ Everything keeps its legacy shape while the protocol is on: arrows stay `CSI 1;<
 stay `CSI <n>;<mods>~`, and only the `:event` sub-field is new on those (which is why
 `KeyReport.legacyFields` returns the old `[Int]` unchanged when no sub-field is present).
 
+
+### 7.4 Clipboard (OSC 52)
+
+The clipboard is a *channel*, not a key: the mirrored desktop and the local terminal each have one,
+and neither can see the other's without a sequence in between. krd bridges both directions, off by
+default (`--clipboard=off|in|out|both`), text only, capped at **2 MB** of payload.
+
+**Target → terminal (`in`).** `NSPasteboard.general.changeCount` is polled at 4 Hz (one integer
+compare; krd has no `NSApplication` run loop to hang an observer on). When it moves, the text goes
+out as:
+
+```
+ESC ] 52 ; c ; <base64 of the UTF-8 text> ST          # ST = ESC backslash, not BEL
+```
+
+`c` is the clipboard selection; `p` (primary), `s` (select) and the `0`–`7` cut buffers are ignored
+in both directions. Terminals that implement this own the text immediately — the sequence travels
+inside the SSH session, so nothing new is exposed to the network.
+
+**Terminal → target (`out`).** `Ctrl-V` (0x16, or `CSI 118;5 u` in the kitty encoding) sends the read
+request:
+
+```
+ESC ] 52 ; c ; ? ST
+```
+
+A terminal that supports reads answers on **stdin** with the same `52;c;<base64>` form; only then does
+krd put the text on the target's pasteboard and post `Cmd-V` through the normal injection path (so
+`--window` posts it to that window's process, §7.3's sibling rule from #17). A terminal that does not
+answer gets one line after 0.8 s and nothing is pasted — pasting whatever happened to be on the
+target's pasteboard would be worse than doing nothing. `--clipboard-paste <file>` is the fallback that
+needs no terminal cooperation.
+
+**Limits.**
+
+| | |
+|---|---|
+| payload cap | 2 MB; bigger clips are dropped with `clipboard: <n> B dropped (limit 2097152 B)` |
+| what is logged | one line per sync with direction and byte count — never the content, not even in `--debug` |
+| `--no-input` | forces `out` off: reading the target's clipboard is fine, pressing keys into it is not |
+| framing | krd sends a whole payload in one sequence: OSC 52 replaces the clipboard, so "chunking" it would paste only the last chunk |
+
+Because the payload shares stdout with the frames, the writer takes one lock: an OSC 52 landing
+between two tiles of an image would be decoded as image data and corrupt that tile.
+
 ## 8. Replies
 
 With `q=2` every reply is suppressed, including errors — a black pane then has no explanation
