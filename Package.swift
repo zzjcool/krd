@@ -12,6 +12,7 @@ let package = Package(
         .executableTarget(name: "krd", dependencies: ["CZlib", "krdcore"], path: "Sources/krd"),
         .testTarget(name: "krdTests", dependencies: ["krd", "krdcore", "CZlib"], path: "Tests/krdTests"),
         // The byte contract's own suite: no screen, no terminal, no tty (issue #21).
-        .testTarget(name: "krdcoreTests", dependencies: ["krdcore", "CZlib"], path: "Tests/krdcoreTests")
+        .testTarget(name: "krdcoreTests", dependencies: ["krdcore", "CZlib"], path: "Tests/krdcoreTests",
+                    exclude: ["Fixtures"])
     ]
 )

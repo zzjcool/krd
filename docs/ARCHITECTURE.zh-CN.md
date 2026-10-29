@@ -20,6 +20,7 @@ krd 是一个单文件 Swift 可执行程序，十三个源文件约 3.9 k 行�
 Sources/krdcore/          <- 不含 AppKit / CoreGraphics / ScreenCaptureKit（issue #21）
   Tiles.swift     TileGrid：整格网格、每块像素矩形、抽取、脏块判定
   Render.swift    ScreenWriter：会话帧、逐块 kitty 逃逸序列、KRD_DUMP、zlib
+  Input.swift     InputParser：CSI/SS3 状态机，字节 → 数字 Event
   Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy（编码策略）
 
 Sources/krd/              <- 所有碰操作系统的部分
@@ -27,7 +28,7 @@ Sources/krd/              <- 所有碰操作系统的部分
   Geometry.swift  TermGeometry（CSI 16t/14t、TIOCGWINSZ）与 Viewport（格/像素 → 点）
   Displays.swift  DisplayPick（选哪块屏，以及为什么）与 Debounce（一次突发只动作一次）
   Capture.swift   Capturer：SCStream 装配、BGRA→RGBA、字节相同的帧丢弃
-  Input.swift     InputReader：raw tty、SGR/SGR-Pixels 鼠标、按键 → CGEvent
+  Input.swift     InputReader：tty 读循环、事件 → CGEvent/postToPid、点击计数
   Bench.swift     合成语料、分段计时、JSON、--bench-wire、--stats-json
   Replay.swift    --record / --replay 真实帧（raw + manifest.jsonl）
   Log.swift       文件日志（绝不写终端）
@@ -65,6 +66,25 @@ sha256 `f18475a2596aeeab522fb3037bed0ab4c90d99d325dff4346599abaf9123aa11`），`
 
 `main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`。只有 `Render` 和 `Input`
 懂终端协议，其它模块不懂；只有 `Capture` 懂 ScreenCaptureKit，其它模块不懂。
+
+### 2.2 输入契约住在哪（`krdcore/Parser`）
+
+core 的另一半（issue #45）是 CSI/SS3 状态机：`Sources/krdcore/Input.swift` 把字节变成**纯数字**的
+`Event`——`key(code, mods, phase)`、`press(key, mods, phase)`、`text(char, mods)`、
+`mouse(button, x, y, wheel, release, motion, mods)`、`osc(body)`、`keyboardFlags(n)`。
+`Sources/krd/Input.swift` 保留需要 Mac 的部分：tty 读循环、`CGEvent` 注入、格子/像素的粘滞判定、
+`Viewport` 坐标变换、点击计数、剪贴板。
+
+边界为什么划在这里：鼠标报告必须靠 tty 几何（`Viewport`，依赖 CoreGraphics）才能变成屏幕上的点，
+而 kitty 键盘报告必须靠 IME 策略才能变成字符。这两件事都是关于**这台机器**的决定，而不是关于字节的。
+
+输入 trace 的钉法和 dump 一样：`Tests/krdcoreTests/ParserTraceTests` 喂七组序列（普通键、带修饰与
+release 的 kitty `CSI u`、一次拖拽、一次双击、滚轮、`Ctrl-V`、一次 OSC 52 回复），把解析器的规范
+trace 与 `Tests/krdcoreTests/Fixtures/input-trace.dump` 逐字节比对。重新生成用
+`KRD_UPDATE_FIXTURE=1 swift test`——**绝不要带 `--filter`**（见 §2.1）。
+
+这次重构在 CLI 层也验过：同一条喂入序列，分别跑重构前与重构后的二进制（`--debug --dry-run
+--clipboard=out`），产出的 45 行输入 trace 完全一致，而且每个二进制自身跨多次运行也能复现。
 
 ## 3. 线程
 

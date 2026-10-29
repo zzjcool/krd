@@ -1,0 +1,30 @@
+text U+61 mods=0
+text U+62 mods=0
+press 36 mods=0 press
+press 48 mods=0 press
+press 51 mods=0 press
+keyboardFlags 15
+key 97 mods=4 press
+key 97 mods=0 release
+key 97 mods=0 repeated
+key 97 mods=1 press
+key 1092 mods=0 press base=97
+press 126 mods=0 press
+press 125 mods=262144 press
+press 122 mods=0 press
+press 115 mods=0 press
+press 117 mods=0 press
+mouse button=0 x=12 y=7 wheel=0 release=0 motion=0 mods=0
+mouse button=0 x=15 y=9 wheel=0 release=0 motion=1 mods=0
+mouse button=0 x=15 y=9 wheel=0 release=1 motion=0 mods=0
+mouse button=0 x=20 y=10 wheel=0 release=0 motion=0 mods=0
+mouse button=0 x=20 y=10 wheel=0 release=1 motion=0 mods=0
+mouse button=0 x=20 y=10 wheel=0 release=0 motion=0 mods=0
+mouse button=0 x=20 y=10 wheel=0 release=1 motion=0 mods=0
+mouse button=0 x=20 y=10 wheel=1 release=0 motion=0 mods=0
+mouse button=1 x=20 y=10 wheel=1 release=0 motion=0 mods=0
+mouse button=2 x=20 y=10 wheel=1 release=0 motion=0 mods=0
+control 22
+osc 52; 25 B
+osc 0;t 7 B
+text U+4E2D mods=0
