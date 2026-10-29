@@ -252,6 +252,7 @@ to decide "is this the terminal or is this krd?" — each one prints its own nar
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`, `CGPreflightPostEventAccess()`, display/window enumeration (run on the target Mac to see whether TCC is the problem) |
 | `probe/ax_probe.swift` | what a headless client can read: the AX warm-up trap, window list without Screen Recording, per-window node counts and walk timing, pruned vs raw size (read-only) |
 | `probe/display_probe.swift` | which display-change mechanism fires: `now`, `list`, `set <i>` (a real resolution change), `watch [--appkit]` printing CoreGraphics callbacks and AppKit notifications for 10 s |
+| `probe/photo_codec.py` | what a colour-heavy frame would cost under each option of issue #26 (16-bit quantisation, fewer pixels, no zlib) with the same kitty framing, so its baseline row reproduces `krd --bench`'s `photo` bytes |
 
 ```bash
 python3 probe/kprobe4.py > /tmp/p4.log 2>&1 ; cat /tmp/p4.log

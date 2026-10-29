@@ -7,7 +7,10 @@
     "regression there. A machine N times slower multiplies its timing budgets by N",
     "(KRD_BENCH_BUDGET_SCALE, 7.6 in CI) instead of these numbers being widened for everyone.",
     "docs/BENCHMARK.md section 6 has the measurement, how to re-run it, and why a single absolute",
-    "number cannot also be a 2x gate on a 7.6x-slower runner."
+    "number cannot also be a 2x gate on a 7.6x-slower runner.",
+    "The photo bytes.wire ceiling (13.58 MB today) is a ratchet, not a target: it exists so the",
+    "colour-heavy case cannot silently get worse while docs/research-photo-bandwidth.md is worked",
+    "through. Lower it when a fix lands; docs/BENCHMARK.md section 6 explains the 7.6x scale."
   ],
   "encode": [
     {"case": "char",     "field": "bytes.payload", "max": 900},
@@ -16,6 +19,7 @@
     {"case": "line",     "field": "ms.total.p99",  "max": 8.0},
     {"case": "full",     "field": "bytes.payload", "max": 120000},
     {"case": "photo",    "field": "bytes.payload", "max": 20000000},
+    {"case": "photo",    "field": "bytes.wire",    "max": 13700000},
     {"case": "photo",    "field": "ms.total.p99",  "max": 120.0},
     {"case": "gradient", "field": "bytes.payload", "max": 600000},
     {"case": "ui",       "field": "bytes.payload", "max": 160000},
