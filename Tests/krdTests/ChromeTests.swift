@@ -184,3 +184,30 @@ final class ChromeTests: XCTestCase {
         }
     }
 }
+
+/// The mock source is what makes `--dev` checkable without a screen, so it has to be both
+/// deterministic (two runs → the same bytes) and honest about size (a frame that does not match
+/// the layout would read past the end of the buffer in `extract`).
+final class MockDesktopTests: XCTestCase {
+    func testFrameIsDeterministic() {
+        let mock = MockDesktop(width: 320, height: 200, bpp: 3, fps: 20) { _, _, _ in }
+        XCTAssertEqual(mock.pixels(at: 7), mock.pixels(at: 7))
+        XCTAssertNotEqual(mock.pixels(at: 7), mock.pixels(at: 8), "frames must differ or nothing is dirty")
+    }
+
+    func testFrameMatchesTheRequestedSizeAndFormat() {
+        for (w, h, bpp) in [(320, 200, 3), (60, 40, 3), (321, 201, 4)] {
+            let mock = MockDesktop(width: w, height: h, bpp: bpp, fps: 20) { _, _, _ in }
+            XCTAssertEqual(mock.pixels(at: 3).count, w * h * bpp)
+        }
+    }
+
+    /// A frame has to contain the kinds of region the encoder is judged on: flat wallpaper,
+    /// high-contrast text-like lines, and a saturated dock.
+    func testFrameIsNotUniform() {
+        let mock = MockDesktop(width: 400, height: 300, bpp: 3, fps: 20) { _, _, _ in }
+        let px = mock.pixels(at: 12)
+        let unique = Set(stride(from: 0, to: px.count, by: 3).map { px[$0] })
+        XCTAssertGreaterThan(unique.count, 8, "a flat frame would not exercise dirty rects or zlib")
+    }
+}

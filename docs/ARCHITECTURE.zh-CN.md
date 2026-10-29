@@ -314,6 +314,7 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `KRD_Q` | 每条转义里的 `q=` 字段（默认 `2` = 静默） |
 | `KRD_FORMAT` | `rgb`（默认，`f=24`）或 `rgba`（`f=32`） |
 | `KRD_SYNC` | `tile` 恢复每瓦片一个同步块；`KRD_NOSYNC=1` 完全关掉 |
+| `--mock` | 用 `MockDesktop` 顶替 `Capturer`：合成帧走真实 `handleFrame`，不需要权限 |
 | `--dev` | `Chrome` + `startChrome()`：TUI 层，预留一行状态栏，面板按需占行 |
 | `--dev-panel` | 在第一次布局前就打开面板，用于截图和 pty 测试 |
 | `--no-chrome` | 强制关闭该层，方便把 `--dev` 写进包装脚本 |

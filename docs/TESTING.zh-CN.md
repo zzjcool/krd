@@ -52,6 +52,7 @@ krd --selftest --fps 30 --tile 32x16   # fewer, bigger tiles
 `--dev` 用同样的办法验证 —— 标定图案走真实管线，状态栏写在它下面那一行：
 
 ```bash
+make dev-mock                          # 进程内画出来的桌面：不需要权限，而且不会停
 make dev-selftest                      # = krd --selftest --dev --pane 137x44 --cell 17x33
 krd --selftest --dev --dev-panel stats # 面板预先打开，方便截图或报 bug
 ```

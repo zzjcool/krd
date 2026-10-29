@@ -11,12 +11,13 @@
 #   make selftest       draw the calibration pattern in this terminal
 #   make dev            run the desktop with the TUI layer (status line + panels)
 #   make dev-selftest   the same layer over the calibration pattern, no screen access needed
+#   make dev-mock       the same layer over a desktop drawn in process: no permission, runs forever
 
 CONFIG  ?= --pane 137x44 --cell 17x33 --source 1920x1200
 BENCH_ARGS ?=
 KRD     := .build/release/krd
 
-.PHONY: all build test selftest dev dev-selftest dev-stats bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
+.PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
 
 all: build
 
@@ -40,6 +41,14 @@ dev-selftest: build
 # The stats panel pre-opened, for a screenshot or a bug report.
 dev-stats: build
 	$(KRD) --selftest --dev --dev-panel stats $(CONFIG)
+
+# ScreenCaptureKit replaced by a desktop drawn in process: same tiles, same encoder, same
+# placements, same chrome -- no screen-recording permission and no end.
+dev-mock: build
+	$(KRD) --mock --dev $(MOCK_ARGS)
+
+mock: build
+	$(KRD) --mock $(MOCK_ARGS)
 
 bench:
 	python3 bench/bench.py $(BENCH_ARGS)

@@ -71,6 +71,9 @@ struct Options {
     var noChrome = false
     /// Open a panel at startup, for screenshots and for `--dev --selftest` without input.
     var devPanel: String? = nil
+    /// Replace ScreenCaptureKit with a desktop drawn in process. No permission, runs forever.
+    var mock = false
+    var mockSize: (w: Int, h: Int)? = nil
 }
 
 func usage() -> String {
@@ -105,6 +108,8 @@ func usage() -> String {
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
       --no-chrome         force the TUI layer off, e.g. for scripts
       --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
+      --mock              draw the desktop in process: no screen, no permission, runs forever
+      --mock-size WxH     size of the generated desktop (default 1920x1200)
       --list              list displays and windows, then exit
       -v, --version       print the version and exit
 
@@ -255,6 +260,12 @@ func parseArguments() -> Options {
         case "--debug": options.debug = true
         case "--dev": options.dev = true
         case "--dev-panel": options.devPanel = args[safe: i + 1]; i += 1
+        case "--mock": options.mock = true
+        case "--mock-size":
+            let spec = args[safe: i + 1] ?? ""
+            i += 1
+            let parts = spec.split(separator: "x").compactMap { Int($0) }
+            if parts.count == 2, parts[0] > 8, parts[1] > 8 { options.mockSize = (parts[0], parts[1]) }
         case "--no-chrome": options.noChrome = true
         case "--list": options.listOnly = true
         case "-v", "--version": print("krd \(krdVersion)"); exit(0)
@@ -376,6 +387,7 @@ final class Desk {
     private var pipeSamples: [Double] = []
     private var targetLabel = "-"
     private var shareable: SCShareableContent?
+    private var mock: MockDesktop?
     private var geometrySource = "-"
 
     private var chromeEnabled: Bool { options.dev && !options.noChrome }
@@ -451,6 +463,43 @@ final class Desk {
             startChrome()          // --dev --selftest is how the layer is tested without a screen
             try await runSelfTest(layout: layout)
             return
+        }
+
+        if options.mock {
+            if let cell = options.cell { TermGeometry.fallbackCell = cell }
+            let queried = TermGeometry.query()
+            var geometry = queried ?? TermGeometry.read()
+            // --pane is how a dev tool reproduces "it looks wrong at 137x60" without a 137x60 pane.
+            if let pane = options.pane {
+                geometry.cols = pane.cols
+                geometry.rows = pane.rows
+            }
+            geometrySource = (queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")) + " · mock"
+            // Nothing below this line is mocked: same tiles, same encoder, same placements, same
+            // chrome. Only the pixel source is different, which is why this needs no permission.
+            let size = options.mockSize ?? (w: 1920, h: 1200)
+            self.sourceRect = CGRect(x: 0, y: 0, width: size.w, height: size.h)
+            targetLabel = "mock \(size.w)×\(size.h)"
+            self.filter = nil
+            applyLayout(geometry: geometry)
+            guard let layout = currentGrid() else {
+                throw DeskError.message("could not compute a tile layout")
+            }
+            writer.beginSession()
+            startChrome()
+            installSignalCleanup()
+            installResizeHandler()
+            if options.debug || options.statsJSON != nil { startStats() }
+            startInput()
+            let mock = MockDesktop(width: layout.pixelW, height: layout.pixelH, bpp: layout.bpp,
+                                   fps: options.fps) { [weak self] pixels, width, height in
+                self?.handleFrame(pixels: pixels, width: width, height: height)
+            }
+            self.mock = mock
+            mock.start()
+            Log.write("krd: mock \(layout.pixelW)x\(layout.pixelH) px @\(options.fps) fps, "
+                      + "\(layout.tilesX)x\(layout.tilesY) tiles, no capture\n")
+            while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -549,35 +598,7 @@ final class Desk {
         try await capturer.start(filter: filter, sourceRect: cropForFilter(),
                                  width: layout.pixelW, height: layout.pixelH, fps: options.fps)
 
-        if !options.noInput {
-            let reader = InputReader(viewport: { [weak self] in self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero) },
-                                     dryRun: options.dryRun) { [weak self] in self?.shutdown() }
-            reader.onChromeKey = { [weak self] byte in self?.chromeKey(byte) ?? false }
-            reader.onChromeClick = { [weak self] row, col in self?.chromeClick(row: row, col: col) }
-            reader.trace = options.debug
-            reader.ime = options.ime
-            if options.debug {
-                Log.write("krd: ime \(options.ime.rawValue) (auto = keys where the terminal reports them, "
-                          + "raw = keys only, unicode = inject the character)\n")
-            }
-            if let target = windowTarget {
-                reader.targetPid = { [weak self] in self?.aliveWindowPid() }
-                if options.debug {
-                    Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
-                              + "window \(target.id); a closed window falls back to global injection\n")
-                }
-            }
-            let active = reader.start()
-            input = reader
-            if options.debug {
-                Log.write("krd: input active=\(active)\n")
-            }
-            if options.debug {
-                let trusted = AXIsProcessTrusted()
-                Log.write(
-                    "krd: accessibility trusted=\(trusted) (clicks/keys need it; see System Settings > Privacy > Accessibility)\n")
-            }
-        }
+        startInput()
 
         // Clipboard bridge (issue #18). `--no-input` keeps the target-to-terminal half only: the
         // other half presses keys into the mirrored machine, so it is dropped rather than trusted.
@@ -1299,7 +1320,7 @@ final class Desk {
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
-<<<<<<< HEAD
+        framesHandled += 1
 
         // A window mirror whose very first frame is essentially all black is almost certainly a
         // compositing layer that slipped past the layer test, not an app (issue #24). One line,
@@ -1404,7 +1425,7 @@ final class Desk {
     }
 
     private func handleResize() {
-        guard filter != nil, !cleanedUp else { return }
+        guard !cleanedUp, filter != nil || mock != nil else { return }
         let geometry = TermGeometry.read()
         applyLayout(geometry: geometry)
         guard let layout = currentGrid(), layout.pixelW > 8, layout.pixelH > 8 else { return }
@@ -1592,6 +1613,38 @@ final class Desk {
             rows.append("   window \(window.windowID)  \(app) — \(title)")
         }
         return Array(rows.prefix(24))
+    }
+
+    private func startInput() {
+        guard !options.noInput else { return }
+        let reader = InputReader(
+            viewport: { [weak self] in
+                self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1,
+                                                    sourceRect: .zero)
+            },
+            dryRun: options.dryRun) { [weak self] in self?.shutdown() }
+        reader.onChromeKey = { [weak self] byte in self?.chromeKey(byte) ?? false }
+        reader.onChromeClick = { [weak self] row, col in self?.chromeClick(row: row, col: col) }
+        reader.trace = options.debug
+        reader.ime = options.ime
+        if options.debug {
+            Log.write("krd: ime \(options.ime.rawValue) (auto = keys where the terminal reports them, "
+                      + "raw = keys only, unicode = inject the character)\n")
+        }
+        if let target = windowTarget {
+            reader.targetPid = { [weak self] in self?.aliveWindowPid() }
+            if options.debug {
+                Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
+                          + "window \(target.id); a closed window falls back to global injection\n")
+            }
+        }
+        let active = reader.start()
+        input = reader
+        if options.debug {
+            Log.write("krd: input active=\(active)\n")
+            Log.write("krd: accessibility trusted=\(AXIsProcessTrusted()) (clicks/keys need it; "
+                      + "see System Settings > Privacy > Accessibility)\n")
+        }
     }
 
     private func recorderLabel() -> String {
