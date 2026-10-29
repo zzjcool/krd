@@ -88,8 +88,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 
 ## Contact
 
-X: [**@zzjcoo**](https://x.com/zzjcoo) — issues and PRs are the fastest way to get a fix; X is for
-"this is neat" and screenshots.
+X: [**@zzjcoo**](https://x.com/zzjcoo)
+
+For bugs and feature requests please open an
+[issue](https://github.com/zzjcool/krd/issues) — it is easier to track than a DM.
 
 ## License
 

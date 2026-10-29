@@ -85,8 +85,9 @@ krd --debug                  # 统计写日志文件，不会打到画面上
 
 ## 联系
 
-X（Twitter）：[**@zzjcoo**](https://x.com/zzjcoo) —— 修问题最快的方式是提 issue / PR，
-X 用来聊想法、看截图。
+X（Twitter）：[**@zzjcoo**](https://x.com/zzjcoo)
+
+Bug 和功能建议请开 [issue](https://github.com/zzjcool/krd/issues)，比私信好追踪。
 
 ## 许可
 
