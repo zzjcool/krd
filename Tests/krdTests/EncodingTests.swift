@@ -1,6 +1,7 @@
 import XCTest
 import CZlib
 @testable import krd
+@testable import krdcore
 
 /// Pure logic only: the tiling maths, the dirty detection, the zlib policy. Anything that
 /// touches ScreenCaptureKit, a tty or the window server is out of scope here on purpose --

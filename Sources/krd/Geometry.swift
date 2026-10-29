@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import krdcore
 
 /// Terminal geometry and the pixel/cell/point conversions everything else depends on.
 struct TermGeometry {
@@ -182,5 +183,17 @@ extension TermGeometry {
         let parts = rest[..<end].split(separator: ";")
         guard parts.count == 2, let h = Int(parts[0]), let w = Int(parts[1]), h > 0, w > 0 else { return nil }
         return (w, h)
+    }
+}
+
+extension TileGrid {
+    /// `TermGeometry` owns the tty and stays in this module; the arithmetic is `krdcore`'s
+    /// (issue #21). Same numbers in, same grid out — call sites did not change.
+    static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int,
+                     bpp: Int = 3) -> TileGrid {
+        let cell = geometry.cellSize
+        return make(paneCols: geometry.cols, paneRows: geometry.rows,
+                    cellW: cell.w, cellH: cell.h, aspect: aspect,
+                    tileCols: tileCols, tileRows: tileRows, bpp: bpp)
     }
 }

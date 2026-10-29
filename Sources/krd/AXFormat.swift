@@ -5,6 +5,7 @@
 
 import CoreGraphics
 import Foundation
+import krdcore
 
 /// One node, already reduced to what a model gets to see.
 struct AXNode {

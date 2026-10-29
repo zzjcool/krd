@@ -3,6 +3,7 @@ import Accelerate
 import CoreMedia
 import CoreVideo
 import ScreenCaptureKit
+import krdcore
 
 /// ScreenCaptureKit wrapper: one stream, one callback queue, BGRA -> RGBA with vImage.
 final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -16,7 +17,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var spare = [UInt8]()
     private var previous: [UInt8]?
     /// Matches ScreenWriter.format; set before start().
-    var format: PixelFormat = .rgb
+    var format: krdcore.PixelFormat = .rgb
     /// Draw the pointer into the captured frame. Off means the picture shows a bare desktop:
     /// the mirrored cursor is redundant (the pane already follows the local pointer) and every
     /// mouse move would otherwise dirty the tiles under it.

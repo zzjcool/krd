@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import krdcore
 
 /// Which halves of the clipboard bridge are on (issue #18).
 ///

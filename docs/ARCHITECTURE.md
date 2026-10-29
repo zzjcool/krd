@@ -20,14 +20,16 @@ describes how the pieces fit and which invariants must not be broken.
 ## 2. Source map
 
 ```
-Sources/krd/
+Sources/krdcore/          <- no AppKit, no CoreGraphics, no ScreenCaptureKit (issue #21)
+  Tiles.swift     TileGrid: whole-cell grid, per-tile pixel rects, extraction, dirty detection
+  Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP, zlib
+  Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy (the encoding policy)
+
+Sources/krd/              <- everything that touches the OS
   main.swift      Options parsing, lifecycle, layout application, stats, resize, selftest
   Geometry.swift  TermGeometry (CSI 16t/14t, TIOCGWINSZ) and Viewport (cells/pixels → points)
   Displays.swift  DisplayPick (which display, and why) and Debounce (one action per burst)
-  Tiles.swift     TileGrid: whole-cell grid, per-tile pixel rects, extraction, dirty detection
   Capture.swift   Capturer: SCStream setup, BGRA→RGBA, byte-identical frame dropping
-  Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP
-  Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy (the encoding policy)
   Input.swift     InputReader: raw tty, SGR/SGR-Pixels mouse, keys → CGEvent
   Bench.swift     synthetic corpus, staged timings, JSON, --bench-wire, --stats-json
   Replay.swift    --record / --replay of real frames (raw + manifest.jsonl)
@@ -37,6 +39,37 @@ Sources/krd/
   AXRefs.swift    refs on disk: snapshot model, anchor matching, the $TMPDIR/krd-ax store
 ```
 
+Dependency direction is a straight line: `main` → `krdcore`/`Capture`/`Input` → `Geometry`.
+
+### 2.1 Where the byte contract lives (`krdcore`)
+
+`krdcore` is the part of krd that decides **what bytes go on the wire**: the tile grid, the dirty
+scan, the zlib call, the level policy, and the ESC/APC assembly. It deliberately has no idea that a
+Mac exists — no ScreenCaptureKit, no CoreGraphics, no AppKit — so it can be compiled, tested and
+fuzzed anywhere.
+
+Everything else stays in `krd`: capture (SCK), injection (`CGEvent`), the tty (`ioctl`), the
+clipboard (`NSPasteboard`) and the accessibility channel. Those are the parts that need a Mac, and
+they are the parts that were already hard to test; the split makes it obvious which is which.
+
+Two consequences worth knowing:
+
+- **The dumps are pinned.** `Tests/krdcoreTests/GoldenDumpTests` renders two frames at a fixed
+  geometry (80x24 cells of 17x33 px, 8x4 tiles) with a fixed zlib level, and compares every byte
+  against `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump`. A change to the escapes, the
+  tiling or the level policy fails at the first differing byte. Regenerate on purpose with
+  `KRD_UPDATE_FIXTURE=1 swift test` — **without `--filter`**: a filter can skip this bundle
+  entirely (Swift 5.10 prints `Executed 0 tests` for the bundle that did not match, so
+  "0 failures" does not mean the fixture was rewritten), and the update run prints
+  `golden fixture written: <path> (<n> B)` when it actually regenerated it.
+- **`ScreenWriter` has a `sink`.** In production it is nil and bytes go to the pty; the golden test
+  sets it to collect the stream in memory. `discardOutput` (bench) is unchanged: it still drops
+  bytes before they would reach the dump.
+
+The extraction changed no bytes: `--selftest --pane 80x24 --cell 17x33` with `KRD_DUMP` produced
+identical dumps from the pre-refactor and post-refactor binaries (118 087 bytes,
+sha256 `f18475a2596aeeab522fb3037bed0ab4c90d99d325dff4346599abaf9123aa11`), and `otool -L` is
+unchanged.
 Dependency direction is a straight line: `main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`.
 `krd ax` is a second root: `main` dispatches it before AppKit exists and it depends on `AXFormat`
 only, so nothing in the capture or render path can be reached from it (and vice versa).

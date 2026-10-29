@@ -1,5 +1,6 @@
 import XCTest
 @testable import krd
+@testable import krdcore
 
 /// Which display a session follows, and when a burst of screen-parameter notifications collapses
 /// into one restart. Both are pure so they can be tested without a screen or a monitor to unplug.

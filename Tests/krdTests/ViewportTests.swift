@@ -1,6 +1,7 @@
 import XCTest
 import CoreGraphics
 @testable import krd
+@testable import krdcore
 
 /// The zoom geometry: which part of the screen a magnified view shows, and where a click inside
 /// that view lands on the desktop. Both are pure functions of a CGRect, so they are tested here

@@ -1,4 +1,5 @@
 import Foundation
+import krdcore
 
 /// While an image owns the screen, text must not go to the terminal: every line written
 /// moves the cursor, and a line on the last row scrolls the grid -- which slides the tiles

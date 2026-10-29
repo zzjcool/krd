@@ -1,6 +1,7 @@
 import XCTest
 import CoreGraphics
 @testable import krd
+@testable import krdcore
 
 /// Pure logic only: the terminal-byte → macOS key code tables in `Keys`. No `CGEvent` is posted
 /// and no tty is opened, so this runs anywhere.

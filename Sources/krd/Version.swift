@@ -1,3 +1,4 @@
+import krdcore
 // Version of the krd executable, printed by `krd --version`.
 //
 // This file and the repository VERSION file are kept in sync by

@@ -17,21 +17,53 @@ krd 是一个单文件 Swift 可执行程序，十三个源文件约 3.9 k 行�
 ## 2. 源码地图
 
 ```
-Sources/krd/
+Sources/krdcore/          <- 不含 AppKit / CoreGraphics / ScreenCaptureKit（issue #21）
+  Tiles.swift     TileGrid：整格网格、每块像素矩形、抽取、脏块判定
+  Render.swift    ScreenWriter：会话帧、逐块 kitty 逃逸序列、KRD_DUMP、zlib
+  Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy（编码策略）
+
+Sources/krd/              <- 所有碰操作系统的部分
   main.swift      参数解析、生命周期、布局应用、统计、resize、selftest
-  Geometry.swift  TermGeometry（CSI 16t/14t、TIOCGWINSZ）与 Viewport（格/像素 → 屏幕点）
-  Displays.swift  DisplayPick（选哪块屏、为什么）与 Debounce（一串事件只做一次动作）
-  Tiles.swift     TileGrid：整格网格、每块瓦片的像素矩形、切片、脏检测
-  Capture.swift   Capturer：SCStream 配置、BGRA→RGBA、逐字节相同帧丢弃
-  Render.swift    ScreenWriter：会话框架、逐瓦片 kitty 转义、zlib、KRD_DUMP
+  Geometry.swift  TermGeometry（CSI 16t/14t、TIOCGWINSZ）与 Viewport（格/像素 → 点）
+  Displays.swift  DisplayPick（选哪块屏，以及为什么）与 Debounce（一次突发只动作一次）
+  Capture.swift   Capturer：SCStream 装配、BGRA→RGBA、字节相同的帧丢弃
   Input.swift     InputReader：raw tty、SGR/SGR-Pixels 鼠标、按键 → CGEvent
-  Log.swift       文件日志（永不写 tty）
-  AXCommand.swift `krd ax …`：预检、应用解析、带预算的树遍历、文本 + JSON
-  AXFormat.swift  纯逻辑那一半：消毒、剪枝、单行渲染（有测试覆盖）
-  AXRefs.swift    ref 落盘：snapshot 模型、anchor 匹配、$TMPDIR/krd-ax 存储
+  Bench.swift     合成语料、分段计时、JSON、--bench-wire、--stats-json
+  Replay.swift    --record / --replay 真实帧（raw + manifest.jsonl）
+  Log.swift       文件日志（绝不写终端）
+  AXCommand.swift `krd ax …`：前置检查、app 解析、带预算的树遍历、文本 + JSON
+  AXFormat.swift  纯逻辑那一半：清洗、裁剪、单行渲染（有测试覆盖）
+  AXRefs.swift    磁盘上的 ref：快照模型、锚点匹配、$TMPDIR/krd-ax 存储
 ```
 
-依赖是单向直线：`main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`。只有 `Render` 和 `Input`
+依赖是单向直线：`main` → `krdcore`/`Capture`/`Input` → `Geometry`。
+
+### 2.1 字节契约住在哪（`krdcore`）
+
+`krdcore` 是 krd 里决定**线上字节**的那一半：瓦片网格、脏块扫描、zlib 调用、level 策略、ESC/APC
+组装。它刻意不知道 Mac 的存在——没有 ScreenCaptureKit、没有 CoreGraphics、没有 AppKit——所以它在
+任何机器上都能编译、测试、做模糊测试。
+
+其余部分留在 `krd`：采集（SCK）、注入（`CGEvent`）、tty（`ioctl`）、剪贴板（`NSPasteboard`）、无障碍
+通道。这些是需要 Mac 的部分，也是本来就难测的部分；这个切分让「哪些是哪一半」变得一目了然。
+
+两个后果值得知道：
+
+- **dump 被钉住了。** `Tests/krdcoreTests/GoldenDumpTests` 在固定几何（80x24 格、每格 17x33 px、
+  8x4 瓦片）和固定 zlib level 下渲染两帧，逐字节比对
+  `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump`。逃逸格式、切块方式或 level 策略一旦
+  变化，测试会在第一个不同的字节上失败。确实要改格式时用
+  `KRD_UPDATE_FIXTURE=1 swift test`（**不要加 `--filter`**：带过滤时 SwiftPM 可能整个跳过这个
+  bundle，在 Swift 5.10 上会打印 `Executed 0 tests` 而实际什么都没跑，于是"0 failures"并不代表
+  fixture 被重写；更新成功时会打印 `golden fixture written: <path> (<n> B)`）重新生成。
+- **`ScreenWriter` 有一个 `sink`。** 生产环境是 nil，字节直接进 pty；黄金测试把它设成收集字节流。
+  `discardOutput`（bench 用）行为不变：仍然在写入 dump 之前就丢弃。
+
+这次抽取没有改变任何字节：重构前后两个二进制在 `--selftest --pane 80x24 --cell 17x33` +
+`KRD_DUMP` 下产出的 dump 完全一致（118 087 字节，
+sha256 `f18475a2596aeeab522fb3037bed0ab4c90d99d325dff4346599abaf9123aa11`），`otool -L` 也没变。
+
+`main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`。只有 `Render` 和 `Input`
 懂终端协议，其它模块不懂；只有 `Capture` 懂 ScreenCaptureKit，其它模块不懂。
 
 ## 3. 线程

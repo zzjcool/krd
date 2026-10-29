@@ -1,6 +1,7 @@
 import XCTest
 import CoreGraphics
 @testable import krd
+@testable import krdcore
 
 /// The kitty keyboard protocol, decoded as data. No tty, no `CGEvent`, no buffer: `InputReader`
 /// owns those, and what needs pinning is which key a report means and whether it is a press, a

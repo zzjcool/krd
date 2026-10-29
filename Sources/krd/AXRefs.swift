@@ -13,6 +13,7 @@
 // Tests/krdTests/AXRefsTests.swift -- the AX side only supplies "the children of this element".
 
 import Foundation
+import krdcore
 
 /// `@e12` -- the handle a dump prints.
 struct AXRef: Equatable, Hashable, CustomStringConvertible {

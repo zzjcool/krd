@@ -1,5 +1,6 @@
 import XCTest
 @testable import krd
+@testable import krdcore
 
 /// Pure logic only: the text a model ends up reading. Everything that needs a window
 /// server (the walk itself, the preflight) is exercised by `krd ax doctor` /

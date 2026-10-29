@@ -3,6 +3,7 @@ import ApplicationServices
 import AppKit
 import CoreGraphics
 import ScreenCaptureKit
+import krdcore
 
 struct Options {
     var fps = 20

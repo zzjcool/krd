@@ -1,4 +1,5 @@
 import CoreGraphics
+import krdcore
 
 /// The kitty keyboard protocol, as data.
 ///

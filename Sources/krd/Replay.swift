@@ -1,4 +1,5 @@
 import Foundation
+import krdcore
 
 /// Real frames, captured once and replayed forever: the only way to put a real desktop
 /// workload into the benchmarks, and the only way to reproduce "it stutters when I scroll"

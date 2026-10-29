@@ -4,49 +4,52 @@ import Foundation
 ///
 /// Every tile occupies a whole number of terminal cells, so it can be placed with
 /// `c`/`r` alone (no sub-cell pixel offsets) and the terminal never has to resample.
-struct TileGrid {
-    let paneCols: Int
-    let paneRows: Int
-    let cellW: Double
-    let cellH: Double
+public struct TileGrid {
+    public let paneCols: Int
+    public let paneRows: Int
+    public let cellW: Double
+    public let cellH: Double
     /// Cells per tile.
-    let tileCols: Int
-    let tileRows: Int
+    public let tileCols: Int
+    public let tileRows: Int
     /// Scaled frame size in device pixels: exactly paneCols x paneRows cells.
-    let pixelW: Int
-    let pixelH: Int
+    public let pixelW: Int
+    public let pixelH: Int
     /// Bytes per pixel in the frame buffer we are handed (3 for RGB, 4 for RGBA).
-    let bpp: Int
+    public let bpp: Int
 
-    var tilesX: Int { (paneCols + tileCols - 1) / tileCols }
-    var tilesY: Int { (paneRows + tileRows - 1) / tileRows }
-    var count: Int { tilesX * tilesY }
+    public var tilesX: Int { (paneCols + tileCols - 1) / tileCols }
+    public var tilesY: Int { (paneRows + tileRows - 1) / tileRows }
+    public var count: Int { tilesX * tilesY }
 
     /// Fit `aspect` (width / height) into the pane, using whole cells.
-    static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int,
-                     bpp: Int = 3) -> TileGrid {
-        let cell = geometry.cellSize
+    ///
+    /// Plain numbers rather than a terminal struct: the core has no tty and no `TermGeometry`
+    /// (issue #21). `krd` forwards its `TermGeometry` through an extension with the old signature.
+    public static func make(paneCols: Int, paneRows: Int, cellW: Double, cellH: Double,
+                            aspect: Double, tileCols: Int, tileRows: Int,
+                            bpp: Int = 3) -> TileGrid {
         // Largest cell rectangle with the source aspect that fits the pane.
-        var cols = geometry.cols
-        var rows = Int((Double(cols) * cell.w / aspect / cell.h).rounded())
-        if rows > geometry.rows {
-            rows = geometry.rows
-            cols = Int((Double(rows) * cell.h * aspect / cell.w).rounded())
+        var cols = paneCols
+        var rows = Int((Double(cols) * cellW / aspect / cellH).rounded())
+        if rows > paneRows {
+            rows = paneRows
+            cols = Int((Double(rows) * cellH * aspect / cellW).rounded())
         }
-        cols = max(tileCols, min(geometry.cols, cols))
-        rows = max(tileRows, min(geometry.rows, rows))
+        cols = max(tileCols, min(paneCols, cols))
+        rows = max(tileRows, min(paneRows, rows))
         return TileGrid(
             paneCols: cols, paneRows: rows,
-            cellW: cell.w, cellH: cell.h,
+            cellW: cellW, cellH: cellH,
             tileCols: tileCols, tileRows: tileRows,
-            pixelW: max(2, Int((Double(cols) * cell.w).rounded())),
-            pixelH: max(2, Int((Double(rows) * cell.h).rounded())),
+            pixelW: max(2, Int((Double(cols) * cellW).rounded())),
+            pixelH: max(2, Int((Double(rows) * cellH).rounded())),
             bpp: bpp
         )
     }
 
     /// Pixel rect of tile at grid position (tx, ty); edge tiles are smaller.
-    func rect(_ tx: Int, _ ty: Int) -> (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int) {
+    public func rect(_ tx: Int, _ ty: Int) -> (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int) {
         let cx = min(tileCols, paneCols - tx * tileCols)
         let cy = min(tileRows, paneRows - ty * tileRows)
         let x0 = Int((Double(tx * tileCols) * cellW).rounded())
@@ -58,7 +61,7 @@ struct TileGrid {
     }
 
     /// Copy one tile out of a full frame into a tight buffer.
-    func extract(_ frame: [UInt8],
+    public func extract(_ frame: [UInt8],
                  rect r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: r.w * r.h * bpp)
         let stride = pixelW * bpp
@@ -75,7 +78,7 @@ struct TileGrid {
     }
 
     /// Indices of tiles whose pixels differ.
-    static func dirty(previous: [UInt8], current: [UInt8], grid: TileGrid) -> [Int] {
+    public static func dirty(previous: [UInt8], current: [UInt8], grid: TileGrid) -> [Int] {
         guard previous.count == current.count else { return Array(0..<grid.count) }
         var result: [Int] = []
         let stride = grid.pixelW * grid.bpp

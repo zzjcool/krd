@@ -8,6 +8,7 @@
 
 import CoreGraphics
 import Foundation
+import krdcore
 
 /// A display as the picker sees it: ScreenCaptureKit's `SCDisplay.displayID` and its bounds.
 struct DisplayBox: Equatable {

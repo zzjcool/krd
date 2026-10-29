@@ -13,6 +13,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import krdcore
 
 enum AXExit: Int32 {
     case ok = 0
