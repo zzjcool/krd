@@ -125,7 +125,7 @@ that answers the OSC 52 read — `--clipboard-paste <file>` is the path that alw
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 45 symptoms with root causes |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 46 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
 ## Contributing
