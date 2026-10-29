@@ -100,6 +100,12 @@ final class InputReader {
     private let currentViewport: () -> Viewport
     private let onQuit: () -> Void
     private let dryRun: Bool
+    /// `nil` = display mode, post globally. Non-nil = `--window`: ask it for the pid every event, so
+    /// a window that closed mid-session is noticed instead of silently clicking into whatever is in
+    /// front (issue #17).
+    var targetPid: (() -> pid_t?)?
+    private var loggedTarget = false
+    private var loggedFallback = false
     /// With --debug every recognised event is logged, so "nothing happens" can be split
     /// into "the terminal never sent it" vs "the click went to the wrong place".
     var trace = false
@@ -524,20 +530,20 @@ final class InputReader {
     private func postKey(_ code: CGKeyCode, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
         if dryRun || trace {
             log("key code=\(code) flags=\(flags.rawValue)"
-                + (phase == .press ? "" : " phase=\(phase)"))
+                + (phase == .press ? "" : " phase=\(phase)") + pidSuffix())
         }
         if dryRun { return }
         for down in phase == .release ? [false] : [true, false] {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { continue }
             event.flags = flags
-            event.post(tap: .cghidEventTap)
+            post(event)
         }
     }
 
     private func postUnicode(_ ch: Character, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
         if dryRun || trace {
             log("text \(ch.debugDescription) flags=\(flags.rawValue)"
-                + (phase == .press ? "" : " phase=\(phase)"))
+                + (phase == .press ? "" : " phase=\(phase)") + pidSuffix())
         }
         // `--dry-run` means "parse input but never post a CGEvent" -- this path used to post anyway,
         // which made the flag dishonest for every character outside `Keys.map`.
@@ -547,7 +553,7 @@ final class InputReader {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { continue }
             event.flags = flags
             event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-            event.post(tap: .cghidEventTap)
+            post(event)
         }
     }
 
@@ -565,7 +571,7 @@ final class InputReader {
         default:
             break
         }
-        event.post(tap: .cghidEventTap)
+        post(event, describe: "\(type.rawValue) at \(Int(point.x)),\(Int(point.y))")
     }
 
     /// `kind` follows xterm: 64 up, 65 down, 66 left, 67 right.
@@ -577,7 +583,42 @@ final class InputReader {
                                  wheel2: vertical ? 0 : sign,
                                  wheel3: 0) else { return }
         event.flags = flags                                 // same reason as postMouse
+        post(event, describe: "scroll \(sign)")
+    }
+
+    /// One place that decides where an event goes.
+    ///
+    /// A window mirror has to reach *its* window even when another app is in front, and the window
+    /// manager is what would otherwise decide (issue #17). `CGEventPostToPid` hands the event to the
+    /// owning process instead; the coordinates stay global, which is what the app hit-tests with,
+    /// and in window mode `Viewport.sourceRect` is already the window's own frame (`Geometry.swift`)
+    /// — no second mapping is computed here on purpose.
+    ///
+    /// A window that closed mid-session has no pid: fall back to the global tap and say so once,
+    /// because a silent fallback means clicks quietly start going to the desktop.
+    private func post(_ event: CGEvent, describe: String? = nil) {
+        if let targetPid, let pid = targetPid(), pid > 0 {
+            if trace, let describe { log("pid \(pid) <- \(describe)") }
+            if trace, !loggedTarget {
+                loggedTarget = true
+                log("posting to pid \(pid) (window mode): events bypass the window manager")
+            }
+            event.postToPid(pid)
+            return
+        }
+        if targetPid != nil, !loggedFallback {
+            loggedFallback = true
+            Log.write("krd: the mirrored window is gone (no pid) — falling back to global injection;\n"
+                      + "         clicks and keys now go to whatever is in front. Restart with --window <id> to re-attach.\n")
+        }
         event.post(tap: .cghidEventTap)
+    }
+
+    /// Appended to a trace line so `--debug` shows which process an event was aimed at.
+    private func pidSuffix() -> String {
+        guard let targetPid else { return "" }
+        if let pid = targetPid(), pid > 0 { return " pid=\(pid)" }
+        return " pid=gone"
     }
 
     private func utf8Length(_ first: UInt8) -> Int {

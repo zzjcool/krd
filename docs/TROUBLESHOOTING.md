@@ -188,9 +188,22 @@ window story that terminals do not have.
 
 ### 20. With `--window`, clicks go to whatever is on top instead of the mirrored window
 
-**Cause.** `--window` only filters the *capture*; injection is a global `CGEvent.post(tap:
-.cghidEventTap)`, so the window manager decides who gets the click.
-**Fix.** Keep the mirrored window frontmost, or wait for `CGEventPostToPid` (roadmap).
+**Cause (fixed in #17).** `--window` used to filter the *capture* only: injection was a global
+`CGEvent.post(tap: .cghidEventTap)`, so the window manager decided who got the click and a
+half-covered window lost every one of them.
+
+**Fix.** In window mode krd posts to the owning process with `CGEventPostToPid` — mouse, wheel and
+keys alike — so a click reaches the mirrored window whatever is in front of it. The coordinates stay
+screen points and come from the window's own frame, which is what the target app hit-tests with.
+
+Two things worth knowing:
+
+- If the app quits or the mirrored window closes, there is no pid to post to. krd says so once
+  (`the mirrored window is gone (no pid) — falling back to global injection`) and the clicks go to
+  whatever is in front again; restart with `--window <id>` to re-attach.
+- `--debug` logs the pid actually used (`window mode — events go to pid 1234`, then
+  `posting to pid 1234 (window mode)` and `pid 1234 <- 1 at 804,298`), so "where did that click go"
+  is answerable instead of guesswork.
 
 ### 21. `KRD_Q=0` types garbage into the desktop
 

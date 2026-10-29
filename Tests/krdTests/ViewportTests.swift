@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 @testable import krd
 
 /// The zoom geometry: which part of the screen a magnified view shows, and where a click inside
@@ -103,5 +104,55 @@ final class ViewportZoomTests: XCTestCase {
         XCTAssertTrue(window.contains(crop))
         XCTAssertEqual(crop.width, 450, accuracy: 0.001)
         XCTAssertEqual(crop.midX, -1000, accuracy: 0.001)
+    }
+}
+
+final class ViewportTests: XCTestCase {
+    /// The Terminal window measured on this machine in #24: 863x499 at 746,255.
+    private let window = CGRect(x: 746, y: 255, width: 863, height: 499)
+    private let display = CGRect(x: 0, y: 0, width: 1440, height: 2560)
+
+    private func windowViewport() -> Viewport {
+        Viewport(pixelWidth: 863, pixelHeight: 499, cols: 100, rows: 30, sourceRect: window)
+    }
+
+    func testWindowModeMapsCellsIntoTheWindowFrame() {
+        let viewport = windowViewport()
+        // A cell maps to its own centre, so cell 1 sits half a cell in from the frame edge.
+        let first = viewport.point(forCell: 1, 1)
+        XCTAssertEqual(first.x, window.minX + window.width / (2 * 100), accuracy: 0.001)
+        XCTAssertEqual(first.y, window.minY + window.height / (2 * 30), accuracy: 0.001)
+        // Every cell, corners included, must stay inside the window: a click outside it is exactly
+        // the "went to the wrong place" failure this issue is about.
+        for cx in [1, 50, 100] {
+            for cy in [1, 15, 30] {
+                XCTAssertTrue(window.contains(viewport.point(forCell: cx, cy)),
+                              "cell \(cx),\(cy) mapped outside the window")
+            }
+        }
+    }
+
+    func testWindowModeMapsPixelsIntoTheWindowFrame() {
+        let viewport = windowViewport()
+        for px in [0, 1, 431, 862] {
+            for py in [0, 249, 498] {
+                XCTAssertTrue(window.contains(viewport.point(forPixel: px, py)),
+                              "pixel \(px),\(py) mapped outside the window")
+            }
+        }
+        // A pixel coordinate is clamped to the frame, not extrapolated past it.
+        let overshoot = viewport.point(forPixel: 5_000, 5_000)
+        XCTAssertEqual(overshoot.x, window.maxX, accuracy: 0.001)
+        XCTAssertEqual(overshoot.y, window.maxY, accuracy: 0.001)
+    }
+
+    /// The contrast case: display mode maps the same cell to a different point, which is why the
+    /// source rect, not the display, is the origin that matters.
+    func testDisplayModeMapsAgainstTheDisplayInstead() {
+        let displayViewport = Viewport(pixelWidth: 1440, pixelHeight: 2560, cols: 137, rows: 44,
+                                       sourceRect: display)
+        let point = displayViewport.point(forCell: 137, 44)
+        XCTAssertGreaterThan(point.y, window.maxY)
+        XCTAssertFalse(window.contains(point))
     }
 }
