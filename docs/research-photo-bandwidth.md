@@ -257,10 +257,16 @@ The point is 13.58 → 2.49 MB, which is the difference between "cannot" and "wo
 
 - `docs/research-photo-bandwidth.md` + `.zh-CN.md` (this document).
 - `probe/photo_codec.py`: the measurement tool, standard library only.
-- `bench/budget.json`: a `photo` **`bytes.wire`** budget at today's value (13.6 MB). Note it is not
-  "failing by design": issue #31 had just made the CI gate meaningful, and a red-by-design check
-  would re-break exactly that. A ceiling that only ratchets down is the version that survives
-  contact with a team.
+- `bench/budget.json`: a `photo` **`bytes.wire`** budget of 15,000,000 — ~10 % over today's
+  13,580,155, the same "catch a large regression, not a 5 % one" rule the rest of that file follows.
+
+  Review of the first version of this PR asked for exactly this, and the argument is worth keeping:
+  the measured value *is* exactly reproducible (the `photo` frame is generated noise, no clock in
+  it), so a 0.9 % ceiling would have been honest arithmetic — and it would have fired on the first
+  branch that changed chunk size or tile framing, at which point somebody widens the number in the
+  same commit as the change that tripped it, and the budget stops meaning anything. A ceiling with
+  the same slack as its neighbours is the one that gets read instead of edited. When M1–M3 land,
+  the number comes down **with** the `docs/research-photo-bandwidth.md` table in the same PR.
 - `README.md` / `README.zh-CN.md`: the **Rough** row now says where the numbers live instead of
   hinting at a mystery codec.
 
