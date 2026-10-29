@@ -43,6 +43,10 @@ public final class ScreenWriter {
     }()
     private var batchOpen = false
     private var out = [UInt8]()
+    /// Chrome text arrives on the main queue while tiles are assembled on the capture queue.
+    /// One lock around "append + flush" means a text write can never land inside a base64
+    /// payload, and the picture never waits for a UI tick (it is one uncontended lock).
+    private let writeLock = NSRecursiveLock()
 
     public private(set) var framesEmitted = 0
     public private(set) var lastFrameBytes = 0
@@ -414,6 +418,32 @@ public final class ScreenWriter {
     public var sink: (([UInt8]) -> Void)?
 
     private func flush() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        flushLocked()
+    }
+
+    /// Writes TUI-layer text. Positioned escapes only: the caller guarantees no newline and no
+    /// write above the picture (Chrome.swift), and this lock guarantees no split escape.
+    func writeChrome(_ bytes: [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        out.append(contentsOf: bytes)
+        flushLocked()
+    }
+
+    /// What `KRD_SYNC` / `KRD_NOSYNC` actually selected, for the stats panel.
+    var syncLabel: String {
+        switch syncMode {
+        case .frame: return "frame"
+        case .tile: return "tile"
+        case .none: return "none"
+        }
+    }
+    var quietLabel: String { quiet }
+
+    private func flushLocked() {
         guard !out.isEmpty else { return }
         frameWireBytes += out.count
         if let sink {

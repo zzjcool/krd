@@ -314,6 +314,9 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `KRD_Q` | 每条转义里的 `q=` 字段（默认 `2` = 静默） |
 | `KRD_FORMAT` | `rgb`（默认，`f=24`）或 `rgba`（`f=32`） |
 | `KRD_SYNC` | `tile` 恢复每瓦片一个同步块；`KRD_NOSYNC=1` 完全关掉 |
+| `--dev` | `Chrome` + `startChrome()`：TUI 层，预留一行状态栏，面板按需占行 |
+| `--dev-panel` | 在第一次布局前就打开面板，用于截图和 pty 测试 |
+| `--no-chrome` | 强制关闭该层，方便把 `--dev` 写进包装脚本 |
 | `KRD_REAP` | 每 n 帧整屏重绘（0 = 关闭，默认） |
 | `KRD_BENCH_BUDGET_SCALE` | 只给 `bench/bench.py` 用（krd 本身不读）：按机器速度倍数放大 `ms.*` / `write_ms.*` 预算，bytes 永不放宽（见 [BENCHMARK](BENCHMARK.md) §6） |
 

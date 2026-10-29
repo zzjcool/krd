@@ -356,6 +356,11 @@ which is why §7.6 exists.
 | `KRD_SYNC` | `tile` restores one synchronized block per tile; `KRD_NOSYNC=1` disables them |
 | `KRD_REAP` | repaint everything after n frames (0 = off, the default) |
 | `KRD_BENCH_BUDGET_SCALE` | `bench/bench.py` only (not read by krd): multiplies `ms.*` / `write_ms.*` budgets by the machine's speed factor, never bytes ([BENCHMARK](BENCHMARK.md) §6) |
+| `--mock` | `MockDesktop` instead of `Capturer`: synthetic frames through the real `handleFrame`, no permission |
+| `--mock-size` | size of the generated desktop, default `1920x1200` |
+| `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand |
+| `--dev-panel` | `ChromeState.panel` set before the first layout, for screenshots and pty tests |
+| `--no-chrome` | forces the layer off, so `--dev` can live in a wrapper script |
 
 The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
 
@@ -370,6 +375,30 @@ status from the sample attachments (`idle` = the status says so or is absent, `b
 `complete`), `write max`/`over5` are the worst `write(2)` block of the second and how many
 frames exceeded 5 ms, and `pipe` is capture callback → last byte out. `--stats-json <path>` writes
 the same numbers as one NDJSON object per second (`bench/soak-report.py` reads them).
+
+### The TUI layer (`--dev`)
+
+`Chrome.swift` is a separate layer over the picture: a status line on the last reserved row and
+five panels (stats, devices, settings, log, help). It is off unless `--dev`, and with it off the
+process behaves byte for byte as before — no timer, no text write, the geometry untouched.
+
+The hard part is not drawing; it is coexisting with the placement layer:
+
+1. **A placement lands at the cursor.** Every tile escape moves the cursor first
+   (`ScreenWriter.emit`), precisely so that text written anywhere else cannot drag the picture
+   along. Chrome text moves the cursor too; the explicit move is what makes that harmless.
+2. **Text never goes above the picture.** `ChromeGeometry.imageRows` comes from `TileGrid`, so
+   the chrome cannot guess wrong.
+3. **No newline, ever** — and never the final cell of the final row, which arms the pending-wrap
+   and scrolls the grid on the next byte. Every write is `ESC[row;colH` + bytes.
+4. **Chrome bytes are serialized against the tile flush** (`ScreenWriter.writeLock`), so a UI tick
+   cannot split a base64 payload.
+5. **A panel's rows come out of the picture**, before the aspect fit: the layout re-fits, the
+   capture restarts at the new size, exactly like a resize. A panel is never floated over tiles.
+
+The status line is the only thing that runs at a fixed rate (1 Hz), and it costs text bytes:
+~60 B/s against the 20–50 KB/s the picture needs. That is why this is a text layer and not an
+in-frame overlay.
 
 ## 10. Extension points
 

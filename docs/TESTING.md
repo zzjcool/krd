@@ -52,6 +52,22 @@ krd --selftest --fps 30 --tile 32x16   # fewer, bigger tiles
 
 Duration: 40 frames × 250 ms ≈ 10 s, then `endSession()`.
 
+### The TUI layer
+
+`--dev` is checked the same way — the calibration pattern goes through the real pipeline and the
+status line is written on the row underneath it:
+
+```bash
+make dev-selftest                      # = krd --selftest --dev --pane 137x44 --cell 17x33
+krd --selftest --dev --dev-panel stats # a panel pre-opened, for a screenshot or a bug report
+krd --selftest --dev --pane 137x60 --cell 17x33 > /tmp/tui.bin
+```
+
+Three things to look for in the pane: the status line sits on the row directly under the picture
+(never over it), opening a panel shrinks the picture instead of covering it, and `Ctrl-\\` then
+`q` exits without leaving the terminal in the alternate screen. With a shell and no compiler,
+`--dev-panel` is the whole test: no keystrokes needed.
+
 ## 2. `KRD_GRID=1` — tile placement
 
 | | |
