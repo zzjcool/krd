@@ -218,8 +218,8 @@ if Cx > cols || Cy > rows  →  终端在讲像素  →  粘住 pixelMouse = tru
 | `ESC [ H` / `ESC [ F` | Home / End |
 | `ESC [ Z` | Shift-Tab |
 | `ESC [ 1;…` | 修饰位：`n-1` 的 & 1 shift、& 2 alt、& 4 ctrl、& 8 cmd |
-| `ESC [ <code> ~` | 1,2,7 → Home；3 → forward delete；4,8 → End；5/6 → page up/down；11–14 → F1–F4；15 → F5；17–21 → F6–F10；23,24 → F11,F12（**目前会越过 F 键表末尾直接崩 —— 见 [TROUBLESHOOTING](TROUBLESHOOTING.zh-CN.md#22-按-f11-或-f12-会让进程直接退出)**） |
-| `ESC O A–D / H / F / P–S` | SS3 方向键、Home/End、F1–F4 |
+| `ESC [ <code> ~` | 1,2,7 → Home；3 → forward delete；4,8 → End；5/6 → page up/down；11–14 → F1–F4；15 → F5；17–21 → F6–F10；23,24 → F11,F12；25,26 → F13,F14。一张表（`Keys.numbered`）：16 和 22 是编号里的空档，直接忽略，表里没有的编号同样忽略 |
+| `ESC O A–D / H / F / P–S` | SS3 方向键、Home/End、F1–F4（与 `ESC [ 11 ~` … `ESC [ 14 ~` 同一组键码） |
 | `0x00` | Ctrl-Space |
 | `0x01`–`0x1A` | Ctrl-A … Ctrl-Z（带 `maskControl`） |
 | `0x1C` | **退出**（不转发） |

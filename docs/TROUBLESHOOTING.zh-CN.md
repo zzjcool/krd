@@ -180,10 +180,13 @@ Alt-`G`，后面全变成文字。
 
 ### 22. 按 F11 或 F12 会让进程直接退出
 
-**根因。** `CSI 23~`/`CSI 24~` 的处理用 `code - 11` 去索引 F 键表，对这两个码已经越过 12 元素数组的末尾，
-Swift 越界索引直接 trap。
-**对策。** 在映射修好（加边界检查或把表扩到 14 项）之前别按 F11/F12。请带上你用的终端提一个 issue，
-崩溃点在 `InputReader.handleCSI`。
+**根因。**（0.1.2 及更早。）`CSI 23~`/`CSI 24~` 用 `code - 11` 去索引 F 键表，也就是 12 元素数组的第
+12、13 项。Swift 越界索引直接 trap，且 trap 无法 catch，`input.restore()` 和 `writer.endSession()` 都
+没跑：pane 停在备用屏幕、raw mode 没关，用 `reset` 清掉。
+**对策。** `ESC [ <n> ~` 现在是一张 `[Int: CGKeyCode]` 表（`Keys.numbered`，`Input.swift`）：F1–F14 用到的
+编号都有行，编号里的空档（16、22）没有行，于是陌生编号直接忽略，任何下标都越不过表尾。`ESC O P–S`
+由同一张表生成，F1–F4 的两种写法不可能漂移；解析决策和这张表都由 `Tests/krdTests/InputTests.swift`
+钉住。
 
 ## 4. ScreenCaptureKit 与权限
 

@@ -200,10 +200,15 @@ byte sequence looks like Alt-`G` and the rest becomes text.
 
 ### 22. Pressing F11 or F12 kills the process
 
-**Cause.** The `CSI 23~`/`CSI 24~` handlers index the F-key table with `code - 11`, which is past
-the end of the 12-entry array for those two codes, and Swift traps on an out-of-range index.
-**Fix.** Do not press F11/F12 until the mapping is corrected (a bounds check or a 14-entry table).
-Please open an issue with the terminal you used; the crash is in `InputReader.handleCSI`.
+**Cause.** (0.1.2 and earlier.) The `CSI 23~`/`CSI 24~` handlers indexed the F-key table with
+`code - 11` — indices 12 and 13 of a 12-entry array. Swift traps on an out-of-range index and the
+trap is not catchable, so neither `input.restore()` nor `writer.endSession()` ran: the pane stayed
+in the alternate screen with raw mode on, which `reset` clears.
+**Fix.** `ESC [ <n> ~` is now one `[Int: CGKeyCode]` table (`Keys.numbered`, `Input.swift`), with a
+row for every code F1–F14 needs and no row for the holes in the numbering (16, 22), so an unknown
+number is ignored and no subscript can run past the end. `ESC O P–S` is built from the same table,
+so the two spellings of F1–F4 cannot disagree; the parser decision and the table are pinned in
+`Tests/krdTests/InputTests.swift`.
 
 ## 4. ScreenCaptureKit & permissions
 

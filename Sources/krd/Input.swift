@@ -1,7 +1,10 @@
 import Foundation
 import CoreGraphics
 
-private enum Keys {
+/// Input tables. `internal` rather than `private` on purpose: the test target pins them, and
+/// the #14 crash was arithmetic on a table rather than a wrong key, so the table is the thing
+/// worth testing.
+enum Keys {
     static let enter: CGKeyCode = 36
     static let tab: CGKeyCode = 48
     static let space: CGKeyCode = 49
@@ -16,7 +19,24 @@ private enum Keys {
     static let right: CGKeyCode = 124
     static let down: CGKeyCode = 125
     static let up: CGKeyCode = 126
-    static let f: [CGKeyCode] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
+
+    /// Function keys, by the macOS virtual key code that posts them. Named on purpose: the
+    /// terminal numbers them differently (`ESC [ 23 ~` is F11), and relating the two numberings
+    /// by subtraction is what indexed off the end of an array in #14.
+    static let f1: CGKeyCode = 122
+    static let f2: CGKeyCode = 120
+    static let f3: CGKeyCode = 99
+    static let f4: CGKeyCode = 118
+    static let f5: CGKeyCode = 96
+    static let f6: CGKeyCode = 97
+    static let f7: CGKeyCode = 98
+    static let f8: CGKeyCode = 100
+    static let f9: CGKeyCode = 101
+    static let f10: CGKeyCode = 109
+    static let f11: CGKeyCode = 103
+    static let f12: CGKeyCode = 111
+    static let f13: CGKeyCode = 105
+    static let f14: CGKeyCode = 107
 
     /// US/ANSI virtual key codes for unshifted characters.
     static let map: [Character: CGKeyCode] = [
@@ -34,6 +54,45 @@ private enum Keys {
         "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";",
         "\"": "'", "<": ",", ">": ".", "?": "/", "~": "`"
     ]
+
+    /// `ESC [ <code> ~` → the key it presses, keyed by the terminal's number (the numbered-key
+    /// table in PROTOCOL.md §7.2). A number that is absent is simply ignored, so nothing can be
+    /// subtracted or clamped into a neighbour's key. 16 and 22 are gaps in that numbering.
+    static let numbered: [Int: CGKeyCode] = [
+        1: home, 2: home, 3: forwardDelete, 4: end, 5: pageUp, 6: pageDown, 7: home, 8: end,
+        11: f1, 12: f2, 13: f3, 14: f4, 15: f5,
+        17: f6, 18: f7, 19: f8, 20: f9, 21: f10,
+        23: f11, 24: f12, 25: f13, 26: f14
+    ]
+
+    /// `ESC O P` … `ESC O S`: the SS3 spelling of F1–F4, resolved through `numbered` rather than
+    /// repeated, so the two spellings cannot drift apart. `compactMapValues` means a renamed row
+    /// would take the SS3 spelling *dead* rather than *wrong*, so the four entries are pinned by
+    /// `Tests/krdTests/InputTests.swift`.
+    static let ss3Function: [Character: CGKeyCode] =
+        ["P": 11, "Q": 12, "R": 13, "S": 14].compactMapValues { numbered[$0] }
+
+    /// The modifier parameter of a CSI report, decoded: `mods - 1`, then bits 1/2/4/8. xterm encodes
+    /// it the same way but calls bit 8 Meta; krd reads it as cmd (PROTOCOL.md §7.2). Shared by the
+    /// whole family, because `ESC [ 1;…A` and `ESC [ <n>;…~` use the same encoding.
+    static func modifierFlags(_ numbers: [Int]) -> CGEventFlags {
+        guard numbers.count >= 2 else { return [] }
+        let mods = numbers[1] - 1
+        var flags: CGEventFlags = []
+        if mods & 1 != 0 { flags.insert(.maskShift) }
+        if mods & 2 != 0 { flags.insert(.maskAlternate) }
+        if mods & 4 != 0 { flags.insert(.maskControl) }
+        if mods & 8 != 0 { flags.insert(.maskCommand) }
+        return flags
+    }
+
+    /// `ESC [ <n> ; <mods> ~` as data: the key it presses and the modifiers that ride with it.
+    /// Pure — no `CGEvent`, no tty, no buffer — so the tests can drive the parser's decision
+    /// instead of only the table under it. Returns nil for a number we do not map.
+    static func numberedPress(_ numbers: [Int]) -> (key: CGKeyCode, flags: CGEventFlags)? {
+        guard let key = numbered[numbers.first ?? 0] else { return nil }
+        return (key, modifierFlags(numbers))
+    }
 }
 
 /// Reads terminal input from stdin and injects it into the captured surface via CGEvent.
@@ -200,14 +259,7 @@ final class InputReader {
             return
         }
         let numbers = params.split(separator: ";").map { Int($0) ?? 0 }
-        var flags: CGEventFlags = []
-        if numbers.count >= 2 {
-            let mods = numbers[1] - 1
-            if mods & 1 != 0 { flags.insert(.maskShift) }
-            if mods & 2 != 0 { flags.insert(.maskAlternate) }
-            if mods & 4 != 0 { flags.insert(.maskControl) }
-            if mods & 8 != 0 { flags.insert(.maskCommand) }
-        }
+        let flags = Keys.modifierFlags(numbers)
         let letter = Character(UnicodeScalar(final))
         switch letter {
         case "A": postKey(Keys.up, flags); case "B": postKey(Keys.down, flags)
@@ -215,20 +267,10 @@ final class InputReader {
         case "H": postKey(Keys.home, flags); case "F": postKey(Keys.end, flags)
         case "Z": postKey(Keys.tab, flags.union(.maskShift))
         case "~":
-            let code = numbers.first ?? 0
-            switch code {
-            case 1, 7: postKey(Keys.home, flags)
-            case 2: postKey(Keys.home, flags)
-            case 3: postKey(Keys.forwardDelete, flags)
-            case 4, 8: postKey(Keys.end, flags)
-            case 5: postKey(Keys.pageUp, flags)
-            case 6: postKey(Keys.pageDown, flags)
-            case 11...14: postKey(Keys.f[code - 11], flags)
-            case 15: postKey(Keys.f[4], flags)
-            case 17...21: postKey(Keys.f[code - 12], flags)
-            case 23, 24: postKey(Keys.f[code - 11], flags)
-            default: break
-            }
+            // A table lookup, not arithmetic: an unknown number is dropped instead of indexing
+            // past the end of a shorter table (TROUBLESHOOTING §22) — and a Swift subscript trap
+            // is not catchable, so the process used to die with raw mode still on.
+            if let press = Keys.numberedPress(numbers) { postKey(press.key, press.flags) }
         default: break
         }
     }
@@ -241,10 +283,9 @@ final class InputReader {
         case "D": postKey(Keys.left, [])
         case "H": postKey(Keys.home, [])
         case "F": postKey(Keys.end, [])
-        case "P": postKey(Keys.f[0], [])
-        case "Q": postKey(Keys.f[1], [])
-        case "R": postKey(Keys.f[2], [])
-        case "S": postKey(Keys.f[3], [])
+        case "P", "Q", "R", "S":
+            // Same values as `ESC [ 11 ~` … `ESC [ 14 ~`; `ss3Function` is built from that table.
+            if let key = Keys.ss3Function[Character(UnicodeScalar(b))] { postKey(key, []) }
         default: break
         }
     }

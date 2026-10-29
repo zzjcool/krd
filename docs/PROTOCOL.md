@@ -236,8 +236,8 @@ the pane on the alternate screen — pixel coordinates are relative to that orig
 | `ESC [ H` / `ESC [ F` | Home / End |
 | `ESC [ Z` | Shift-Tab |
 | `ESC [ 1;…` | modifier bits: `n-1` & 1 shift, & 2 alt, & 4 ctrl, & 8 cmd |
-| `ESC [ <code> ~` | 1,2,7 → Home; 3 → forward delete; 4,8 → End; 5/6 → page up/down; 11–14 → F1–F4; 15 → F5; 17–21 → F6–F10; 23,24 → F11,F12 (**currently reads past the end of the F-key table and traps — see [TROUBLESHOOTING](TROUBLESHOOTING.md#22-pressing-f11-or-f12-kills-the-process)**) |
-| `ESC O A–D / H / F / P–S` | SS3 arrows, Home/End, F1–F4 |
+| `ESC [ <code> ~` | 1,2,7 → Home; 3 → forward delete; 4,8 → End; 5/6 → page up/down; 11–14 → F1–F4; 15 → F5; 17–21 → F6–F10; 23,24 → F11,F12; 25,26 → F13,F14. One table (`Keys.numbered`): 16 and 22 are gaps in the numbering and are ignored, as is any number not listed |
+| `ESC O A–D / H / F / P–S` | SS3 arrows, Home/End, F1–F4 (same key codes as `ESC [ 11 ~` … `ESC [ 14 ~`) |
 | `0x00` | Ctrl-Space |
 | `0x01`–`0x1A` | Ctrl-A … Ctrl-Z (with `maskControl`) |
 | `0x1C` | **quit** (not forwarded) |
