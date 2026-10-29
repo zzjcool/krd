@@ -23,6 +23,7 @@ describes how the pieces fit and which invariants must not be broken.
 Sources/krdcore/          <- no AppKit, no CoreGraphics, no ScreenCaptureKit (issue #21)
   Tiles.swift     TileGrid: whole-cell grid, per-tile pixel rects, extraction, dirty detection
   Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP, zlib
+  Input.swift     InputParser: the CSI/SS3 state machine, bytes -> numeric Events
   Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy (the encoding policy)
 
 Sources/krd/              <- everything that touches the OS
@@ -30,7 +31,7 @@ Sources/krd/              <- everything that touches the OS
   Geometry.swift  TermGeometry (CSI 16t/14t, TIOCGWINSZ) and Viewport (cells/pixels → points)
   Displays.swift  DisplayPick (which display, and why) and Debounce (one action per burst)
   Capture.swift   Capturer: SCStream setup, BGRA→RGBA, byte-identical frame dropping
-  Input.swift     InputReader: raw tty, SGR/SGR-Pixels mouse, keys → CGEvent
+  Input.swift     InputReader: tty read loop, events -> CGEvent/postToPid, click counter
   Bench.swift     synthetic corpus, staged timings, JSON, --bench-wire, --stats-json
   Replay.swift    --record / --replay of real frames (raw + manifest.jsonl)
   Log.swift       File logger (never the tty)
@@ -75,6 +76,29 @@ Dependency direction is a straight line: `main` → `Tiles`/`Capture`/`Render`/`
 only, so nothing in the capture or render path can be reached from it (and vice versa).
 `Render` and `Input` know the terminal protocol; nothing else does. `Capture` knows ScreenCaptureKit;
 nothing else does.
+
+### 2.2 Where the input contract lives (`krdcore/Parser`)
+
+The other half of the core (issue #45) is the CSI/SS3 state machine: `Sources/krdcore/Input.swift`
+turns bytes into `Event`s that carry **plain numbers** — `key(code, mods, phase)`,
+`press(key, mods, phase)`, `text(char, mods)`, `mouse(button, x, y, wheel, release, motion, mods)`,
+`osc(body)`, `keyboardFlags(n)`. `Sources/krd/Input.swift` keeps what needs a Mac: the tty read loop,
+the `CGEvent` injection, the cell-vs-pixel latch, the `Viewport` transform, the click counter and the
+clipboard.
+
+Why the boundary sits there: a mouse report can only be mapped to a point with the tty geometry
+(`Viewport`, which needs CoreGraphics), and a kitty key report can only be turned into a character
+with the IME policy. Both are decisions about *this machine*, not about the bytes.
+
+The input trace is pinned the same way the dump is: `Tests/krdcoreTests/ParserTraceTests` feeds the
+seven sequences (plain keys, kitty `CSI u` with modifiers and release, a drag, a double click, the
+wheel, `Ctrl-V`, an OSC 52 reply) and compares the parser's canonical trace against
+`Tests/krdcoreTests/Fixtures/input-trace.dump`. Regenerate with `KRD_UPDATE_FIXTURE=1 swift test` —
+**never with `--filter`** (see §2.1).
+
+The refactor itself was checked at the CLI level too: the same fed sequence, run through the
+pre-refactor and post-refactor binaries with `--debug --dry-run --clipboard=out`, produced an
+identical 45-line input trace (and each binary reproduced its own trace across runs).
 
 ## 3. Threads
 

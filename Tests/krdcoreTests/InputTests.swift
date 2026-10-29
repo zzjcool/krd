@@ -1,6 +1,4 @@
 import XCTest
-import CoreGraphics
-@testable import krd
 @testable import krdcore
 
 /// Pure logic only: the terminal-byte → macOS key code tables in `Keys`. No `CGEvent` is posted
@@ -67,19 +65,19 @@ final class KeyTableTests: XCTestCase {
         for (ordinal, code) in functionCodes.enumerated() {
             let press = Keys.numberedPress([code])
             XCTAssertEqual(press?.key, functionKeys[ordinal], "CSI \(code)~")
-            XCTAssertEqual(press?.flags, CGEventFlags(), "CSI \(code)~ should carry no modifiers")
+            XCTAssertEqual(press?.flags, Modifiers(), "CSI \(code)~ should carry no modifiers")
         }
 
         // The second number is the modifier, and must never be taken for the key: Shift-F11 =
         // `ESC [ 23 ; 2 ~`, plain F11 = `ESC [ 23 ; 1 ~`.
         XCTAssertEqual(Keys.numberedPress([23, 2])?.key, Keys.f11)
-        XCTAssertEqual(Keys.numberedPress([23, 2])?.flags, CGEventFlags.maskShift)
-        XCTAssertEqual(Keys.numberedPress([23, 1])?.flags, CGEventFlags())
+        XCTAssertEqual(Keys.numberedPress([23, 2])?.flags, Modifiers.maskShift)
+        XCTAssertEqual(Keys.numberedPress([23, 1])?.flags, Modifiers())
 
         // xterm packs modifiers as `mods - 1`; krd reads bits 1/2/4/8 as shift/alt/ctrl/cmd.
         XCTAssertEqual(Keys.numberedPress([11, 6])?.flags,
-                       [CGEventFlags.maskShift, CGEventFlags.maskControl])
-        XCTAssertEqual(Keys.numberedPress([11, 9])?.flags, CGEventFlags.maskCommand)
+                       [Modifiers.maskShift, Modifiers.maskControl])
+        XCTAssertEqual(Keys.numberedPress([11, 9])?.flags, Modifiers.maskCommand)
         XCTAssertEqual(Keys.numberedPress([11, 16])?.flags,
                        [.maskShift, .maskAlternate, .maskControl, .maskCommand])
     }

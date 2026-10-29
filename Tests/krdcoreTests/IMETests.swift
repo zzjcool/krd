@@ -1,6 +1,4 @@
 import XCTest
-import CoreGraphics
-@testable import krd
 @testable import krdcore
 
 /// The `--ime` decision table (issue #16). Every row here is a keystroke that would otherwise be

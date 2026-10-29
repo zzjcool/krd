@@ -1,6 +1,4 @@
 import XCTest
-import CoreGraphics
-@testable import krd
 @testable import krdcore
 
 /// The kitty keyboard protocol, decoded as data. No tty, no `CGEvent`, no buffer: `InputReader`
@@ -38,7 +36,7 @@ final class KeyboardTests: XCTestCase {
         // and the modifier must come through as .maskCommand rather than as anything else.
         let report = KeyReport(kitty: "99;9")
         XCTAssertEqual(Keyboard.keyCode(report ?? KeyReport(code: 0)), Keys.map["c"])
-        XCTAssertEqual(report?.flags, CGEventFlags.maskCommand)
+        XCTAssertEqual(report?.flags, Modifiers.maskCommand)
         XCTAssertEqual(report?.flags.contains(.maskShift), false)
     }
 

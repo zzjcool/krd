@@ -5,96 +5,6 @@ import krdcore
 /// Input tables. `internal` rather than `private` on purpose: the test target pins them, and
 /// the #14 crash was arithmetic on a table rather than a wrong key, so the table is the thing
 /// worth testing.
-enum Keys {
-    static let enter: CGKeyCode = 36
-    static let tab: CGKeyCode = 48
-    static let space: CGKeyCode = 49
-    static let backspace: CGKeyCode = 51
-    static let esc: CGKeyCode = 53
-    static let forwardDelete: CGKeyCode = 117
-    static let home: CGKeyCode = 115
-    static let end: CGKeyCode = 119
-    static let pageUp: CGKeyCode = 116
-    static let pageDown: CGKeyCode = 121
-    static let left: CGKeyCode = 123
-    static let right: CGKeyCode = 124
-    static let down: CGKeyCode = 125
-    static let up: CGKeyCode = 126
-
-    /// Function keys, by the macOS virtual key code that posts them. Named on purpose: the
-    /// terminal numbers them differently (`ESC [ 23 ~` is F11), and relating the two numberings
-    /// by subtraction is what indexed off the end of an array in #14.
-    static let f1: CGKeyCode = 122
-    static let f2: CGKeyCode = 120
-    static let f3: CGKeyCode = 99
-    static let f4: CGKeyCode = 118
-    static let f5: CGKeyCode = 96
-    static let f6: CGKeyCode = 97
-    static let f7: CGKeyCode = 98
-    static let f8: CGKeyCode = 100
-    static let f9: CGKeyCode = 101
-    static let f10: CGKeyCode = 109
-    static let f11: CGKeyCode = 103
-    static let f12: CGKeyCode = 111
-    static let f13: CGKeyCode = 105
-    static let f14: CGKeyCode = 107
-
-    /// US/ANSI virtual key codes for unshifted characters.
-    static let map: [Character: CGKeyCode] = [
-        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
-        "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
-        "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26,
-        "-": 27, "8": 28, "0": 29, "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35,
-        "l": 37, "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45,
-        "m": 46, ".": 47, "`": 50, " ": space
-    ]
-
-    /// Shifted symbol -> the key you actually press.
-    static let shifted: [Character: Character] = [
-        "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8",
-        "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";",
-        "\"": "'", "<": ",", ">": ".", "?": "/", "~": "`"
-    ]
-
-    /// `ESC [ <code> ~` → the key it presses, keyed by the terminal's number (the numbered-key
-    /// table in PROTOCOL.md §7.2). A number that is absent is simply ignored, so nothing can be
-    /// subtracted or clamped into a neighbour's key. 16 and 22 are gaps in that numbering.
-    static let numbered: [Int: CGKeyCode] = [
-        1: home, 2: home, 3: forwardDelete, 4: end, 5: pageUp, 6: pageDown, 7: home, 8: end,
-        11: f1, 12: f2, 13: f3, 14: f4, 15: f5,
-        17: f6, 18: f7, 19: f8, 20: f9, 21: f10,
-        23: f11, 24: f12, 25: f13, 26: f14
-    ]
-
-    /// `ESC O P` … `ESC O S`: the SS3 spelling of F1–F4, resolved through `numbered` rather than
-    /// repeated, so the two spellings cannot drift apart. `compactMapValues` means a renamed row
-    /// would take the SS3 spelling *dead* rather than *wrong*, so the four entries are pinned by
-    /// `Tests/krdTests/InputTests.swift`.
-    static let ss3Function: [Character: CGKeyCode] =
-        ["P": 11, "Q": 12, "R": 13, "S": 14].compactMapValues { numbered[$0] }
-
-    /// The modifier parameter of a CSI report, decoded: `mods - 1`, then bits 1/2/4/8. xterm encodes
-    /// it the same way but calls bit 8 Meta; krd reads it as cmd (PROTOCOL.md §7.2). Shared by the
-    /// whole family, because `ESC [ 1;…A` and `ESC [ <n>;…~` use the same encoding.
-    static func modifierFlags(_ numbers: [Int]) -> CGEventFlags {
-        guard numbers.count >= 2 else { return [] }
-        let mods = numbers[1] - 1
-        var flags: CGEventFlags = []
-        if mods & 1 != 0 { flags.insert(.maskShift) }
-        if mods & 2 != 0 { flags.insert(.maskAlternate) }
-        if mods & 4 != 0 { flags.insert(.maskControl) }
-        if mods & 8 != 0 { flags.insert(.maskCommand) }
-        return flags
-    }
-
-    /// `ESC [ <n> ; <mods> ~` as data: the key it presses and the modifiers that ride with it.
-    /// Pure — no `CGEvent`, no tty, no buffer — so the tests can drive the parser's decision
-    /// instead of only the table under it. Returns nil for a number we do not map.
-    static func numberedPress(_ numbers: [Int]) -> (key: CGKeyCode, flags: CGEventFlags)? {
-        guard let key = numbered[numbers.first ?? 0] else { return nil }
-        return (key, modifierFlags(numbers))
-    }
-}
 
 /// Reads terminal input from stdin and injects it into the captured surface via CGEvent.
 final class InputReader {
@@ -135,7 +45,9 @@ final class InputReader {
     private func log(_ text: String) {
         Log.write("input: " + text + "\n")
     }
-    private var buffer: [UInt8] = []
+    /// The CSI/SS3 state machine, in krdcore (issue #45). It owns the byte buffer; this class owns
+    /// the tty, the `CGEvent`s and every decision about what a parsed event means.
+    let parser = InputParser()
     private var downButton: MouseButton?
     private var clickCount = 1
     private var lastPress: (time: TimeInterval, point: CGPoint, count: Int)?
@@ -185,6 +97,7 @@ final class InputReader {
             }
             tcsetattr(STDIN_FILENO, TCSANOW, &raw)
         }
+        parser.onEvent = { [weak self] event in self?.apply(event) }
         Thread.detachNewThread { [weak self] in self?.loop() }
         return true
     }
@@ -206,8 +119,8 @@ final class InputReader {
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {
                 // A lone ESC with nothing following it is the Esc key.
-                if buffer == [0x1B] {
-                    buffer.removeAll()
+                if parser.buffer == [0x1B] {
+                    parser.reset()
                     postKey(Keys.esc, [])
                 }
                 continue
@@ -218,109 +131,41 @@ final class InputReader {
                 let hex = chunk[0..<n].map { String(format: "%02x", $0) }.joined(separator: " ")
                 log("raw \(n) bytes: \(hex)")
             }
-            buffer.append(contentsOf: chunk[0..<n])
-            drain()
+            parser.feed(chunk[0..<n])
         }
     }
+
+    // MARK: events from krdcore
+
+    /// What one parsed event means for this machine (issue #45). The parser only says what the
+    /// bytes were; the mapping, the IME policy, the click counter and the clipboard all live here.
+    private func apply(_ event: Event) {
+        switch event {
+        case let .key(report):
+            handleKeyReport(report)
+        case let .press(code, mods, phase):
+            postKey(code, cg(mods), phase: phase)
+        case let .text(ch, mods):
+            handleKey(ch, flags: cg(mods))
+        case let .control(byte):
+            handleControl(byte)
+        case let .mouse(report):
+            handleMouse(report)
+        case let .osc(params):
+            handleOSC(params)
+        case let .keyboardFlags(flags):
+            keyboardFlags = flags
+            if trace { log("keyboard protocol flags=\(flags.map(String.init) ?? "unparsed")") }
+        case let .notice(text):
+            if trace { log(text) }
+        }
+    }
+
+    /// Same bits on both sides of the boundary (issue #45): `CGEventFlags` and `Modifiers` agree on
+    /// every value krd uses, so this is a reinterpretation, not a conversion table.
+    private func cg(_ mods: Modifiers) -> CGEventFlags { CGEventFlags(rawValue: mods.rawValue) }
 
     // MARK: parsing
-
-    private func drain() {
-        while let first = buffer.first {
-            if first == 0x1B {
-                guard let used = parseEscape() else { return }
-                buffer.removeFirst(used)
-                continue
-            }
-            if first == 0x7F || first == 0x08 {
-                buffer.removeFirst(); postKey(Keys.backspace, []); continue
-            }
-            if first == 0x09 {
-                buffer.removeFirst(); postKey(Keys.tab, []); continue
-            }
-            if first == 0x0A || first == 0x0D {
-                buffer.removeFirst(); postKey(Keys.enter, []); continue
-            }
-            if first < 0x20 {
-                buffer.removeFirst(); handleControl(first); continue
-            }
-            let length = utf8Length(first)
-            if buffer.count < length { return }
-            if let text = String(bytes: buffer[0..<length], encoding: .utf8) {
-                handleText(text)
-            }
-            buffer.removeFirst(length)
-        }
-    }
-
-    private func parseEscape() -> Int? {
-        if buffer.count == 1 { return nil }
-        switch buffer[1] {
-        case 0x5B:                                  // CSI: ESC [ ... final
-            var i = 2
-            while i < buffer.count {
-                let b = buffer[i]
-                if b >= 0x40 && b <= 0x7E {
-                    let params = String(bytes: buffer[2..<i], encoding: .utf8) ?? ""
-                    handleCSI(params: params, final: b)
-                    return i + 1
-                }
-                i += 1
-            }
-            return nil
-        case 0x4F:                                  // SS3: ESC O x
-            guard buffer.count >= 3 else { return nil }
-            handleSS3(buffer[2])
-            return 3
-        case 0x5D:                                  // OSC: ESC ] ... BEL | ST
-            var i = 2
-            while i < buffer.count {
-                if buffer[i] == 0x07 {
-                    handleOSC(String(bytes: buffer[2..<i], encoding: .utf8) ?? "")
-                    return i + 1
-                }
-                if buffer[i] == 0x1B, i + 1 < buffer.count, buffer[i + 1] == 0x5C {
-                    handleOSC(String(bytes: buffer[2..<i], encoding: .utf8) ?? "")
-                    return i + 2
-                }
-                i += 1
-            }
-            // A clipboard reply is megabytes of base64 and arrives in one piece; anything longer
-            // than that without a terminator is not ours, so drop the head instead of buffering
-            // forever.
-            if buffer.count > OSC52.maxEncodedBytes + 32 {
-                buffer.removeFirst(2)
-                if trace { log("osc dropped: no terminator") }
-                return 2
-            }
-            return nil
-        default:
-            if buffer[1] < 0x20 {
-                postKey(Keys.esc, [])
-                return 1
-            }
-            if let ch = String(bytes: [buffer[1]], encoding: .utf8)?.first {
-                handleKey(ch, flags: [.maskAlternate])
-            }
-            return 2
-        }
-    }
-
-    /// `CSI … u`: either the terminal's answer to the capability query, or a key report.
-    ///
-    /// `CSI ? <flags> u` is the answer (`?` = query), `CSI > … u` / `CSI < … u` / `CSI = … u` are
-    /// pushes, pops and sets, which are ours to send and never in the input stream; anything else
-    /// is a key.
-    private func handleKeyProtocol(_ params: String) {
-        if params.hasPrefix("?") {
-            keyboardFlags = Int(params.dropFirst())
-            if trace { log("keyboard protocol flags=\(keyboardFlags.map(String.init) ?? "unparsed")") }
-            return
-        }
-        guard !params.hasPrefix(">"), !params.hasPrefix("<"), !params.hasPrefix("=") else { return }
-        guard let report = KeyReport(kitty: params) else { return }
-        handleKeyReport(report)
-    }
 
     /// One decoded report: decide what it means and post it. Press and repeat stay a down+up tap
     /// (what every legacy key does today, and what makes hold-to-repeat work without the mirrored
@@ -346,55 +191,12 @@ final class InputReader {
         }
         switch Keyboard.plan(for: report, mode: ime) {
         case let .key(code, flags):
-            postKey(code, flags, phase: report.phase)
+            postKey(code, cg(flags), phase: report.phase)
         case let .text(ch):
             noteInjectedText(ch)
-            postUnicode(ch, report.flags, phase: report.phase)
+            postUnicode(ch, cg(report.flags), phase: report.phase)
         case .drop:
             noteDroppedText(report.code)
-        }
-    }
-
-    private func handleCSI(params: String, final: UInt8) {
-        if final == 0x75 {                                  // 'u': kitty keyboard protocol
-            handleKeyProtocol(params)
-            return
-        }
-        if params.hasPrefix("<") {
-            handleMouse(params, isRelease: final == 0x6D)   // 'm' = release
-            return
-        }
-        let (numbers, phase) = KeyReport.legacyFields(params)
-        let flags = Keys.modifierFlags(numbers)
-        let letter = Character(UnicodeScalar(final))
-        switch letter {
-        case "A": postKey(Keys.up, flags, phase: phase); case "B": postKey(Keys.down, flags, phase: phase)
-        case "C": postKey(Keys.right, flags, phase: phase); case "D": postKey(Keys.left, flags, phase: phase)
-        case "H": postKey(Keys.home, flags, phase: phase); case "F": postKey(Keys.end, flags, phase: phase)
-        case "Z": postKey(Keys.tab, flags.union(.maskShift), phase: phase)
-        case "~":
-            // A table lookup, not arithmetic: an unknown number is dropped instead of indexing
-            // past the end of a shorter table (TROUBLESHOOTING §22) — and a Swift subscript trap
-            // is not catchable, so the process used to die with raw mode still on.
-            if let press = Keys.numberedPress(numbers) {
-                postKey(press.key, press.flags, phase: phase)
-            }
-        default: break
-        }
-    }
-
-    private func handleSS3(_ b: UInt8) {
-        switch Character(UnicodeScalar(b)) {
-        case "A": postKey(Keys.up, [])
-        case "B": postKey(Keys.down, [])
-        case "C": postKey(Keys.right, [])
-        case "D": postKey(Keys.left, [])
-        case "H": postKey(Keys.home, [])
-        case "F": postKey(Keys.end, [])
-        case "P", "Q", "R", "S":
-            // Same values as `ESC [ 11 ~` … `ESC [ 14 ~`; `ss3Function` is built from that table.
-            if let key = Keys.ss3Function[Character(UnicodeScalar(b))] { postKey(key, []) }
-        default: break
         }
     }
 
@@ -439,12 +241,12 @@ final class InputReader {
         return flags
     }
 
-    private func handleMouse(_ params: String, isRelease: Bool) {
-        let body = params.dropFirst()                       // strip '<'
-        let parts = body.split(separator: ";").compactMap { Int($0) }
-        guard parts.count >= 3 else { return }
-        let b = parts[0], cx = parts[1], cy = parts[2]
-        let motion = (b & 32) != 0
+    /// One mouse report, in the terminal's own units. Everything that needs *this* machine happens
+    /// here: the cell-vs-pixel latch (a cell can never exceed the grid), the viewport transform,
+    /// the click counter and the injection (issue #45 keeps those on this side of the boundary).
+    private func handleMouse(_ report: MouseReport) {
+        let cx = report.x, cy = report.y
+        let motion = report.isMotion
 
         // A cell coordinate can never be larger than the terminal grid; anything bigger is a
         // pixel coordinate, i.e. the terminal honoured `?1016h`.
@@ -470,10 +272,10 @@ final class InputReader {
             point = viewport.point(forCell: cx, cy)
             spot = "cell(\(cx),\(cy))"
         }
-        let flags = modifiers(from: b)
+        let flags = cg(report.mods)
 
-        if b & 64 != 0 {                                    // wheel: 64/65 vertical, 66/67 horizontal
-            let kind = b & 3
+        if report.isWheel {                                 // wheel: 64/65 vertical, 66/67 horizontal
+            let kind = report.button
             if dryRun || trace {
                 log("wheel \(kind) at \(spot) -> (\(Int(point.x)),\(Int(point.y))) flags=\(flags.rawValue)")
             }
@@ -481,7 +283,7 @@ final class InputReader {
             return
         }
 
-        let index = b & 3
+        let index = report.button
         let button = MouseButton(rawValue: index) ?? MouseButton.left
         let type: CGEventType
         if motion && index == 3 {                           // 1003: pointer moving, nothing held
@@ -490,7 +292,7 @@ final class InputReader {
         } else if motion {
             type = button.dragType
             downButton = button
-        } else if isRelease {
+        } else if report.isRelease {
             type = button.type(press: false)
             downButton = nil
         } else {
