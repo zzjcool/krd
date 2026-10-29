@@ -115,24 +115,59 @@ def run_wire(spec, config, quick):
 
 # ---------------------------------------------------------------- verdicts
 
-def evaluate_budget(encode, wire, budget):
+# Machine-dependent fields: milliseconds of our own work. Everything else -- payload bytes, wire
+# bytes, tile counts, the zero-byte invariant -- is content and must never be scaled (issue #31).
+TIMING_PREFIXES = ("ms.", "write_ms.")
+
+
+def is_timing(field):
+    return field.startswith(TIMING_PREFIXES)
+
+
+def budget_scale():
+    """`KRD_BENCH_BUDGET_SCALE` relaxes timing budgets only, for a slower machine.
+
+    The committed budgets are absolute numbers measured on a laptop. A macOS CI runner is several
+    times slower on the same work, so the step would be red every time, which trains everyone to
+    ignore the only performance signal in the repo. The runner therefore states its own factor
+    instead of the budget being loosened for everyone.
+    """
+    raw = os.environ.get("KRD_BENCH_BUDGET_SCALE", "1")
+    try:
+        value = float(raw)
+    except ValueError:
+        die("KRD_BENCH_BUDGET_SCALE is not a number: %r" % raw)
+    if not value > 0:
+        die("KRD_BENCH_BUDGET_SCALE must be > 0, got %s" % raw)
+    return value
+
+
+def effective_limit(field, maximum, scale):
+    if maximum is None or not is_timing(field) or scale == 1.0:
+        return maximum
+    return maximum * scale
+
+
+def evaluate_budget(encode, wire, budget, scale=1.0):
     checks = []
     for rule in budget.get("encode", []):
+        limit = effective_limit(rule["field"], rule.get("max"), scale)
         case = next((c for c in encode["cases"] if c["name"] == rule["case"]), None)
         if case is None:
-            checks.append((rule["case"], rule["field"], None, rule.get("max"), "missing case"))
+            checks.append((rule["case"], rule["field"], None, limit, "missing case"))
             continue
         value = dig(case, rule["field"])
-        ok = value is not None and value <= rule["max"]
-        checks.append((rule["case"], rule["field"], value, rule["max"], "ok" if ok else "OVER"))
+        ok = value is not None and value <= limit
+        checks.append((rule["case"], rule["field"], value, limit, "ok" if ok else "OVER"))
     for rule in budget.get("wire", []):
+        limit = effective_limit(rule["field"], rule.get("max"), scale)
         run_ = next((w for w in wire if w["label"] == rule["case"]), None)
         if run_ is None:
-            checks.append((rule["case"], rule["field"], None, rule.get("max"), "missing run"))
+            checks.append((rule["case"], rule["field"], None, limit, "missing run"))
             continue
         value = dig(run_, rule["field"])
-        ok = value is not None and value <= rule["max"]
-        checks.append((rule["case"], rule["field"], value, rule["max"], "ok" if ok else "OVER"))
+        ok = value is not None and value <= limit
+        checks.append((rule["case"], rule["field"], value, limit, "ok" if ok else "OVER"))
     return checks
 
 
@@ -153,7 +188,7 @@ def kb(value):
     return "%.1f KB" % (value / 1024) if value < 1024 * 1024 else "%.2f MB" % (value / 1048576)
 
 
-def render(encode, wire, checks, previous, config):
+def render(encode, wire, checks, previous, config, scale=1.0):
     out = []
     head = encode
     tiles = head["config"]["tiles"]
@@ -173,6 +208,9 @@ def render(encode, wire, checks, previous, config):
         % (head["config"]["pane"], head["config"]["cell"], head["config"]["tile"],
            head["config"]["source"], head["config"]["px"], tiles))
     add("| python | %s |" % platform.python_version())
+    if scale != 1.0:
+        add("| budget scale | ×%.2f on timing only (`KRD_BENCH_BUDGET_SCALE`); bytes are unchanged |"
+            % scale)
     add("")
 
     failed = [c for c in checks if c[4] != "ok"]
@@ -184,7 +222,11 @@ def render(encode, wire, checks, previous, config):
     add("|---|---|---:|---:|---|")
     for case, field, value, budget, status in checks:
         shown = "-" if value is None else ("%.0f" % value if abs(value) >= 100 else "%.2f" % value)
-        add("| %s | `%s` | %s | %s | %s |" % (case, field, shown, budget, status))
+        limit = "-" if budget is None else ("%.0f" % budget if abs(budget) >= 100 else "%.2f" % budget)
+        add("| %s | `%s` | %s | %s | %s |" % (case, field, shown, limit, status))
+    if scale != 1.0:
+        add("")
+        add("Timing limits above are the *effective* ones: `budget.json` value × %.2f." % scale)
     add("")
 
     add("## Encoder (L1)")
@@ -338,9 +380,10 @@ def main():
             print("bench: wire (L2) %s drain=%s" % (spec[0], spec[1] or "unlimited"), file=sys.stderr)
             wire.append(run_wire(spec, config, args.quick))
 
-    checks = evaluate_budget(encode, wire, budget)
+    scale = budget_scale()
+    checks = evaluate_budget(encode, wire, budget, scale)
     previous = previous_results()
-    report = render(encode, wire, checks, previous, config)
+    report = render(encode, wire, checks, previous, config, scale)
 
     results = os.path.join(BENCH, "results")
     os.makedirs(results, exist_ok=True)
@@ -364,6 +407,8 @@ def main():
 
     # console summary: the same tables, without the prose
     print()
+    if scale != 1.0:
+        print("  timing budgets ×%.2f (KRD_BENCH_BUDGET_SCALE); bytes are never scaled" % scale)
     for case in encode["cases"]:
         print("  %-9s %4d tiles  %10s payload  %10s wire  %6.2f ms p50  %6.2f ms p99"
               % (case["name"], case["tiles"], kb(case["bytes"]["payload"]),
