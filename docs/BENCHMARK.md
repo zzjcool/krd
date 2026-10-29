@@ -251,15 +251,26 @@ timing column, that column is not worth quoting from this machine.
 ## 7. Measurement hygiene (the rules that make the numbers mean something)
 
 1. **Release build only.** Debug Swift `Array` bounds checks dominate everything measured here.
-2. **Warm up 3 rounds, discard them.** First-touch page faults on a 10 MB buffer and `LevelPolicy`
+2. **The benchmark must not read the terminal.** `--bench` builds its geometry from the flags
+   alone. It used to call `TermGeometry.read()`, which prefers the terminal's own pixel report,
+   so `--pane 137x44 --cell 17x33` measured a 118x44 / 2067x1290 picture in a 2400x1290 window
+   and the documented one in a pipe — and the case assertions started failing for reasons that
+   had nothing to do with the encoder. A benchmark that says "2329x1452 px" has to mean it.
+3. **Warm up 3 rounds, discard them.** First-touch page faults on a 10 MB buffer and `LevelPolicy`
    learning would otherwise land in p99 forever.
-3. **Never benchmark with `--debug`.** L2 puts the stats in the harness, not on the tty.
-4. **Record the configuration**: pane, cell, tile, format, machine, cores, build. It is in every
+4. **Never benchmark with `--debug`.** L2 puts the stats in the harness, not on the tty.
+5. **Record the configuration**: pane, cell, tile, format, machine, cores, build. It is in every
    JSON and every report; a number without it is a rumour.
-5. **Plugged in.** A thermally throttled laptop halves the parallel speedup, which shows up as a
+6. **Plugged in.** A thermally throttled laptop halves the parallel speedup, which shows up as a
    regression in every serial/parallel column.
-6. **Report the tail.** Every table has p50 and p99 or it is not comparable.
-7. **Same machine for A/B**, minutes apart, same pane size.
+7. **Report the tail.** Every table has p50 and p99 or it is not comparable.
+8. **Same machine for A/B**, minutes apart, same pane size.
+
+Rule 2 has a second consequence worth knowing: the case deltas are *stamped* (one byte per tile
+the case claims to dirty). Without it, `line` reported 17 of 18 tiles at `--cell 8x20`, because the
+glyph strokes repeat every 19 px and the last tile of that row was only 8 px wide — it contained no
+crossing and genuinely did not change. The case said "one text line", the harness measured "one
+text line minus the bit that happened not to move".
 
 ## 8. What is deliberately not measured
 

@@ -193,6 +193,36 @@ struct BenchCase {
     let content: BenchContent
     let tiles: Tiles
     let patch: (inout [UInt8], TileGrid, Int) -> Void
+    /// One byte per tile the case claims to dirty, derived from (round, index).
+    ///
+    /// The hand-written deltas are not enough on their own. `line` shifts glyph strokes by
+    /// one pixel, and the stroke period is 19 px: with `--cell 8x20` the last tile of that
+    /// row is 8 px wide and contains no crossing, so it did not change at all and the case
+    /// reported 17 tiles where it claimed 18. A benchmark that asserts its own premise needs
+    /// the premise to be guaranteed, not to be a property of the current cell size.
+    func stamp(_ px: inout [UInt8], _ grid: TileGrid, _ round: Int) {
+        var targets: [Int] = []
+        switch tiles {
+        case .exactly(let n):
+            let middle = (grid.tilesY / 2) * grid.tilesX + grid.tilesX / 2
+            targets = n == 1 ? [middle] : []
+        case .exactlyRow:
+            targets = (0..<grid.tilesX).map { (grid.tilesY / 2) * grid.tilesX + $0 }
+        case .exactlyAll:
+            targets = Array(0..<grid.count)
+        case .none, .any:
+            targets = []
+        }
+        guard !targets.isEmpty else { return }
+        px.withUnsafeMutableBufferPointer { buf in
+            for index in targets {
+                let r = grid.rect(index % grid.tilesX, index / grid.tilesX)
+                let o = (r.y * grid.pixelW + r.x) * grid.bpp
+                guard o < buf.count else { continue }
+                buf[o] = UInt8(truncatingIfNeeded: round &* 31 &+ index &* 7 &+ 1)
+            }
+        }
+    }
 }
 
 /// A moving block: the smallest useful delta, and one that is guaranteed to stay inside a
@@ -334,6 +364,7 @@ enum Bench {
                 // report a 0.00 ms dedupe instead of the real memcmp cost.
                 benchDetach(&px)
                 c.patch(&px, layout, round)
+                c.stamp(&px, layout, round)
 
                 // The whole-frame dedupe `Capturer` runs before anything else. On a static
                 // screen this is the only work done per delivered frame.
@@ -557,6 +588,7 @@ extension Bench {
             let before = previous
             var px = before
             c.patch(&px, layout, k)
+            c.stamp(&px, layout, k)
             let identical = before == px
             previous = px
 

@@ -36,7 +36,11 @@ LESSEE_KEYS = ["payload", "wire"]
 
 
 def sh(command, cwd, capture=True):
-    return subprocess.run(command, cwd=cwd, capture_output=capture, text=True)
+    # stdin=DEVNULL, always: `krd --bench` used to read the terminal's pixel size, so the
+    # same ref measured a different picture depending on which window launched it. A ref
+    # built before that fix must not be able to see this terminal either.
+    return subprocess.run(command, cwd=cwd, capture_output=capture, text=True,
+                          stdin=subprocess.DEVNULL)
 
 
 def die(message):
@@ -67,7 +71,16 @@ def describe(ref, rev, dirty):
 def bench(binary, rounds):
     result = sh([binary, "--bench", "--json", "--rounds", str(rounds)] + CONFIG, ROOT)
     if result.returncode != 0:
-        die("%s --bench failed (%d): %s" % (binary, result.returncode, result.stderr[-800:]))
+        detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or ["no output"]
+        if "dirtied" in detail[-1]:
+            # exit 2 is the harness's own case assertion: the ref has a harness version that
+            # disagrees with the corpus (the tty-dependent layout and the un-stamped deltas
+            # were fixed together). It cannot be measured, so it cannot be compared.
+            die("%s fails its own case assertion:\n       %s\n"
+                "       That harness predates the fix for the tty-dependent layout, so its\n"
+                "       numbers are not comparable. Pick a ref whose `krd --bench` passes."
+                % (binary, detail[-1]))
+        die("%s --bench failed (%d): %s" % (binary, result.returncode, " ".join(detail)))
     if not result.stdout.lstrip().startswith("{"):
         # The old `--bench` printed a human table and ignored unknown flags, so a ref from
         # before this harness silently "succeeds" with the wrong output. Say so precisely:
@@ -83,21 +96,24 @@ def bench(binary, rounds):
 
 
 def median_case(runs):
-    """Median across repetitions, case by case."""
+    """Median across repetitions, case by case, plus the spread the median hides."""
     cases = {}
     for run in runs:
         for case in run["cases"]:
             cases.setdefault(case["name"], []).append(case)
     out = {}
     for name, samples in cases.items():
-        def med(path):
-            values = []
+        def values(path):
+            collected = []
             for sample in samples:
                 node = sample
                 for part in path.split("."):
                     node = node[part]
-                values.append(node)
-            return statistics.median(values)
+                collected.append(node)
+            return collected
+
+        def med(path):
+            return statistics.median(values(path))
         out[name] = {
             "content": samples[0]["content"],
             "tiles": samples[0]["tiles"],
@@ -108,6 +124,7 @@ def median_case(runs):
             "p50": med("ms.total.p50"),
             "p99": med("ms.total.p99"),
             "parallel": med("ms.parallel.p50"),
+            "p50_runs": values("ms.total.p50"),
         }
     return out
 
@@ -134,6 +151,21 @@ P50_FLOOR_MS = 0.2
 PAYLOAD_FLOOR_BYTES = 16
 
 
+def spread(case):
+    """Peak-to-peak of this case's p50 across the repetitions of one side, in percent.
+
+    This is the machine's own noise floor for that case, measured instead of assumed: two runs
+    of the *same binary* on a busy laptop differ by up to 11% on `full`, so a 5% tolerance on
+    its own would report a regression every other run. A flag has to beat this number too.
+    """
+    samples = case.get("p50_runs") or []
+    # Below the absolute floor the spread is arithmetic on noise: `none` swings between
+    # 0.004 and 0.01 ms, which is "+-250%" of nothing. Say zero instead of saying that.
+    if len(samples) < 2 or case["p50"] < P50_FLOOR_MS:
+        return 0.0
+    return 100.0 * (max(samples) - min(samples)) / case["p50"]
+
+
 def verdicts(before, after, tolerance):
     rows = []
     for case in before:
@@ -142,16 +174,18 @@ def verdicts(before, after, tolerance):
         b, a = before[case], after[case]
         d_payload = delta(b["payload"], a["payload"])
         d_p50 = delta(b["p50"], a["p50"])
+        noise = max(spread(b), spread(a))
         flags = []
         if d_payload > tolerance and (a["payload"] - b["payload"]) >= PAYLOAD_FLOOR_BYTES:
-            flags.append("payload %+.1f%%" % d_payload)
-        if d_p50 > tolerance and (a["p50"] - b["p50"]) >= P50_FLOOR_MS:
-            flags.append("p50 %+.1f%%" % d_p50)
-        rows.append((case, b, a, d_payload, d_p50, flags))
+            flags.append("payload %+.1f%%" % d_payload)     # bytes are deterministic: noise 0
+        if (d_p50 > tolerance and d_p50 > noise
+                and (a["p50"] - b["p50"]) >= P50_FLOOR_MS):
+            flags.append("p50 %+.1f%% (noise +-%.1f%%)" % (d_p50, noise))
+        rows.append((case, b, a, d_payload, d_p50, flags, noise))
     return rows
 
 
-def render(rows, before_label, after_label, meta, tolerance, failed):
+def render(rows, before_label, after_label, meta, tolerance, failed, args_reps):
     out = []
     add = out.append
     add("<!-- krd bench-ab: generated by `make bench-ab` -->")
@@ -164,20 +198,31 @@ def render(rows, before_label, after_label, meta, tolerance, failed):
         % (meta["px"], meta["tiles"], meta["tile"], meta["format"],
            meta["pane"], meta["cell"], meta["reps"], "" if meta["reps"] == 1 else "s"))
     add("")
-    add("| case | tiles | payload | Δ | total p50 | Δ | total p99 | Δ |")
-    add("|---|---:|---:|---:|---:|---:|---:|---:|")
-    for case, b, a, d_payload, d_p50, flags in rows:
+    add("| case | tiles | payload | Δ | total p50 | Δ | noise | total p99 | Δ |")
+    add("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for case, b, a, d_payload, d_p50, flags, noise in rows:
         d_p99 = delta(b["p99"], a["p99"])
+        p99_note = ("%+.1f%%" % d_p99) if max(b["p99"], a["p99"]) >= P50_FLOOR_MS else "—"
         mark = " ⚠" if flags else ""
-        add("| %s%s | %d | %s → %s | %+.1f%% | %.2f → %.2f ms | %+.1f%% | %.2f → %.2f ms | %+.1f%% |"
+        add("| %s%s | %d | %s → %s | %+.1f%% | %.2f → %.2f ms | %+.1f%% | ±%.1f%% | %.2f → %.2f ms | %s |"
             % (case, mark, a["tiles"], name(b["payload"]), name(a["payload"]), d_payload,
-               b["p50"], a["p50"], d_p50, b["p99"], a["p99"], d_p99))
+               b["p50"], a["p50"], d_p50, noise, b["p99"], a["p99"], p99_note))
     add("")
     if failed:
         add("**Verdict: regression.** " + ", ".join(
-            "%s (%s)" % (case, ", ".join(flags)) for case, _, _, _, _, flags in rows if flags))
+            "%s (%s)" % (row[0], ", ".join(row[5])) for row in rows if row[5]))
     else:
-        add("**Verdict: no regression above %.0f%%** (payload bytes and total p50)." % tolerance)
+        add("**Verdict: no regression above %.0f%%** (payload bytes, and total p50 outside this"
+            " machine's own spread)." % tolerance)
+    noisy = [row for row in rows
+             if not row[5] and row[6] > tolerance
+             and (row[3] > tolerance or abs(row[4]) > tolerance)]
+    if noisy:
+        add("")
+        add("Not flagged, because this machine moves that much on its own: %s. The `noise` column"
+            " is peak-to-peak of %d identical runs of the same binary, not a guess — a timing"
+            " delta has to beat it to count. Bytes are deterministic and have no such excuse."
+            % (args_reps, ", ".join("`%s` (±%.0f%%)" % (row[0], row[6]) for row in noisy)))
     add("")
     add("<sub>`payload` is the zlib stream, before base64. Times are the live path: dirty → parallel "
         "compress → escape assembly. A flag needs more than %.0f%% *and* %.1f ms / %d B of absolute "
@@ -190,7 +235,8 @@ def render(rows, before_label, after_label, meta, tolerance, failed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", default=None, help="the 'before' side (default: origin/main, main)")
-    ap.add_argument("--reps", type=int, default=3, help="runs per side, interleaved (default 3)")
+    ap.add_argument("--reps", type=int, default=5,
+                    help="runs per side, interleaved (default 5; also sets the noise estimate)")
     ap.add_argument("--rounds", type=int, default=20, help="measured frames per case (default 20)")
     ap.add_argument("--tolerance", type=float, default=5.0, help="percent that counts as a regression")
     ap.add_argument("--out", default=os.path.join(ROOT, "bench", "ab-report.md"))
@@ -264,7 +310,7 @@ def main():
     }
     rows = verdicts(before, after, args.tolerance)
     failed = [row for row in rows if row[5]]
-    report = render(rows, before_label, after_label, meta, args.tolerance, failed)
+    report = render(rows, before_label, after_label, meta, args.tolerance, failed, args.reps)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as handle:

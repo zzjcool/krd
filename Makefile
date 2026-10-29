@@ -46,7 +46,7 @@ bench-replay: build
 	$(KRD) --replay $(or $(DIR),/tmp/krd-frames) --bench
 
 bench-ab:
-	./bench/ab.sh $(if $(REF),--ref $(REF)) --reps $(or $(REPS),3) --rounds $(or $(ROUNDS),20)
+	./bench/ab.sh $(if $(REF),--ref $(REF)) --reps $(or $(REPS),5) --rounds $(or $(ROUNDS),20)
 
 clean:
 	swift package clean

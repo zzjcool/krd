@@ -40,7 +40,7 @@ def die(message):
 
 def run(command, capture_stdout=True, check=True, timeout=None):
     result = subprocess.run(command, cwd=ROOT, capture_output=capture_stdout,
-                            text=True, timeout=timeout)
+                            text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     if check and result.returncode != 0:
         die("command failed (%d): %s" % (result.returncode, " ".join(command)))
     return result

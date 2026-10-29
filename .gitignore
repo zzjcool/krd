@@ -22,3 +22,4 @@ docs/media/raw/
 /bench/results/
 /bench/report.md
 /bench/ab-report.md
+/bench/history/*+dirty*.json

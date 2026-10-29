@@ -223,9 +223,7 @@ final class Desk {
             return
         }
         if options.bench {
-            if let cell = options.cell { TermGeometry.fallbackCell = cell }
-            var geometry = TermGeometry.read()
-            if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
+            let geometry = benchGeometry()
             let source = options.source ?? (w: 1440, h: 2560)
             self.sourceRect = CGRect(x: 0, y: 0, width: source.w, height: source.h)
             applyLayout(geometry: geometry)
@@ -235,9 +233,7 @@ final class Desk {
         }
 
         if let caseName = options.benchWire {
-            if let cell = options.cell { TermGeometry.fallbackCell = cell }
-            var geometry = TermGeometry.read()
-            if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
+            let geometry = benchGeometry()
             let source = options.source ?? (w: 1440, h: 2560)
             self.sourceRect = CGRect(x: 0, y: 0, width: source.w, height: source.h)
             applyLayout(geometry: geometry)
@@ -572,6 +568,21 @@ final class Desk {
     }
 
     // MARK: layout
+
+    /// Geometry for the bench modes, built from the flags only.
+    ///
+    /// It deliberately does not read the tty. `TermGeometry.read()` prefers the terminal's
+    /// own pixel report, so `--pane 137x44` plus a 2400x1290 window silently became a
+    /// 118x44 / 2067x1290 picture and `--cell 17x33` was ignored -- which made the numbers
+    /// depend on how big the terminal window happened to be, and made the case assertions
+    /// (`one character` must dirty exactly one tile) fail for reasons that had nothing to
+    /// do with the encoder. A benchmark has to measure the same picture everywhere.
+    private func benchGeometry() -> TermGeometry {
+        if let cell = options.cell { TermGeometry.fallbackCell = cell }
+        var geometry = TermGeometry(cols: 80, rows: 24, pixelWidth: 0, pixelHeight: 0)
+        if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
+        return geometry
+    }
 
     private func applyLayout(geometry: TermGeometry) {
         let aspect = sourceRect.width / max(sourceRect.height, 1)
