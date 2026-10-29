@@ -14,3 +14,13 @@ WINSIZE rows=54 cols=141 xpixel=1128 ypixel=1080  cell=8.0x20.0px
 12 big chunk 4096 ok?              (no reply)
 13 delete image                    (no reply)
 14 bad base64                      (no reply)
+
+# Keyboard protocol (probe/kkeyboard.py), 2026-10-29. Same pane as above, but the harness pty has
+# no terminal emulator behind it, so this run records the *fallback* rather than a terminal:
+# DA1 gets no answer either, which is how we know the silence is the pty and not the protocol.
+00 primary DA (control)            (no reply)
+01 keyboard flags query            (no reply)
+                                   legacy only (push ignored, no answer)
+
+# Answer format in a real terminal, for reference:  ESC [ ? 15 u  =  kitty, flags 15
+# (disambiguate | events | alternates | all-keys). Anything else, or nothing: legacy.

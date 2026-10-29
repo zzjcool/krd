@@ -104,6 +104,11 @@ final class InputReader {
     /// into "the terminal never sent it" vs "the click went to the wrong place".
     var trace = false
 
+    /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
+    /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
+    /// it means "legacy encoding only", which is exactly what the pre-#15 parser handled.
+    private(set) var keyboardFlags: Int?
+
     private func log(_ text: String) {
         Log.write("input: " + text + "\n")
     }
@@ -139,6 +144,9 @@ final class InputReader {
         }
         // Only ask the terminal for mouse reports once we know we can read them back.
         ScreenWriter.writeMouseReporting(true)
+        // Push the keyboard enhancements and ask which ones took. A terminal that does not know
+        // the sequence ignores it and stays on the legacy encoding, so this is safe to send blind.
+        ScreenWriter.writeKeyboardProtocol(true)
         var t = termios()
         if tcgetattr(STDIN_FILENO, &t) == 0 {
             savedTermios = t
@@ -253,24 +261,71 @@ final class InputReader {
         }
     }
 
+    /// `CSI … u`: either the terminal's answer to the capability query, or a key report.
+    ///
+    /// `CSI ? <flags> u` is the answer (`?` = query), `CSI > … u` / `CSI < … u` / `CSI = … u` are
+    /// pushes, pops and sets, which are ours to send and never in the input stream; anything else
+    /// is a key.
+    private func handleKeyProtocol(_ params: String) {
+        if params.hasPrefix("?") {
+            keyboardFlags = Int(params.dropFirst())
+            if trace { log("keyboard protocol flags=\(keyboardFlags.map(String.init) ?? "unparsed")") }
+            return
+        }
+        guard !params.hasPrefix(">"), !params.hasPrefix("<"), !params.hasPrefix("=") else { return }
+        guard let report = KeyReport(kitty: params) else { return }
+        handleKeyReport(report)
+    }
+
+    /// One decoded report: decide what it means and post it. Press and repeat stay a down+up tap
+    /// (what every legacy key does today, and what makes hold-to-repeat work without the mirrored
+    /// app ever holding a key the terminal forgot); a release is an up on its own.
+    private func handleKeyReport(_ report: KeyReport) {
+        if trace {
+            log("key \(report.code) mods=\(report.mods) \(report.phase)"
+                + (report.base.map { " base=\($0)" } ?? ""))
+        }
+        if report.isQuitChord {
+            if report.isQuit { onQuit() }
+            return
+        }
+        if Keyboard.modifierKeys.contains(report.code) {
+            if trace { log("modifier \(report.code) \(report.phase) not forwarded") }
+            return
+        }
+        if let code = Keyboard.keyCode(report) {
+            postKey(code, report.flags, phase: report.phase)
+        } else if let ch = Keyboard.text(report) {
+            postUnicode(ch, report.flags, phase: report.phase)
+        } else if trace {
+            log("unmapped functional key \(report.code) ignored")
+        }
+    }
+
     private func handleCSI(params: String, final: UInt8) {
+        if final == 0x75 {                                  // 'u': kitty keyboard protocol
+            handleKeyProtocol(params)
+            return
+        }
         if params.hasPrefix("<") {
             handleMouse(params, isRelease: final == 0x6D)   // 'm' = release
             return
         }
-        let numbers = params.split(separator: ";").map { Int($0) ?? 0 }
+        let (numbers, phase) = KeyReport.legacyFields(params)
         let flags = Keys.modifierFlags(numbers)
         let letter = Character(UnicodeScalar(final))
         switch letter {
-        case "A": postKey(Keys.up, flags); case "B": postKey(Keys.down, flags)
-        case "C": postKey(Keys.right, flags); case "D": postKey(Keys.left, flags)
-        case "H": postKey(Keys.home, flags); case "F": postKey(Keys.end, flags)
-        case "Z": postKey(Keys.tab, flags.union(.maskShift))
+        case "A": postKey(Keys.up, flags, phase: phase); case "B": postKey(Keys.down, flags, phase: phase)
+        case "C": postKey(Keys.right, flags, phase: phase); case "D": postKey(Keys.left, flags, phase: phase)
+        case "H": postKey(Keys.home, flags, phase: phase); case "F": postKey(Keys.end, flags, phase: phase)
+        case "Z": postKey(Keys.tab, flags.union(.maskShift), phase: phase)
         case "~":
             // A table lookup, not arithmetic: an unknown number is dropped instead of indexing
             // past the end of a shorter table (TROUBLESHOOTING §22) — and a Swift subscript trap
             // is not catchable, so the process used to die with raw mode still on.
-            if let press = Keys.numberedPress(numbers) { postKey(press.key, press.flags) }
+            if let press = Keys.numberedPress(numbers) {
+                postKey(press.key, press.flags, phase: phase)
+            }
         default: break
         }
     }
@@ -466,19 +521,29 @@ final class InputReader {
         postUnicode(ch, flags)
     }
 
-    private func postKey(_ code: CGKeyCode, _ flags: CGEventFlags) {
-        if dryRun || trace { log("key code=\(code) flags=\(flags.rawValue)") }
+    private func postKey(_ code: CGKeyCode, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
+        if dryRun || trace {
+            log("key code=\(code) flags=\(flags.rawValue)"
+                + (phase == .press ? "" : " phase=\(phase)"))
+        }
         if dryRun { return }
-        for down in [true, false] {
+        for down in phase == .release ? [false] : [true, false] {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { continue }
             event.flags = flags
             event.post(tap: .cghidEventTap)
         }
     }
 
-    private func postUnicode(_ ch: Character, _ flags: CGEventFlags) {
+    private func postUnicode(_ ch: Character, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
+        if dryRun || trace {
+            log("text \(ch.debugDescription) flags=\(flags.rawValue)"
+                + (phase == .press ? "" : " phase=\(phase)"))
+        }
+        // `--dry-run` means "parse input but never post a CGEvent" -- this path used to post anyway,
+        // which made the flag dishonest for every character outside `Keys.map`.
+        if dryRun { return }
         var utf16 = Array(String(ch).utf16)
-        for down in [true, false] {
+        for down in phase == .release ? [false] : [true, false] {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { continue }
             event.flags = flags
             event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)

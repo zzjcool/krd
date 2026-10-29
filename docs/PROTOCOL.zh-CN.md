@@ -217,7 +217,9 @@ if Cx > cols || Cy > rows  →  终端在讲像素  →  粘住 pixelMouse = tru
 | `ESC [ A/B/C/D` | 上 / 下 / 右 / 左（`Keys.up` … `Keys.left`） |
 | `ESC [ H` / `ESC [ F` | Home / End |
 | `ESC [ Z` | Shift-Tab |
-| `ESC [ 1;…` | 修饰位：`n-1` 的 & 1 shift、& 2 alt、& 4 ctrl、& 8 cmd |
+| `ESC [ 1;…` | 修饰位：`n-1` 的 & 1 shift、& 2 alt、& 4 ctrl、& 8 cmd；开了事件上报后该字段是 `<mods>:<event>` |
+| `ESC [ <code> ; <mods> : <event> u` | kitty 键盘协议（§7.3）：带 press/repeat/release 事件的按键上报 |
+| `ESC [ ? <flags> u` | 终端对能力查询的回答（§7.3），只读掉、绝不转发 |
 | `ESC [ <code> ~` | 1,2,7 → Home；3 → forward delete；4,8 → End；5/6 → page up/down；11–14 → F1–F4；15 → F5；17–21 → F6–F10；23,24 → F11,F12；25,26 → F13,F14。一张表（`Keys.numbered`）：16 和 22 是编号里的空档，直接忽略，表里没有的编号同样忽略 |
 | `ESC O A–D / H / F / P–S` | SS3 方向键、Home/End、F1–F4（与 `ESC [ 11 ~` … `ESC [ 14 ~` 同一组键码） |
 | `0x00` | Ctrl-Space |
@@ -230,8 +232,54 @@ if Cx > cols || Cy > rows  →  终端在讲像素  →  粘住 pixelMouse = tru
 | 可打印 ASCII | 查 `Keys.map` 的 US/ANSI 虚拟键码；需要 Shift 的符号（`!@#$…`）按基础键并补 `maskShift`；大写字母同理 |
 | 其它 | 用 `virtualKey 0` + `keyboardSetUnicodeString` 发一个 `CGEvent` |
 
-**没有 kitty 键盘协议**握手（`CSI > 9 u`），所以裸修饰键、按键释放、Cmd 组合永远收不到。Alt+键 是能
-收到的，形式是 `ESC`+键。
+**有** kitty 键盘协议握手（§7.3）；但忽略它的终端仍按上面这套 legacy 编码工作、行为不变，这张表
+描述的就是那条路径。
+
+### 7.3 键盘协议（kitty）
+
+没有它，`Cmd` 组合、按键释放、连发都收不到：macOS 拿到的只是能打字、不能干活的键盘。握手是两条
+写往 **stdout** 的序列，在输入启动时发一次：
+
+```
+CSI > 15 u      # push：disambiguate(1) | events(2) | alternates(4) | 所有键都用转义序列(8)
+CSI ? u         # query：当前生效的是哪些标志？
+```
+
+实现了协议的终端会在 **stdin** 回 `CSI ? <flags> u`；krd 记下它，`--debug` 打印
+`input: keyboard protocol flags=<n>`。没有回答就是“只有 legacy”，这是受支持的状态，不是错误。
+退出时弹栈（`CSI < u`），把键盘模式还给 krd 后面的 shell。
+
+bit 16（associated text）故意不请求——IME 是 #16，它带的文本字段在此之前只是白负重。
+
+push 被接受后，按键上报长这样：
+
+```
+CSI code[:shifted[:base]] ; modifiers[:event] [; text] u
+```
+
+- `code` 是**未按 Shift 的** Unicode 码位（`ctrl+shift+a` 是 `97`，绝不是 `65`），或者是功能区
+  键在私用区（57344–63743）里的编号。
+- `shifted` / `base` 只因为 bit 4 才出现。`base` 是同一个物理键在 PC-101 布局上的键位，正是它让
+  西里尔布局下的 `ctrl+С` 去按 `c` 键。
+- `modifiers` 与 legacy 字段同一套 `1 + bits`：1 shift、2 alt、4 ctrl、8 super（macOS 上就是**Cmd**）。
+  Hyper(16)、meta(32)、锁定位(64/128) 会解进上报里，但**故意**不映射到 `CGEventFlags`。
+- `event` 因为 bit 2 才出现：1 press、2 repeat、3 release。
+
+krd 拿到之后怎么做（`Sources/krd/Keyboard.swift`）：
+
+| 上报 | 实际发出 |
+|---|---|
+| press、repeat | 带该上报 flags 的 down+up —— 和以前每个键一样，连发靠它 |
+| release | **只发 up** |
+| 码位能在 `Keys.map` 里找到 | 用 US/ANSI 虚拟键码（`Cmd-C` → 键 8 + `.maskCommand`） |
+| 码位没有对应 ANSI 键 | 走 `keyboardSetUnicodeString`，和以前一样 |
+| 功能键 PUA 码 | `27`/`13`/`9`/`127` → Esc/Enter/Tab/Backspace，`57376`/`57377` → F13/F14；没有映射的 PUA 码直接丢弃，绝不当作字符打进去 |
+| 修饰键本身（57441–57454、57358–57360） | 丢弃：其它上报已经带着它们的状态，转发一次 tap 只会叠加 |
+| `Ctrl-\`（码位 92，ctrl） | **退出**，且只在 press/repeat；release 不能再结束一次会话 |
+
+协议开着时其余一切仍保持 legacy 形状：方向键还是 `CSI 1;<mods>[ABCD]`，F1–F12 还是
+`CSI <n>;<mods>~`，那些序列上唯一新增的是 `:event` 子字段——这也是为什么没有子字段时
+`KeyReport.legacyFields` 返回的 `[Int]` 与旧解析一模一样。
 
 ## 8. 回复
 

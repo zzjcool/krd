@@ -68,13 +68,27 @@ Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/AR
 - One-time approval of **Screen Recording** (capture) and **Accessibility** (input) — the installer
   prints the exact prompt. Details and failure modes: [docs/DEPLOY.md](docs/DEPLOY.md).
 
+### Terminals
+
+| | Graphics | Keyboard protocol |
+|---|---|---|
+| rex | kitty | ? — run the probe |
+| Ghostty | kitty | kitty (flags 15) † |
+| kitty | kitty | kitty (flags 15) † |
+| WezTerm | kitty | kitty (flags 15) † |
+| Terminal.app | — | legacy (no answer) |
+
+“kitty” means `Cmd` combinations, key release and repeat arrive; “legacy” means they don't, and krd
+runs on the unchanged pre-0.1.3 encoding. Both are supported states. † = per the terminal's own
+documentation — `python3 probe/kkeyboard.py` answers it for the terminal you are actually in.
+
 ## Status
 
 | | |
 |---|---|
-| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, window mode, SSH |
+| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode, SSH |
 | Rough | colour-heavy full-screen motion (no codec yet), Herdr's image-delete semantics |
-| Not yet | kitty keyboard protocol (`Cmd` combinations, key release), clipboard, IME input, multi-display hot switch |
+| Not yet | clipboard, IME input, multi-display hot switch |
 
 ## Docs
 

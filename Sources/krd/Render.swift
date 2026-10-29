@@ -100,8 +100,39 @@ final class ScreenWriter {
     static func writeMouseReporting(_ on: Bool) {
         // 1003 = report every motion, not only while a button is held: a remote pointer has to
         // follow the mouse even when nobody is clicking. 1006 = SGR encoding, 1016 = SGR *pixels*.
-        let text = on ? "\u{1B}[?1003h\u{1B}[?1002h\u{1B}[?1006h\u{1B}[?1016h"
-                      : "\u{1B}[?1016l\u{1B}[?1006l\u{1B}[?1003l\u{1B}[?1002l"
+        writeRaw(on ? "\u{1B}[?1003h\u{1B}[?1002h\u{1B}[?1006h\u{1B}[?1016h"
+                    : "\u{1B}[?1016l\u{1B}[?1006l\u{1B}[?1003l\u{1B}[?1002l")
+    }
+
+    /// Push the kitty keyboard enhancements krd can use, and ask which ones took.
+    ///
+    /// 15 = disambiguate (1) | report event types (2) | report alternate keys (4) | report all
+    /// keys as escape codes (8). Every bit is load-bearing: without 1 the modified keys are still
+    /// legacy bytes, without 2 there is no repeat or release, without 4 a non-US layout maps onto
+    /// the wrong physical key, and without 8 text keys never become events at all. 16 ("associated
+    /// text") stays off on purpose — IME is #16.
+    ///
+    /// A terminal that does not implement this ignores both sequences, which is the supported
+    /// outcome: `InputReader` keeps the legacy encoding and nothing about the old parse changes.
+    /// `endSession` pops the push so the shell behind us gets its own keyboard mode back.
+    /// True once this process pushed the keyboard enhancements. `--selftest`, `--bench` and
+    /// `--replay` call `endSession` without ever starting input, and a pop there would take a push
+    /// that belongs to the shell (or the terminal's own UI).
+    private static var keyboardPushed = false
+
+    static func writeKeyboardProtocol(_ on: Bool) {
+        if on {
+            keyboardPushed = true
+            writeRaw("\u{1B}[>15u\u{1B}[?u")
+        } else if keyboardPushed {
+            keyboardPushed = false
+            writeRaw("\u{1B}[<u")
+        }
+    }
+
+    /// Straight to the tty, bypassing the frame buffer: input-mode sequences must not land in the
+    /// middle of a placement (and must work before the first frame exists).
+    static func writeRaw(_ text: String) {
         Array(text.utf8).withUnsafeBufferPointer { buf in
             var off = 0
             while off < buf.count {
@@ -113,10 +144,12 @@ final class ScreenWriter {
     }
 
     func endSession() {
-        // Terminate any half-written APC *first*, then retire the screen.
+        // Terminate any half-written APC *first*, then retire the screen. The keyboard push goes
+        // with it: a pop after the alternate screen is gone is still our business, not the shell's.
         write("\u{1B}\\\u{1B}[?2026l")
         clear()
         write("\u{1B}[?1003l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
+        Self.writeKeyboardProtocol(false)
     }
 
     /// Frames between "drop every image and repaint everything" cycles.
