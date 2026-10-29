@@ -116,7 +116,7 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 | [TESTING](docs/TESTING.zh-CN.md) | 自检、瓦片定位标定、怎么验一个新终端 |
 | [ENCODING](docs/ENCODING.zh-CN.md) | 字节和毫秒花在哪，以及背后的基准测试 |
 | [BENCHMARK](docs/BENCHMARK.md) | 基准分层、预算阈值，以及这里「快」到底指什么 |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 41 个现象及其根因 |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 44 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 
 ## 参与

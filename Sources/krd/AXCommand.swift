@@ -20,6 +20,9 @@ enum AXExit: Int32 {
     case permission = 3
     case environment = 4
     case notFound = 5
+    /// The node exists but will not do what was asked (`press` on a static text, `set` on a
+    /// read-only field), or the app accepted the write and read back something else.
+    case notActionable = 6
 }
 
 enum AXFailure: Error {
@@ -27,6 +30,7 @@ enum AXFailure: Error {
     case permission(String)
     case environment(String)
     case notFound(String)
+    case notActionable(String)
 
     var code: AXExit {
         switch self {
@@ -34,6 +38,7 @@ enum AXFailure: Error {
         case .permission: return .permission
         case .environment: return .environment
         case .notFound: return .notFound
+        case .notActionable: return .notActionable
         }
     }
 }
@@ -50,6 +55,17 @@ struct AXOptions {
     var menuBar = false
     var prompt = false
     var maxNodes = 400
+    /// `find`: the text to look for. `press`/`set`: the ref, in `ref`.
+    var query = ""
+    var ref: String?
+    /// `find`: restrict to one AX role (case-insensitive, `button` or `AXButton`).
+    var role: String?
+    /// `--dry-run`: say what the write would do and touch nothing.
+    var dryRun = false
+    /// `--snapshot <generation|path>`: pin a write to the dump that printed the ref.
+    var snapshotID: String?
+    /// `set --text`.
+    var text: String?
 }
 
 /// What the preflight learned. Also the body of `krd ax doctor`.
@@ -79,6 +95,9 @@ enum AXCommand {
             case "tree": exit(try tree(options))
             case "screen": exit(try screen(options))
             case "doctor": exit(try doctor(options))
+            case "find": exit(try find(options))
+            case "press": exit(try press(options))
+            case "set": exit(try set(options))
             default:
                 throw AXFailure.usage("unknown command \"\(options.verb)\" (try `krd ax --help`)")
             }
@@ -120,12 +139,23 @@ enum AXCommand {
                 options.app = try string(args, &i, for: arg)
             case "--max":
                 options.maxNodes = try int(args, &i, for: arg, min: 1, max: 20_000)
+            case "--role":
+                options.role = try string(args, &i, for: arg)
+            case "--text":
+                options.text = try textValue(args, &i, for: arg)
+            case "--dry-run": options.dryRun = true
+            case "--snapshot":
+                options.snapshotID = try string(args, &i, for: arg)
             default:
                 if arg.hasPrefix("-") {
                     throw AXFailure.usage("unknown option \"\(arg)\" (try `krd ax --help`)")
                 }
                 if options.verb.isEmpty {
                     options.verb = arg
+                } else if options.verb == "find" && options.query.isEmpty {
+                    options.query = arg
+                } else if (options.verb == "press" || options.verb == "set") && options.ref == nil {
+                    options.ref = arg
                 } else {
                     throw AXFailure.usage("unexpected argument \"\(arg)\" (try `krd ax --help`)")
                 }
@@ -137,6 +167,21 @@ enum AXCommand {
         }
         if options.all && options.interactiveOnly {
             throw AXFailure.usage("--all and -i contradict each other")
+        }
+        switch options.verb {
+        case "find":
+            guard !options.query.isEmpty || options.role != nil else {
+                throw AXFailure.usage("find needs a query or --role <role>")
+            }
+        case "press":
+            guard options.ref != nil else { throw AXFailure.usage("press needs a ref, e.g. `krd ax press @e7`") }
+        case "set":
+            guard options.ref != nil else { throw AXFailure.usage("set needs a ref, e.g. `krd ax set @e7 --text hello`") }
+            guard options.text != nil else { throw AXFailure.usage("set needs --text <value> (use \"\" to clear)") }
+        default:
+            if options.text != nil || options.dryRun || options.snapshotID != nil || options.role != nil {
+                throw AXFailure.usage("--text/--dry-run/--snapshot/--role only apply to find, press and set")
+            }
         }
         return options
     }
@@ -157,6 +202,15 @@ enum AXCommand {
         return args[i]
     }
 
+    /// `--text` takes an empty string on purpose: clearing a field is a real operation.
+    static func textValue(_ args: [String], _ i: inout Int, for flag: String) throws -> String {
+        guard i + 1 < args.count else {
+            throw AXFailure.usage("\(flag) needs a value (use \"\" to clear the field)")
+        }
+        i += 1
+        return args[i]
+    }
+
     static func usage() -> String {
         """
         usage: krd ax [options] <command>
@@ -171,17 +225,31 @@ enum AXCommand {
             --all                  also emit unlabelled structure
             --menubar              prepend the app's menu bar
             --max <n>              node budget (default 400)
+          find <query>           nodes whose name/value/identifier/role contains <query>
+            --role <r>             …and only that role (`button` or `AXButton`)
           screen                 one line per window, plus the focused element
           doctor                 check accessibility and the window server, change nothing
+
+        Refs. Every node a dump prints has a handle (`@e7`) that stays valid across invocations:
+        the dump is written under $TMPDIR/krd-ax and the ref is resolved by walking the same
+        path again, verifying each step. If the UI moved on, the command fails and says so
+        instead of acting on whatever sits at that index now.
+
+          press <ref>            send AXPress (a click without the mouse)
+          set <ref> --text <v>   write AXValue (`--text ""` clears a field)
+          --dry-run              say what a write would do and send nothing
+          --snapshot <id|path>   pin a write to the dump that printed the ref
+          --app <q>              …or narrow a ref to one app
 
           --json                 machine-readable output
           --prompt               ask macOS for the Accessibility grant (opens the dialog)
 
         exit: 0 ok · 2 usage · 3 no accessibility permission · 4 window server unreachable
-              5 nothing matched
+              5 nothing matched · 6 node refused the action, or read back something else
 
-        This command never captures a frame, so it needs Accessibility but not Screen
-        Recording. See docs/research-ax-text-channel.md.
+        Reads are the default and need no flags; press/set are explicit subcommands, and every
+        write prints the state it read back afterwards. This command never captures a frame, so
+        it needs Accessibility but not Screen Recording. See docs/research-ax-text-channel.md.
         """
     }
 
@@ -267,6 +335,7 @@ enum AXCommand {
         case .permission(let message): return message
         case .environment(let message): return message
         case .notFound(let message): return "krd ax: \(message)"
+        case .notActionable(let message): return "krd ax: \(message)"
         }
     }
 
@@ -445,26 +514,432 @@ enum AXCommand {
             maxDepth: options.depth,
             maxShown: options.maxNodes,
             maxVisited: max(options.maxNodes * 8, 2000),
-            deadline: Date().addingTimeInterval(10))
+            deadline: Date().addingTimeInterval(10),
+            refStart: AXRefStore().nextRef(bundle: app.bundle, window: options.windowIndex))
         if options.menuBar, let bar = asElement(value(element, kAXMenuBarAttribute)) {
-            reader.walk(root: bar, rootDepth: 0, countAsRoot: false)
+            var menu = AXWalker(
+                interactiveOnly: reader.interactiveOnly, emitEverything: reader.emitEverything,
+                includeMenus: true, maxDepth: reader.maxDepth, maxShown: reader.maxShown,
+                maxVisited: reader.maxVisited, deadline: reader.deadline,
+                refStart: reader.refStart, root: .menuBar)
+            menu.walk(root: bar, rootDepth: 0, countAsRoot: false)
+            reader.entries.insert(contentsOf: menu.entries, at: 0)
+            reader.visited += menu.visited
         }
         reader.walk(root: window, rootDepth: 0, countAsRoot: false)
 
         let title = text(window, kAXTitleAttribute)
+        let generation = persist(app: app, window: title, index: options.windowIndex,
+                                 count: windows.count, entries: reader.entries)
         if options.json {
             let payload = AXTreeJSON(
                 app: app.name, pid: app.pid, windowIndex: options.windowIndex,
                 windowCount: windows.count, windowTitle: title,
                 frame: frame(window), nodes: reader.nodes,
-                truncated: reader.truncated, visited: reader.visited)
+                truncated: reader.truncated, visited: reader.visited,
+                generation: generation)
             print(jsonString(payload.dictionary))
             return AXExit.ok.rawValue
         }
         print(AXText.header(
             app: app.name, window: title, index: options.windowIndex, count: windows.count,
-            shown: reader.nodes.count, truncated: reader.truncated, menuBar: options.menuBar))
+            shown: reader.nodes.count, truncated: reader.truncated, menuBar: options.menuBar,
+            refsHint: generation.map { generation in
+                "refs survive this command: \(reader.nodes.first?.ref ?? "@e1")…\(reader.nodes.last?.ref ?? "")"
+                    + " (krd ax press <ref> · snapshot \(generation.prefix(8)))"
+            }))
         for node in reader.nodes { print(AXText.render(node)) }
+        return AXExit.ok.rawValue
+    }
+
+    // MARK: - refs on disk
+
+    /// Write the dump and return its generation, or nil when the state directory is not
+    /// writable. Failing to persist must not fail the read: the tree is still the answer, it
+    /// just cannot be acted on later, and the note on stderr says exactly that.
+    static func persist(app: RunningApp, window: String, index: Int, count: Int,
+                        entries: [AXEntry]) -> String? {
+        guard !entries.isEmpty else { return nil }
+        let snapshot = AXSnapshot(
+            schema: AXSnapshot.schema,
+            generation: UUID().uuidString,
+            createdAt: Date(),
+            app: app.name, bundle: app.bundle, pid: app.pid,
+            windowIndex: index, windowTitle: window, windowCount: count,
+            nodes: entries.map { AXSnapshotNode(ref: $0.node.ref, chain: $0.chain, root: $0.root) })
+        do {
+            try AXRefStore().save(snapshot)
+            return snapshot.generation
+        } catch {
+            FileHandle.standardError.write(Data(
+                "krd ax: could not save refs (\(error)); `press`/`set` will not resolve them\n".utf8))
+            return nil
+        }
+    }
+
+    // MARK: - find
+
+    static func find(_ options: AXOptions) throws -> Int32 {
+        _ = try preflight(options)
+        let app = try resolveApp(options)
+        let element = AXUIElementCreateApplication(app.pid)
+        let windows = (value(element, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        guard !windows.isEmpty else {
+            throw AXFailure.notFound("\(AXText.sanitize(app.name, limit: 40)) has no window in the accessibility tree. "
+                + "Minimised windows and windows on another Space look like this.")
+        }
+        guard options.windowIndex < windows.count else {
+            throw AXFailure.notFound("\(AXText.sanitize(app.name, limit: 40)) has \(windows.count) window(s); "
+                + "--window \(options.windowIndex) is out of range")
+        }
+        let window = windows[options.windowIndex]
+
+        // Same filter and the same walk as `tree`, so @e7 here is the @e7 a tree dump printed:
+        // a ref that means one node in a dump and another in a find is how a write path clicks
+        // the wrong button. `--all` searches unlabelled structure and does renumber.
+        var reader = AXWalker(
+            interactiveOnly: false,
+            emitEverything: options.all,
+            includeMenus: options.menuBar,
+            maxDepth: options.depth,
+            maxShown: options.maxNodes,
+            maxVisited: max(options.maxNodes * 8, 2000),
+            deadline: Date().addingTimeInterval(10),
+            refStart: AXRefStore().nextRef(bundle: app.bundle, window: options.windowIndex))
+        if options.menuBar, let bar = asElement(value(element, kAXMenuBarAttribute)) {
+            reader.walk(root: bar, rootDepth: 0, countAsRoot: false)
+        }
+        reader.walk(root: window, rootDepth: 0, countAsRoot: false)
+
+        let query = options.query.lowercased()
+        let wantedRole = options.role.map { AXText.shortRole($0) }
+        let matches = reader.entries.filter { entry in
+            if let wantedRole {
+                let short = AXText.shortRole(entry.node.role)
+                let full = entry.node.role.lowercased()
+                if short != wantedRole && full != wantedRole { return false }
+            }
+            guard !query.isEmpty else { return true }
+            return [entry.node.name, entry.rawValue, entry.identifier,
+                    entry.node.role, AXText.shortRole(entry.node.role)]
+                .contains { $0.lowercased().contains(query) }
+        }
+        guard !matches.isEmpty else {
+            let what = options.role.map { "\($0) " } ?? ""
+            throw AXFailure.notFound("no \(what)node matches \"\(AXText.sanitize(options.query, limit: 60))\" in "
+                + "\(AXText.sanitize(app.name, limit: 40)) (\(reader.visited) visited, \(reader.entries.count) named). "
+                + "Try a shorter query, drop --role, or raise -d/--max.")
+        }
+
+        let title = text(window, kAXTitleAttribute)
+        let generation = persist(app: app, window: title, index: options.windowIndex,
+                                 count: windows.count, entries: reader.entries)
+        if options.json {
+            var payload: [String: Any] = [
+                "app": app.name, "pid": Int(app.pid), "window": options.windowIndex,
+                "title": AXText.sanitize(title, limit: 200),
+                "query": AXText.sanitize(options.query, limit: 80),
+                "visited": reader.visited, "searched": reader.entries.count,
+                "matches": matches.map { entry -> [String: Any] in
+                    var out: [String: Any] = [
+                        "ref": entry.node.ref, "role": entry.node.role, "name": entry.node.name,
+                        "depth": entry.node.depth, "actions": entry.node.actions,
+                    ]
+                    if !entry.node.detail.isEmpty { out["detail"] = entry.node.detail }
+                    if let frame = entry.node.frame { out["frame"] = frameJSON(frame) }
+                    return out
+                },
+            ]
+            if let generation { payload["generation"] = generation }
+            print(jsonString(payload))
+            return AXExit.ok.rawValue
+        }
+        let asked = options.query.isEmpty
+            ? "role \(AXText.sanitize(options.role ?? "", limit: 24))"
+            : "\"\(AXText.sanitize(options.query, limit: 60))\""
+        print("# krd ax find \(asked) — \(matches.count) of "
+            + "\(reader.entries.count) nodes in \(AXText.sanitize(app.name, limit: 40))"
+            + (title.isEmpty ? "" : " \"\(AXText.sanitize(title, limit: 60))\""))
+        if let generation {
+            print("# snapshot \(generation.prefix(8)) · act on these: krd ax press <ref>")
+        }
+        for entry in matches { print(AXText.render(entry.node)) }
+        return AXExit.ok.rawValue
+    }
+
+    // MARK: - resolving a ref
+
+    struct ResolvedRef {
+        var snapshot: AXSnapshot
+        var node: AXSnapshotNode
+        var element: AXUIElement
+    }
+
+    /// Turn `@e7` back into an element, or say exactly why that is not possible.
+    ///
+    /// Every failure here is fail-closed: the ref names one node of one dump, and if that node
+    /// cannot be shown to still be the same node, the command stops. Acting on a guess is the
+    /// one thing a write path must never do.
+    static func resolveRef(_ options: AXOptions) throws -> ResolvedRef {
+        guard let raw = options.ref else { throw AXFailure.usage("press/set need a ref") }
+        guard let ref = AXRef(raw) else {
+            throw AXFailure.usage("\"\(AXText.sanitize(raw, limit: 20))\" is not a ref; they look like @e7 "
+                + "(print one with `krd ax tree --app <app>`)")
+        }
+        let store = AXRefStore()
+        let snapshot: AXSnapshot
+        if let pinned = options.snapshotID {
+            guard let loaded = store.load(reference: pinned) else {
+                throw AXFailure.notFound("no snapshot \"\(AXText.sanitize(pinned, limit: 40))\" in "
+                    + "\(store.directory.path) (pass a generation id or a path to a snapshot .json)")
+            }
+            snapshot = loaded
+        } else {
+            let candidates = store.loadIndex().candidates(for: ref, app: options.app)
+            if candidates.isEmpty {
+                throw AXFailure.notFound("no snapshot holds \(ref). Refs are printed by a dump and kept in "
+                    + "\(store.directory.path); run `krd ax tree --app <app>` (or `krd ax find <query>`) first.")
+            }
+            if candidates.count > 1 {
+                let where_ = candidates.map { "\($0.origin) (pid \($0.pid), window \($0.window))" }
+                    .joined(separator: ", ")
+                throw AXFailure.usage("\(ref) is in \(candidates.count) snapshots: \(where_). "
+                    + "Narrow it with --app <name> or --snapshot <generation>.")
+            }
+            guard let loaded = store.load(generation: candidates[0].generation) else {
+                throw AXFailure.notFound("the snapshot that printed \(ref) is gone (\(candidates[0].generation)); "
+                    + "re-run `krd ax tree --app <app>`")
+            }
+            snapshot = loaded
+        }
+        guard let node = snapshot.node(ref: ref.description) else {
+            throw AXFailure.notFound("\(ref) is not in snapshot \(snapshot.generation) "
+                + "(it has \(snapshot.nodes.count) refs); re-run the dump that printed it")
+        }
+        guard let first = node.chain.first else {
+            throw AXFailure.notFound("\(ref) has an empty chain in snapshot \(snapshot.generation); re-dump")
+        }
+        // The app, not just the pid: macOS reuses pids, and a recycled pid would send the
+        // action to a different program.
+        guard let running = NSRunningApplication(processIdentifier: snapshot.pid),
+              running.bundleIdentifier == snapshot.bundle else {
+            throw AXFailure.notFound("the app that printed \(ref) (\(snapshot.app), pid \(snapshot.pid)) is not "
+                + "running any more. Refs do not survive a restart: re-run `krd ax tree --app "
+                + "\(AXText.sanitize(snapshot.app, limit: 30))`.")
+        }
+        let app = AXUIElementCreateApplication(snapshot.pid)
+        let windows = (value(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        var element: AXUIElement
+        switch node.root ?? .window {
+        case .menuBar:
+            // A --menubar dump chains from the menu bar, which is not inside the window.
+            guard let bar = asElement(value(app, kAXMenuBarAttribute)) else {
+                throw AXFailure.notFound("\(ref) came from a --menubar dump, but "
+                    + "\(AXText.sanitize(snapshot.app, limit: 30)) has no menu bar now; re-dump")
+            }
+            element = bar
+        case .window:
+            guard snapshot.windowIndex < windows.count else {
+                throw AXFailure.notFound("window \(snapshot.windowIndex) of "
+                    + "\(AXText.sanitize(snapshot.app, limit: 30)) is gone (\(windows.count) window(s) now); re-dump")
+            }
+            element = windows[snapshot.windowIndex]
+        }
+        guard signature(of: element, index: first.index).matches(first) else {
+            throw AXFailure.notFound("the window \(ref) belonged to has changed since the dump "
+                + "(role/title no longer match); re-dump")
+        }
+        let deadline = Date().addingTimeInterval(4)
+        for step in node.chain.dropFirst() {
+            if Date() > deadline {
+                throw AXFailure.environment("resolving \(ref) ran out of time (\(node.chain.count - 1) levels); "
+                    + "the app is not answering. Try again, or re-dump with -d to shorten the chain.")
+            }
+            element = try descend(element, step: step, ref: ref)
+        }
+        return ResolvedRef(snapshot: snapshot, node: node, element: element)
+    }
+
+    /// The one thing a chain step needs from a live element.
+    static func signature(of element: AXUIElement, index: Int) -> AXStep {
+        let values = multi(element, [kAXRoleAttribute, kAXTitleAttribute,
+                                     kAXIdentifierAttribute, kAXDescriptionAttribute])
+        let title = (values[1] as? String) ?? ""
+        return AXStep(index: index,
+                      role: (values[0] as? String) ?? "",
+                      identifier: (values[2] as? String) ?? "",
+                      title: title.isEmpty ? ((values[3] as? String) ?? "") : title)
+    }
+
+    /// One level. The recorded index is checked first so the common case reads one child, not
+    /// all of them; a miss reads the whole level and then refuses to guess.
+    static func descend(_ element: AXUIElement, step: AXStep, ref: AXRef) throws -> AXUIElement {
+        let children = (value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        if step.index >= 0, step.index < children.count,
+           signature(of: children[step.index], index: step.index).matches(step) {
+            return children[step.index]
+        }
+        let signatures = children.enumerated().map { signature(of: $1, index: $0) }
+        switch AXRefs.descend(step, children: signatures) {
+        case .same(let index), .moved(let index):
+            return children[index]
+        case .ambiguous(let hits):
+            throw AXFailure.notFound("\(ref) is ambiguous: \(hits.count) children of one node match "
+                + "\(AXText.shortRole(step.role)) \"\(AXText.sanitize(step.title, limit: 40))\" now. "
+                + "Refusing to pick one; re-dump and use the ref printed by that dump.")
+        case .gone:
+            throw AXFailure.notFound("\(ref) is stale: no child matches \(AXText.shortRole(step.role)) "
+                + "\"\(AXText.sanitize(step.title, limit: 40))\" any more (the UI changed, or the node was "
+                + "retitled). Re-dump and use the new ref.")
+        }
+    }
+
+    // MARK: - reading state back
+
+    struct NodeState {
+        var role = ""
+        var title = ""
+        var value = ""
+        var enabled: Bool?
+        var focused: Bool?
+        var selected: Bool?
+
+        var text: String {
+            var parts: [String] = []
+            parts.append("role=\(AXText.shortRole(role))")
+            if !title.isEmpty { parts.append("name=\"\(AXText.sanitize(title, limit: 40))\"") }
+            parts.append("value=\"\(AXText.sanitize(value, limit: 60))\"")
+            if let enabled { parts.append("enabled=\(enabled)") }
+            if let focused, focused { parts.append("focused") }
+            if let selected, selected { parts.append("selected") }
+            return parts.joined(separator: " ")
+        }
+    }
+
+    static func nodeState(_ element: AXUIElement) -> NodeState? {
+        let names = [kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute,
+                     kAXEnabledAttribute, kAXFocusedAttribute, kAXSelectedAttribute]
+        let values = multi(element, names)
+        // A dead element answers nothing; that is not a state, it is the absence of one.
+        if values.isEmpty || values.allSatisfy({ $0 is NSNull }) { return nil }
+        var state = NodeState()
+        state.role = (values[0] as? String) ?? ""
+        state.title = (values[1] as? String) ?? ""
+        if let string = values[2] as? String {
+            state.value = string
+        } else if let number = values[2] as? NSNumber {
+            state.value = number.stringValue
+        }
+        state.enabled = (values[3] as? NSNumber)?.boolValue
+        state.focused = (values[4] as? NSNumber)?.boolValue
+        state.selected = (values[5] as? NSNumber)?.boolValue
+        return state
+    }
+
+    /// AXError → the exit code that says who has to fix it.
+    static func failure(_ error: AXError, doing what: String) -> AXFailure {
+        let name = axErrorName(error)
+        switch error {
+        case .apiDisabled:
+            return .permission("accessibility was disabled while \(what): \(name)")
+        case .actionUnsupported, .attributeUnsupported, .notImplemented:
+            return .notActionable("\(what) is not supported by this node (\(name))")
+        case .invalidUIElement, .invalidUIElementObserver:
+            return .notFound("\(what) failed: the element disappeared (\(name)). A dialog that closed itself "
+                + "looks like this.")
+        case .cannotComplete:
+            return .environment("\(what) failed: the app did not answer (\(name)). It may be busy or hung; "
+                + "`krd ax doctor` shows whether the window server is answering at all.")
+        default:
+            return .environment("\(what) failed: \(name) (\(error.rawValue))")
+        }
+    }
+
+    // MARK: - press
+
+    static func press(_ options: AXOptions) throws -> Int32 {
+        _ = try preflight(options)
+        let resolved = try resolveRef(options)
+        let actions = actionNames(resolved.element)
+        let state = nodeState(resolved.element)
+        let label = "\(options.ref ?? "node") "
+            + "\(state.map { AXText.shortRole($0.role) } ?? "node")"
+            + (state?.title.isEmpty == false ? " \"\(AXText.sanitize(state!.title, limit: 40))\"" : "")
+
+        // `actionNames` returns short names ("press"), the same words `krd ax tree` prints.
+        guard actions.contains(AXText.shortAction(kAXPressAction as String)) else {
+            let others = actions.prefix(4)
+            throw AXFailure.notActionable("\(label) does not answer press (AXPress)"
+                + (others.isEmpty ? ": it has no actions at all"
+                                  : "; it answers \(others.joined(separator: ", "))")
+                + ". A checkbox only becomes pressable once its window is key; `krd ax tree` shows "
+                + "what each node can do.")
+        }
+        if options.dryRun {
+            print("would press \(label) (AXPress) — nothing was sent")
+            print("  before: \(state?.text ?? "unknown")")
+            return AXExit.ok.rawValue
+        }
+        let started = Date()
+        let error = AXUIElementPerformAction(resolved.element, kAXPressAction as CFString)
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        if error != .success { throw failure(error, doing: "AXPress on \(label)") }
+        let after = nodeState(resolved.element)
+        print("pressed \(label) (AXPress, \(elapsed) ms)")
+        print("  before: \(state?.text ?? "unknown")")
+        if let after {
+            print("  after : \(after.text)")
+            if let state, state.text == after.text {
+                print("  no observable change — some buttons only act on their target window")
+            }
+        } else {
+            print("  after : element is gone (a dialog closed, or the view was rebuilt)")
+        }
+        return AXExit.ok.rawValue
+    }
+
+    // MARK: - set
+
+    static func set(_ options: AXOptions) throws -> Int32 {
+        _ = try preflight(options)
+        guard let text = options.text else { throw AXFailure.usage("set needs --text <value>") }
+        let resolved = try resolveRef(options)
+        let state = nodeState(resolved.element)
+        let label = (options.ref.flatMap { AXRef($0) }?.description ?? "node") + " "
+            + (state.map { AXText.shortRole($0.role) } ?? "")
+            + (state?.title.isEmpty == false ? " \"\(AXText.sanitize(state!.title, limit: 40))\"" : "")
+
+        var settable = DarwinBoolean(false)
+        let asked = AXUIElementIsAttributeSettable(resolved.element, kAXValueAttribute as CFString, &settable)
+        guard asked == .success, settable.boolValue else {
+            throw AXFailure.notActionable("\(label) has no settable value"
+                + (asked == .success ? "" : " (\(axErrorName(asked)))")
+                + ". Text fields and sliders are settable; static text and buttons are not.")
+        }
+        if options.dryRun {
+            print("would set \(label) value \"\(AXText.sanitize(state?.value ?? "", limit: 60))\" → "
+                + "\"\(AXText.sanitize(text, limit: 60))\" — nothing was sent")
+            return AXExit.ok.rawValue
+        }
+        let started = Date()
+        let error = AXUIElementSetAttributeValue(resolved.element, kAXValueAttribute as CFString, text as CFTypeRef)
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        if error != .success { throw failure(error, doing: "setting the value of \(label)") }
+
+        // Read back: an app may accept the write and normalise, clamp or ignore it, and a write
+        // path that reports "ok" without looking is how an agent ends up acting on a lie.
+        let after = nodeState(resolved.element)
+        print("set \(label) (\(elapsed) ms)")
+        print("  before: \(state?.text ?? "unknown")")
+        print("  after : \(after?.text ?? "element is gone")")
+        guard let after else {
+            throw AXFailure.notActionable("the value was accepted but the element is gone; nothing to read back")
+        }
+        guard after.value == text else {
+            throw AXFailure.notActionable("the app accepted the write but reads back value=\""
+                + "\(AXText.sanitize(after.value, limit: 60))\", not \"\(AXText.sanitize(text, limit: 60))\". "
+                + "Nothing else was touched.")
+        }
         return AXExit.ok.rawValue
     }
 
@@ -600,6 +1075,17 @@ enum AXCommand {
 
 /// Breadth-first, budgeted, and attribute-batched: three IPC per node
 /// (`CopyMultipleAttributeValues`, action names, children) instead of eight.
+/// One emitted line, plus what it takes to find that line's element again in another process.
+struct AXEntry {
+    var node: AXNode
+    var chain: [AXStep]
+    var identifier: String
+    /// Raw values, for `find`: the printed `detail` is sanitized and clipped to 60 characters.
+    var rawValue: String
+    var rawTitle: String
+    var root: AXRoot = .window
+}
+
 struct AXWalker {
     let interactiveOnly: Bool
     let emitEverything: Bool
@@ -612,8 +1098,14 @@ struct AXWalker {
     /// Wall-clock budget. A hung app costs up to 1.5 s per IPC and the walk makes three per
     /// node, so the node budget alone can take hours; this is the backstop that matters.
     let deadline: Date
+    /// First ref number to hand out. Refs are monotonic per window (see AXIndex.counters):
+    /// re-dumping a window must never make an older ref mean a different node.
+    let refStart: Int
+    /// Which element the chains of this walk start from. (`root` alone is the walk parameter.)
+    let chainRoot: AXRoot
 
-    var nodes: [AXNode] = []
+    var entries: [AXEntry] = []
+    var nodes: [AXNode] { entries.map { $0.node } }
     var visited = 0
     var truncated = false
     /// The tree is not a tree: Finder's desktop window contains `AXApplication` children that
@@ -626,7 +1118,10 @@ struct AXWalker {
     /// then rejects the call site in `tree()`. Local Swift 6.4 accepts it, so this only
     /// shows up in CI.
     init(interactiveOnly: Bool, emitEverything: Bool, includeMenus: Bool,
-         maxDepth: Int, maxShown: Int, maxVisited: Int, deadline: Date) {
+         maxDepth: Int, maxShown: Int, maxVisited: Int, deadline: Date, refStart: Int = 1,
+         root: AXRoot = .window) {
+        self.refStart = max(refStart, 1)
+        self.chainRoot = root
         self.interactiveOnly = interactiveOnly
         self.emitEverything = emitEverything
         self.includeMenus = includeMenus
@@ -643,21 +1138,31 @@ struct AXWalker {
     ]
 
     mutating func walk(root: AXUIElement, rootDepth: Int, countAsRoot: Bool) {
-        var queue: [(AXUIElement, Int)] = [(root, rootDepth)]
+        // (element, depth, the chain that led here, index inside the parent's AXChildren)
+        var queue: [(element: AXUIElement, depth: Int, chain: [AXStep], index: Int)] =
+            [(root, rootDepth, [], -1)]
         while !queue.isEmpty {
-            if Date() > deadline || visited >= maxVisited || nodes.count >= maxShown {
+            if Date() > deadline || visited >= maxVisited || entries.count >= maxShown {
                 truncated = true
                 return
             }
-            let (element, depth) = queue.removeFirst()
+            let item = queue.removeFirst()
+            let element = item.element
+            let depth = item.depth
             guard seen.insert(CFHash(element)).inserted else { continue }
             visited += 1
             let values = AXCommand.multi(element, AXWalker.attributeNames)
             let role = (values[0] as? String) ?? ""
             var name = (values[1] as? String) ?? ""
             if name.isEmpty { name = (values[6] as? String) ?? "" }
+            // Raw (unsanitized) fields for the ref chain: a ref is compared against live
+            // accessibility values, never against the text this command printed.
+            let rawTitle = ((values[1] as? String) ?? "").isEmpty
+                ? ((values[6] as? String) ?? "") : ((values[1] as? String) ?? "")
             let identifier = (values[3] as? String) ?? ""
             let valueText = (values[2] as? String) ?? ""
+            let step = AXStep(index: item.index, role: role, identifier: identifier, title: rawTitle)
+            let chain = item.chain + [step]
             let origin = AXCommand.point(values[4])
             let size = AXCommand.size(values[5])
             let frame = origin.flatMap { point in size.map { CGRect(origin: point, size: $0) } }
@@ -682,18 +1187,24 @@ struct AXWalker {
                 } else if !identifier.isEmpty {
                     detail = "id=\(AXText.sanitize(identifier, limit: 40))"
                 }
-                nodes.append(AXNode(
-                    ref: "@e\(nodes.count + 1)",
-                    depth: depth,
-                    role: role,
-                    name: cleanName,
-                    detail: detail,
-                    frame: frame,
-                    actions: actions))
+                entries.append(AXEntry(
+                    node: AXNode(
+                        ref: "@e\(refStart + entries.count)",
+                        depth: depth,
+                        role: role,
+                        name: cleanName,
+                        detail: detail,
+                        frame: frame,
+                        actions: actions),
+                    chain: chain,
+                    identifier: identifier,
+                    rawValue: valueText,
+                    rawTitle: rawTitle,
+                    root: chainRoot))
             }
             if depth >= maxDepth || (isMenu && !includeMenus) { continue }
-            for child in (AXCommand.value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
-                queue.append((child, depth + 1))
+            for (index, child) in ((AXCommand.value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []).enumerated() {
+                queue.append((child, depth + 1, chain, index))
             }
         }
     }
@@ -763,9 +1274,11 @@ struct AXTreeJSON {
     var nodes: [AXNode]
     var truncated: Bool
     var visited: Int
+    /// The snapshot these refs belong to (`press --snapshot`), when it could be written.
+    var generation: String?
 
     var dictionary: [String: Any] {
-        [
+        var out: [String: Any] = [
             "app": app, "pid": Int(pid),
             "window": windowIndex, "windows": windowCount,
             "title": AXText.sanitize(windowTitle, limit: 200),
@@ -780,5 +1293,7 @@ struct AXTreeJSON {
             },
             "truncated": truncated, "visited": visited, "shown": nodes.count,
         ]
+        if let generation { out["generation"] = generation }
+        return out
     }
 }

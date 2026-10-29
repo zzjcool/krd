@@ -367,3 +367,28 @@ macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、
 （`capturer.stop()` + `start()`），下一帧是全屏重绘。
 **对策。** 没有要修的东西——需要平滑就固定用 `--zoom-at`，或者少放大一档，让指针整段拖动都待在可视区内。
 重启失败时日志会写 `krd: could not restart capture after a zoom pan: …`，画面保持旧裁剪。
+
+### 42. `krd ax press @e7` 说 ref 过期了，或者「no snapshot holds @e7」
+
+**根因。** ref 指向某一次 dump 的某一个节点。以下情况它就失效：节点变了（改名、所在窗口重建）、
+应用重启过（ref 不跨重启，pid 复用也会被识别出来）、或者打印它的那次 dump 被淘汰了——
+`$TMPDIR/krd-ax` 每个窗口只留最近 16 次，重启机器会清空 `$TMPDIR`。
+**对策。** 重新 dump，用新 dump 打印的 ref。拿旧 ref 去点是**应该**失败的：另一条路是按住旧路径
+点到此刻待在那儿的随便什么东西上。多个窗口混在一起时用 `krd ax press @e7 --snapshot <generation>`
+钉住某次 dump，或用 `--app <name>` 收窄到一个应用。
+
+### 43. `krd ax press` 说节点「does not answer press」
+
+**根因。** 这个节点没有 `AXPress` 动作。静态文本、容器都没有；菜单项和复选框在所属窗口没有焦点时
+会把自己报成 `enabled=false`——`AXPress` 照样被接受，但什么都不做，回读会把这件事直接打出来
+（`before` 和 `after` 一模一样）。
+**对策。** `krd ax tree` 会列出每个节点实际有哪些动作（`press`、`showmenu`、`confirm`、`pick`……）。
+先把窗口弄到前台（或者先按窗口里的别的东西），再重试。一个动作都没有的节点用这条路驱不动，退回画面。
+
+### 44. `krd ax set` 写进去了，却以「reads back something else」失败
+
+**根因。** 应用接受了 `AXValue` 又做了规范化：数字框把值夹到范围内、搜索框重排了格式、富文本框把它
+包进自己的属性里。
+**对策。** 没有坏——退出码是 `6`，上面那行就是应用现在持有的值。读那个值、按它行动；
+`krd ax tree --app … | grep <你的文字>` 能从一次新 dump 确认。字段真的只读时，
+`AXUIElementIsAttributeSettable` 会提前发现，写请求根本不会发出去。

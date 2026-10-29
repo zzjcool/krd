@@ -127,12 +127,13 @@ enum AXText {
     /// The header a tree dump starts with; one line, comments prefixed with `#` so a
     /// `grep -v '^#'` or a model does not have to special-case it.
     static func header(app: String, window: String, index: Int, count: Int,
-                       shown: Int, truncated: Bool, menuBar: Bool) -> String {
+                       shown: Int, truncated: Bool, menuBar: Bool, refsHint: String? = nil) -> String {
         var line = "# krd ax — \(sanitize(app, limit: 40))"
         if !window.isEmpty { line += " \"\(sanitize(window, limit: 60))\"" }
         line += " (window \(index + 1)/\(count))"
         if menuBar { line += " +menubar" }
         line += "\n# \(shown) nodes shown" + (truncated ? ", truncated" : "")
+        if let refsHint { line += "\n# \(refsHint)" }
         return line
     }
 }

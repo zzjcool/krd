@@ -33,6 +33,7 @@ Sources/krd/
   Log.swift       File logger (never the tty)
   AXCommand.swift `krd ax …`: preflight, app resolution, budgeted tree walk, text + JSON
   AXFormat.swift  the pure half: sanitizing, pruning, one-line rendering (covered by tests)
+  AXRefs.swift    refs on disk: snapshot model, anchor matching, the $TMPDIR/krd-ax store
 ```
 
 Dependency direction is a straight line: `main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`.

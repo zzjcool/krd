@@ -27,6 +27,7 @@ Sources/krd/
   Log.swift       文件日志（永不写 tty）
   AXCommand.swift `krd ax …`：预检、应用解析、带预算的树遍历、文本 + JSON
   AXFormat.swift  纯逻辑那一半：消毒、剪枝、单行渲染（有测试覆盖）
+  AXRefs.swift    ref 落盘：snapshot 模型、anchor 匹配、$TMPDIR/krd-ax 存储
 ```
 
 依赖是单向直线：`main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`。只有 `Render` 和 `Input`

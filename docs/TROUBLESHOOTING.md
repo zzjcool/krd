@@ -430,3 +430,31 @@ stream has to be restarted (`capturer.stop()` + `start()`) and the next frame is
 **Fix.** Nothing to fix — use `--zoom-at` for a fixed view when smooth panning matters, or zoom out
 one step so the pointer stays inside the visible rect for the whole drag. If the restart fails, the
 log says `krd: could not restart capture after a zoom pan: …` and the picture keeps the old crop.
+
+### 42. `krd ax press @e7` says the ref is stale, or "no snapshot holds @e7"
+
+**Cause.** A ref names one node of one dump. It stops working when the node changed (retitled, or
+its window was rebuilt), when the app restarted (refs do not survive a restart; pid reuse is caught
+too), or when the dump that printed it is gone — `$TMPDIR/krd-ax` keeps the last 16 dumps per window,
+and rebooting empties `$TMPDIR`.
+**Fix.** Re-dump and use the ref that dump prints. Pressing a stale ref is *supposed* to fail: the
+alternative is acting on whatever now sits at that path. `krd ax press @e7 --snapshot <generation>`
+pins a specific dump when several windows are in play, and `--app <name>` narrows a ref to one app.
+
+### 43. `krd ax press` says the node "does not answer press"
+
+**Cause.** The node has no `AXPress` action. Static text and containers have none, and a menu item or
+checkbox whose window is not focused reports itself as `enabled=false` — `AXPress` is accepted and
+does nothing, which the read-back then shows (`before` and `after` identical).
+**Fix.** `krd ax tree` lists the actions each node does have (`press`, `showmenu`, `confirm`, `pick`,
+…). Focus the window first (bring it to the front, or press something in it), then retry. A node with
+no actions at all cannot be driven this way — fall back to the picture.
+
+### 44. `krd ax set` writes, then fails with "reads back something else"
+
+**Cause.** The app accepted `AXValue` and normalised it: a number field clamped the value, a search
+field reformatted it, a rich text field wrapped it in its own attributes.
+**Fix.** Nothing is broken — the exit code is `6` and the line above it shows what the app now holds.
+Read that value and act on *it*; `krd ax tree --app … | grep <your text>` confirms it from a fresh
+dump. If the field is genuinely read-only, `AXUIElementIsAttributeSettable` says so up front and the
+write is refused before anything is sent.
