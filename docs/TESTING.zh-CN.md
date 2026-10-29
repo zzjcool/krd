@@ -220,8 +220,10 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 1
 | `probe/kdrag.py` | `?1002h ?1006h` 下的按下/拖动/松开 + 滚轮，不重传 |
 | `probe/kbench.py`、`probe/kpace.py` | 固定帧率下的管道吞吐与背压 |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`、`CGPreflightPostEventAccess()`、显示器/窗口枚举（在目标 Mac 上跑，看 TCC 是不是问题所在） |
+| `probe/ax_probe.swift` | headless 客户端能读到什么：AX 的 warm-up 陷阱、不依赖屏录的窗口清单、逐窗口节点数与 walk 耗时、剪枝前后体积（只读） |
 
 ```bash
 python3 probe/kprobe4.py > /tmp/p4.log 2>&1 ; cat /tmp/p4.log
 swift probe/sck_probe.swift   # on the machine being viewed
+swift probe/ax_probe.swift    # 最好在 ssh 里跑：那里第一次 AX 调用会失败到 warm-up 为止
 ```

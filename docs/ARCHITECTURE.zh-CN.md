@@ -2,7 +2,7 @@
 
 [English](ARCHITECTURE.md) | 简体中文
 
-krd 是一个单文件 Swift 可执行程序，七个源文件约 1.6 k 行，除了系统框架
+krd 是一个单文件 Swift 可执行程序，十三个源文件约 3.9 k 行，除了系统框架
 （`ScreenCaptureKit`、`CoreGraphics`、`AppKit`、`Accelerate`、`libz`）没有外部依赖。本文说明这些
 部件怎么咬合，以及哪些不变量不能碰。
 
@@ -25,6 +25,8 @@ Sources/krd/
   Render.swift    ScreenWriter：会话框架、逐瓦片 kitty 转义、zlib、KRD_DUMP
   Input.swift     InputReader：raw tty、SGR/SGR-Pixels 鼠标、按键 → CGEvent
   Log.swift       文件日志（永不写 tty）
+  AXCommand.swift `krd ax …`：预检、应用解析、带预算的树遍历、文本 + JSON
+  AXFormat.swift  纯逻辑那一半：消毒、剪枝、单行渲染（有测试覆盖）
 ```
 
 依赖是单向直线：`main` → `Tiles`/`Capture`/`Render`/`Input` → `Geometry`。只有 `Render` 和 `Input`

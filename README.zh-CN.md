@@ -57,6 +57,24 @@ krd --bench                  # 在合成帧上给编码器计时，不需要终�
 完整参数、调优开关和诊断开关在 [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) 和
 [docs/TESTING.zh-CN.md](docs/TESTING.zh-CN.md)。
 
+### Headless：把 Mac 读成文本
+
+同一个二进制，不出画面。`krd ax` 走无障碍树并把结果打成文本，agent 不需要图像就能读窗口、
+操作控件——而且不需要屏幕录制授权，那只给镜像模式用。
+
+```bash
+krd ax doctor                # 辅助功能是否已授权、窗口服务器是否应答
+krd ax windows               # 应用、pid、窗口序号、标题、位置尺寸
+krd ax tree --app Finder -d 3 -i    # 单个窗口、浅层、只出可操作节点
+krd ax tree --app Finder --json     # 同上，给程序读
+krd ax screen                # 每个可见窗口一行，外加当前焦点
+```
+
+每个节点一行 —— `@e3  button  "Save"  value="hi"  [120,80 64x24]  press`，ref 在本次 dump
+生命周期内稳定。退出码：`0` 成功、`2` 用法错、`3` 没有辅助功能授权、`4` 窗口服务器不可达、
+`5` 没有匹配到。文本一律消毒：窗口标题里的 ESC 序列会被替换掉，不会打到终端上。测量数据见
+[docs/research-ax-text-channel.md](docs/research-ax-text-channel.md)。
+
 ## 环境要求
 
 - macOS 14 或更新版本
@@ -81,7 +99,7 @@ krd --bench                  # 在合成帧上给编码器计时，不需要终�
 | [TESTING](docs/TESTING.zh-CN.md) | 自检、瓦片定位标定、怎么验一个新终端 |
 | [ENCODING](docs/ENCODING.zh-CN.md) | 字节和毫秒花在哪，以及背后的基准测试 |
 | [BENCHMARK](docs/BENCHMARK.md) | 基准分层、预算阈值，以及这里「快」到底指什么 |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 36 个现象及其根因 |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 39 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 
 ## 参与

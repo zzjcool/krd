@@ -249,8 +249,10 @@ to decide "is this the terminal or is this krd?" — each one prints its own nar
 | `probe/kdrag.py` | press/drag/release + wheel through `?1002h ?1006h`, no retransmission |
 | `probe/kbench.py`, `probe/kpace.py` | pipe throughput and backpressure at a fixed frame rate |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`, `CGPreflightPostEventAccess()`, display/window enumeration (run on the target Mac to see whether TCC is the problem) |
+| `probe/ax_probe.swift` | what a headless client can read: the AX warm-up trap, window list without Screen Recording, per-window node counts and walk timing, pruned vs raw size (read-only) |
 
 ```bash
 python3 probe/kprobe4.py > /tmp/p4.log 2>&1 ; cat /tmp/p4.log
 swift probe/sck_probe.swift   # on the machine being viewed
+swift probe/ax_probe.swift    # best over ssh: the first AX call fails there until warm-up
 ```
