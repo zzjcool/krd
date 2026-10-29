@@ -621,6 +621,21 @@ struct AXWalker {
     /// this machine -- without this set the walk loops and burns its whole budget on a loop.
     private var seen = Set<CFHashCode>()
 
+    /// Explicit instead of the implicit memberwise one: `seen` is private, which makes the
+    /// synthesized initializer private too, and Swift 5.10 (the macOS 14 toolchain CI uses)
+    /// then rejects the call site in `tree()`. Local Swift 6.4 accepts it, so this only
+    /// shows up in CI.
+    init(interactiveOnly: Bool, emitEverything: Bool, includeMenus: Bool,
+         maxDepth: Int, maxShown: Int, maxVisited: Int, deadline: Date) {
+        self.interactiveOnly = interactiveOnly
+        self.emitEverything = emitEverything
+        self.includeMenus = includeMenus
+        self.maxDepth = maxDepth
+        self.maxShown = maxShown
+        self.maxVisited = maxVisited
+        self.deadline = deadline
+    }
+
     private static let attributeNames: [String] = [
         kAXRoleAttribute as String, kAXTitleAttribute as String, kAXValueAttribute as String,
         kAXIdentifierAttribute as String, kAXPositionAttribute as String, kAXSizeAttribute as String,
