@@ -27,6 +27,7 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var callbacks = 0
     private(set) var idleFrames = 0
     private(set) var badFrames = 0
+    private var loggedBadFrame = false
 
     /// Called with (pixels, width, height) for every visually changed frame.
     var onFrame: (([UInt8], Int, Int) -> Void)?
@@ -60,15 +61,28 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
         callbacks += 1
-        // Idle/blank frames (screen unchanged) carry no pixels at all, and the status
-        // attachment may be missing entirely -- going by the pixel buffer is the only
-        // reliable test. Note `as? Int` on the attachment silently fails; it is NSNumber.
-        let status = (CMGetAttachment(sampleBuffer,
-                                      key: SCStreamFrameInfo.status.rawValue as CFString,
-                                      attachmentModeOut: nil) as? NSNumber)?.intValue ?? 0
-        guard CMSampleBufferIsValid(sampleBuffer),
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            if status == 0 { badFrames += 1 } else { idleFrames += 1 }
+        // The frame's state lives in the buffer's *sample attachments*, not in `CMGetAttachment`:
+        // that call has never returned anything here, so `?? 0` silently turned every frame into
+        // "complete" and every idle frame into a bad one (issue #25).
+        let attachments = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                           as? [[String: Any]])?.first
+        let status = (attachments?[SCStreamFrameInfo.status.rawValue] as? NSNumber)?.intValue
+
+        // Three states, kept apart. A frame with no pixels is only *broken* when it claims to be
+        // complete (or when the buffer itself is unusable); a screen that simply did not change
+        // arrives as `.idle` — or, on some builds, with no status at all — and belongs in `idle`.
+        guard CMSampleBufferIsValid(sampleBuffer) else {
+            badFrames += 1
+            logBadFrame(status: status, attachments: attachments)
+            return
+        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            if status == SCFrameStatus.complete.rawValue {
+                badFrames += 1
+                logBadFrame(status: status, attachments: attachments)
+            } else {
+                idleFrames += 1
+            }
             return
         }
 
@@ -77,7 +91,12 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
-        guard w > 0, h > 0, let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        guard w > 0, h > 0, let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            // A frame that claims to be complete but cannot be read is the other genuine error.
+            badFrames += 1
+            logBadFrame(status: status, attachments: attachments)
+            return
+        }
 
         let bpp = format.bytesPerPixel
         let needed = w * h * bpp
@@ -119,5 +138,18 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
         previous = rgba
         framesDelivered += 1
         onFrame?(rgba, w, h)
+    }
+
+    /// One line the first time a bad frame shows up: what that frame actually carried. `bad` is
+    /// supposed to be rare, so the next report of it should not need a rebuild to say more than
+    /// "it climbs" (issue #25).
+    private func logBadFrame(status: Int?, attachments: [String: Any]?) {
+        guard !loggedBadFrame else { return }
+        loggedBadFrame = true
+        let keys = attachments.map { $0.keys.sorted().joined(separator: " ") } ?? "none"
+        Log.write("capture: first bad frame after \(callbacks) callbacks — status="
+                  + (status.map(String.init) ?? "missing")
+                  + " (0=complete 1=idle 2=blank 3=suspended 4=started 5=stopped)"
+                  + "\n         attachments: \(keys)\n")
     }
 }

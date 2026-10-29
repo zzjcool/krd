@@ -83,7 +83,7 @@ failure). `.accessory` keeps krd out of the Dock and the app switcher.
 ```
 SCStream callback (capture queue)
   └─ Capturer.stream(_:didOutputSampleBuffer:of:)
-       ├─ CMGetAttachment(status)        → idle frame (no pixel buffer) vs bad frame
+       ├─ sample attachments: status=complete|idle|blank, …  → idle vs bad vs frame
        ├─ CVPixelBuffer → vImagePermuteChannels_ARGB8888(BGRA → RGBA)
        └─ previous == rgba ? drop : keep  ← zero cost for a static desktop
           └─ Desk.handleFrame(pixels:width:height:)          (same queue)
@@ -215,7 +215,8 @@ stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms
 `tiles/s` is the delta of `framesEmitted` (tiles, not frames), `KB` is the last frame's compressed
 payload, `MB/s` is bytes written in the last second, `cap` is ScreenCaptureKit's
 delivered/skipped/callback counts, `idle`/`bad` are frames without a pixel buffer split by the
-status attachment, `write max`/`over5` are the worst `write(2)` block of the second and how many
+status from the sample attachments (`idle` = the status says so or is absent, `bad` = it claims
+`complete`), `write max`/`over5` are the worst `write(2)` block of the second and how many
 frames exceeded 5 ms, and `pipe` is capture callback → last byte out. `--stats-json <path>` writes
 the same numbers as one NDJSON object per second (`bench/soak-report.py` reads them).
 

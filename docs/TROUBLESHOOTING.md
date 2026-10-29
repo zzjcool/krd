@@ -281,11 +281,15 @@ locked; screen sharing of a locked session is not a supported mode.
 
 ### 30. `idle` climbs but the picture never updates
 
-**Cause.** `CMGetAttachment(sampleBuffer, SCStreamFrameInfo.status, …)` was tested with
-`as? Int`, which silently fails on the `NSNumber` that is actually attached; every idle frame then
-looks like a broken frame (and the status is lost).
-**Fix.** `as? NSNumber` → `.intValue` (`Capture.swift`). `idle` = frames with no pixel buffer and a
-non-zero status; `bad` = no pixel buffer and status 0.
+**Cause.** The frame status was read with `CMGetAttachment(sampleBuffer, SCStreamFrameInfo.status, …)`,
+which never returns it: ScreenCaptureKit puts the frame info in the buffer's *sample attachments*
+(`CMSampleBufferGetSampleAttachmentsArray`). Every read was therefore nil, and the `?? 0` after it
+turned "no status" into "status 0 = complete" — so a static screen booked every idle frame as a
+bad one and `idle` never moved (issue #25).
+**Fix.** Read `status` from the sample attachments (`Capture.swift`) and keep the three states
+apart: no pixel buffer and status **complete** (or a buffer that cannot be read) → `bad`; no pixel
+buffer with any other status, or no status at all → `idle`. `bad` is now the only genuine error,
+and the first one logs the status plus the attachment keys it actually carried.
 
 ## 5. Diagnostics
 
