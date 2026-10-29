@@ -221,6 +221,8 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 1
 | `probe/kdrag.py` | `?1002h ?1006h` 下的按下/拖动/松开 + 滚轮，不重传 |
 | `probe/kbench.py`、`probe/kpace.py` | 固定帧率下的管道吞吐与背压 |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`、`CGPreflightPostEventAccess()`、显示器/窗口枚举（在目标 Mac 上跑，看 TCC 是不是问题所在） |
+| `probe/display_probe.swift` | 哪种显示器变化机制会触发：`now`、`list`、`set <i>`（真的改分辨率）、`watch [--appkit]` 十秒内打印 CoreGraphics 回调与 AppKit 通知 |
+| `probe/photo_codec.py` | issue #26 各方案（16 位量化、更少像素、不压 zlib）下彩色重内容一帧的字节数，用同一套 kitty framing，基线行与 `krd --bench` 的 `photo` 字节一致 |
 | `probe/ax_probe.swift` | headless 客户端能读到什么：AX 的 warm-up 陷阱、不依赖屏录的窗口清单、逐窗口节点数与 walk 耗时、剪枝前后体积（只读） |
 
 ```bash

@@ -109,7 +109,7 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 | | |
 |---|---|
 | Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, display-set changes (plug/unplug, resolution, lid) restart capture in place, SSH |
-| Rough | colour-heavy full-screen motion (no codec yet), Herdr's image-delete semantics |
+| Rough | colour-heavy full-screen motion: 13.58 MB/frame worst case, costed in [research-photo-bandwidth](docs/research-photo-bandwidth.md) — the cheap fix is 16-bit tiles plus a smaller capture, not a codec; Herdr's image-delete semantics |
 | Solid (clipboard) | clipboard bridge, opt-in with `--clipboard=in|out|both`: a copy inside the mirrored
 desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the terminal
 for its clipboard, puts it on the target's pasteboard and posts `Cmd-V` (`out`, needs a terminal
@@ -128,6 +128,7 @@ text, with a log line — see TROUBLESHOOTING §19 |
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
+| [research: photo bandwidth](docs/research-photo-bandwidth.md) | why colour-heavy motion costs 13.58 MB/frame and what each fix is worth, with the probe that measures it |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 46 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
