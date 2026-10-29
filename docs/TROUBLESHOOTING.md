@@ -398,3 +398,22 @@ result is a correct-looking tree of window buttons with no `AXWebArea` underneat
 **Fix.** Do not trust a small tree as "the app is simple". For browsers use CDP
 (`--remote-debugging-port`) or launch with `--force-renderer-accessibility`; for Electron apps the
 same flag applies. Details and measurements: [research-ax-text-channel.md](research-ax-text-channel.md) §5.3.
+
+### 40. `--zoom 2` still shows the whole desktop
+
+**Cause.** `SCStreamConfiguration.sourceRect` is what crops the capture, and it is relative to the
+filter's content — the display for a display filter, the window frame for `--window`. On a
+*secondary* display some builds want global points instead, so a crop computed relative to the
+display origin can land somewhere else (or be ignored entirely on a very old macOS).
+**Fix.** Check the `--debug` line first: it prints `source <w>x<h> pt (zoom <f> of <W>x<H> centred
+<x>,<y>)`. If the crop rectangle is right but the picture is not, try
+`KRD_ZOOM_GLOBAL_RECT=1`. If the crop is wrong, `--zoom-at` is being given points from another
+coordinate space (it takes global screen points, the same space as `CGEvent.location`).
+
+### 41. `--zoom-follow` stutters while dragging
+
+**Cause.** By design: panning moves the crop, and the crop is a *capture-side* setting, so the
+stream has to be restarted (`capturer.stop()` + `start()`) and the next frame is a full repaint.
+**Fix.** Nothing to fix — use `--zoom-at` for a fixed view when smooth panning matters, or zoom out
+one step so the pointer stays inside the visible rect for the whole drag. If the restart fails, the
+log says `krd: could not restart capture after a zoom pan: …` and the picture keeps the old crop.

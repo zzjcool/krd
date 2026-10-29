@@ -69,11 +69,12 @@ Desk.run():
   SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
   if --list:                              → print displays/windows, exit(0)
   geometry = TermGeometry.query() ?? TermGeometry.read()
-  filter + sourceRect                     → one window, or one display
-  applyLayout(geometry)                   → TileGrid + Viewport, previousFrame = []
+  filter + fullRect                       → one window, or one display
+  configureSource(rect)                   → zoom focus: --zoom-at, else the pointer, else the centre
+  applyLayout(geometry)                   → Viewport.crop(full, zoom, focus) → TileGrid + Viewport
   writer.beginSession()                   → heal, alt screen, home, hide cursor
   installSignalCleanup(); installResizeHandler(); if --debug startStats()
-  capturer.start(filter:width:height:fps:)  (width/height = layout)
+  capturer.start(filter:sourceRect:width:height:fps:)  (width/height = layout, sourceRect = the crop)
   if !--no-input: InputReader.start()     → raw tty, ?1003h ?1002h ?1006h ?1016h
   while true { sleep 1 s }
 ```
@@ -140,6 +141,39 @@ Rounding happens only at the rect edges, so tiles tile the picture with no gaps 
 `cols`/`rows` are always whole cells, which is why no placement ever needs a sub-cell offset and
 the terminal never resamples.
 
+### Zoom: showing less at full density
+
+Fitting the whole display into a small pane is a *choice*, not a law: `--zoom <f>` shows `1/f` of
+the source and maps the pane onto that crop, so a 60x24 pane gets 1.35 px per point at `--zoom 2`
+instead of 0.67 (measured on a 1512x982 pt display, 1020x792 px pane — see the `--debug` line).
+
+```
+fullRect   = display bounds, or the window frame with --window
+focus      = --zoom-at x,y  |  the pointer if it is inside fullRect  |  the centre
+sourceRect = Viewport.crop(full: fullRect, scale: zoom, focus: focus)      // clamped to fullRect
+pixelW/H   = the pane's pixels, unchanged        // the *source* shrinks, the output does not
+```
+
+Three consequences worth knowing:
+
+1. **The crop happens on the capture side** (`SCStreamConfiguration.sourceRect`, macOS 14+), so a
+   zoomed frame copies fewer pixels than a fitted one. Nothing is upscaled on the CPU.
+2. **Interaction improves, and no input code changed.** `Viewport.point(forCell:)` and
+   `point(forPixel:)` already normalise against `sourceRect`, so a click maps into the crop as soon
+   as the crop is right: at `--zoom 2` a cell covers half the desktop points.
+3. **The output size stays the pane size.** "Zoom halves the capture dimensions" is about the
+   source rect in points; `pixelW`/`pixelH` are what the terminal can display and do not move. Above
+   ~2.7x on a Retina display the pane has more pixels than the crop has points, so the picture is
+   slightly upscaled — full density is reached at `displayPixels / panePixels`, not at infinity.
+
+`--zoom-follow` pans the crop when the pointer enters the outer 15 % band of the picture, and only
+far enough to put it back on that edge (pan, not chase). Panning restarts the stream, because the
+crop is a capture-side setting: it clears `previousFrame` (one full repaint) and takes the
+`capturer.stop()`/`start()` round trip. That is the price of not paying for the full frame every
+frame; `KRD_ZOOM_GLOBAL_RECT=1` exists because a display filter on a secondary display may want
+global points instead of filter-relative ones.
+
+
 Worked example — the configuration all the measurements use:
 
 ```
@@ -198,6 +232,9 @@ which is why §7.6 exists.
 | `--debug` | `Log.configure` + `startStats()` + `reader.trace` + geometry/accessibility lines |
 | `--log <path>` | `Log.configure` only (no stats, no input trace) |
 | `--dry-run` | `InputReader(dryRun:)`: parse and log, never call `CGEvent.post` |
+| `--zoom <f>` | `applyLayout` → `Viewport.crop`; `Capturer.start(sourceRect:)` crops on the capture side |
+| `--zoom-at <x,y>` | `configureSource`: the focus the crop is centred on, in global points |
+| `--zoom-follow` | `followPointerIfNeeded`: pans the crop at the 15 % band, then restarts the stream |
 | `--selftest` | `runSelfTest(layout:)`: synthetic frames (in the active `--format`) through the real `handleFrame`/`emit` |
 | `--bench` | `Bench.runStages`: dedupe → dirty → extract → zlib → base64 → escapes, staged timings, `--json` |
 | `--bench-wire` | `Bench.runWire`: one case at `--fps` through the real `handleFrame`, per-frame JSON on stderr |

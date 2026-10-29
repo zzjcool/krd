@@ -8,6 +8,13 @@ struct Options {
     var fps = 20
     var displayIndex: Int? = nil
     var windowQuery: String? = nil
+    /// How much the picture is magnified: 2 shows half of the source in each direction, at twice
+    /// the density. 1 (the default) fits the whole source into the pane, as before.
+    var zoom = 1.0
+    /// Source point the zoom is centred on (`--zoom-at x,y`, global points); the pointer when unset.
+    var zoomAt: CGPoint? = nil
+    /// Pan the crop when the pointer reaches the edge of the picture (`--zoom-follow`).
+    var zoomFollow = false
     var noInput = false
     /// Do not paint the pointer into the mirrored picture (see Capturer.showsCursor).
     var noCursor = false
@@ -51,6 +58,10 @@ func usage() -> String {
       --fps <n>           capture rate cap (default 20)
       --display <i>       display index from --list (default: the one under the pointer)
       --window <q>        capture a single window: numeric id or title substring
+      --zoom <f>          magnify: 2 shows half the source at twice the density, cropped on
+                          the capture side, so a zoomed frame costs fewer pixels, not more
+      --zoom-at <x,y>     source point the zoom is centred on (global points; default: pointer)
+      --zoom-follow       pan the crop when the pointer reaches the edge of the picture
       --tile <c>x<r>      dirty-tile size in cells (default 8x4; 16x8 = fewer, bigger images)
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
@@ -100,6 +111,16 @@ func parseArguments() -> Options {
         case "--fps": options.fps = max(1, Int(args[safe: i + 1] ?? "") ?? options.fps); i += 1
         case "--display": options.displayIndex = Int(args[safe: i + 1] ?? ""); i += 1
         case "--window": options.windowQuery = args[safe: i + 1]; i += 1
+        case "--zoom":
+            if let value = Double(args[safe: i + 1] ?? ""), value.isFinite { options.zoom = value }
+            i += 1
+        case "--zoom-at":
+            if let spec = args[safe: i + 1], case let parts = spec.split(separator: ","), parts.count == 2,
+               let x = Double(parts[0]), let y = Double(parts[1]), x.isFinite, y.isFinite {
+                options.zoomAt = CGPoint(x: x, y: y)
+            }
+            i += 1
+        case "--zoom-follow": options.zoomFollow = true
         case "--tile":
             if let spec = args[safe: i + 1], case let parts = spec.split(separator: "x"), parts.count == 2 {
                 options.tileCols = max(2, Int(parts[0]) ?? options.tileCols)
@@ -192,7 +213,16 @@ final class Desk {
     private var cleanedUp = false
 
     private var filter: SCContentFilter?
+    /// The whole source (display bounds or window frame) and the part of it on screen.
+    private var fullRect: CGRect = .zero
     private var sourceRect: CGRect = .zero
+    private var zoomFocus: CGPoint = .zero
+    /// 1 for the synthetic paths (bench/selftest/replay), `--zoom` for a live capture.
+    private var zoomScale = 1.0
+    private var geometry: TermGeometry?
+    private var captureRestarting = false
+    private var restartPending = false
+    private var followTimer: DispatchSourceTimer?
 
     private let stateLock = NSLock()
     private var grid: TileGrid?
@@ -234,7 +264,7 @@ final class Desk {
         if options.bench {
             let geometry = benchGeometry()
             let source = options.source ?? (w: 1440, h: 2560)
-            self.sourceRect = CGRect(x: 0, y: 0, width: source.w, height: source.h)
+            useLiteralSource(CGRect(x: 0, y: 0, width: source.w, height: source.h))
             applyLayout(geometry: geometry)
             guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
             Bench.runStages(layout: layout, writer: writer, rounds: options.rounds,
@@ -244,7 +274,7 @@ final class Desk {
         if let caseName = options.benchWire {
             let geometry = benchGeometry()
             let source = options.source ?? (w: 1440, h: 2560)
-            self.sourceRect = CGRect(x: 0, y: 0, width: source.w, height: source.h)
+            useLiteralSource(CGRect(x: 0, y: 0, width: source.w, height: source.h))
             applyLayout(geometry: geometry)
             guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
             writer.beginSession()
@@ -265,7 +295,7 @@ final class Desk {
             if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
             let bounds = CGRect(x: 0, y: 0, width: 1440, height: 2560)
             self.filter = nil
-            self.sourceRect = bounds
+            useLiteralSource(bounds)
             applyLayout(geometry: geometry)
             guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
             writer.beginSession()
@@ -365,7 +395,9 @@ final class Desk {
         }
 
         self.filter = filter
-        self.sourceRect = sourceRect
+        self.geometry = geometry
+        zoomScale = options.zoom > 1 ? options.zoom : 1
+        configureSource(rect: sourceRect)
         applyLayout(geometry: geometry)
         guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
 
@@ -380,7 +412,7 @@ final class Desk {
                                      header: ReplayHeader(pane: (layout.paneCols, layout.paneRows),
                                                           cell: (layout.cellW, layout.cellH),
                                                           tile: (layout.tileCols, layout.tileRows),
-                                                          source: (Int(sourceRect.width), Int(sourceRect.height)),
+                                                          source: (Int(currentCrop().width), Int(currentCrop().height)),
                                                           format: writer.format == .rgb ? "rgb" : "rgba"))
             if recorder == nil {
                 Log.write("record: could not write to \(dir)\n")
@@ -392,7 +424,8 @@ final class Desk {
         installResizeHandler()
         if options.debug || options.statsJSON != nil { startStats() }
 
-        try await capturer.start(filter: filter, width: layout.pixelW, height: layout.pixelH, fps: options.fps)
+        try await capturer.start(filter: filter, sourceRect: cropForFilter(),
+                                 width: layout.pixelW, height: layout.pixelH, fps: options.fps)
 
         if !options.noInput {
             let reader = InputReader(viewport: { [weak self] in self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero) },
@@ -410,10 +443,16 @@ final class Desk {
             }
         }
 
+        startFollow()
         if options.debug {
             let cell = geometry.cellSize
+            let crop = currentCrop()
             let message = "krd: pane \(geometry.cols)x\(geometry.rows) cells, cell \(cell.w)x\(cell.h) px\n"
-                + "krd: source \(Int(sourceRect.width))x\(Int(sourceRect.height)) pt -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells, "
+                + "krd: source \(Int(crop.width))x\(Int(crop.height)) pt"
+                + (zoomScale > 1
+                   ? " (zoom \(zoomScale) of \(Int(fullRect.width))x\(Int(fullRect.height)) centred \(Int(crop.midX)),\(Int(crop.midY)))"
+                   : "")
+                + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells, "
                 + "\(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
             Log.write(message)
         }
@@ -438,7 +477,7 @@ final class Desk {
         geometry.rows = header.pane.rows
         geometry.pixelWidth = 0                     // make cellSize return the header's cell
         geometry.pixelHeight = 0
-        self.sourceRect = CGRect(x: 0, y: 0, width: header.source.w, height: header.source.h)
+        useLiteralSource(CGRect(x: 0, y: 0, width: header.source.w, height: header.source.h))
         applyLayout(geometry: geometry)
         guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
         guard layout.pixelW == replay.width, layout.pixelH == replay.height else {
@@ -626,17 +665,114 @@ final class Desk {
         return geometry
     }
 
+    /// The synthetic paths (bench, selftest, replay) define their own source rect and must
+    /// reproduce a recorded layout exactly, so they never zoom.
+    private func useLiteralSource(_ rect: CGRect) {
+        fullRect = rect
+        sourceRect = rect
+        zoomFocus = CGPoint(x: rect.midX, y: rect.midY)
+        zoomScale = 1
+    }
+
+    /// Remember the whole source and where the zoom looks.
+    private func configureSource(rect: CGRect) {
+        fullRect = rect
+        let pointer = CGEvent(source: nil)?.location ?? .zero
+        if let at = options.zoomAt {
+            zoomFocus = at
+        } else if rect.contains(pointer) {
+            zoomFocus = pointer          // "zoom where I am looking" is the useful default
+        } else {
+            zoomFocus = CGPoint(x: rect.midX, y: rect.midY)
+        }
+    }
+
+    private func currentCrop() -> CGRect {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return sourceRect
+    }
+
+    /// ScreenCaptureKit wants the crop relative to the filter's content: the window frame for a
+    /// window filter, the display for a display filter. A full-frame capture sends nil so the
+    /// terminal keeps getting exactly what it got before zoom existed.
+    private func cropForFilter() -> CGRect? {
+        let crop = currentCrop()
+        guard crop.width < fullRect.width - 0.5 || crop.height < fullRect.height - 0.5 else { return nil }
+        // Builds differ on whether a display filter wants global points; KRD_ZOOM_GLOBAL_RECT=1
+        // is the escape hatch when a crop on a secondary display lands somewhere else.
+        let global = ProcessInfo.processInfo.environment["KRD_ZOOM_GLOBAL_RECT"] != nil
+        let origin = global ? crop.origin : CGPoint(x: crop.minX - fullRect.minX, y: crop.minY - fullRect.minY)
+        return CGRect(origin: origin, size: crop.size)
+    }
+
     private func applyLayout(geometry: TermGeometry) {
-        let aspect = sourceRect.width / max(sourceRect.height, 1)
+        let crop = Viewport.crop(full: fullRect, scale: zoomScale, focus: zoomFocus)
+        let aspect = crop.width / max(crop.height, 1)
         let layout = TileGrid.make(geometry: geometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
                                    bpp: writer.format.bytesPerPixel)
         stateLock.lock()
         grid = layout
+        sourceRect = crop
         previousFrame = []
         viewport = Viewport(pixelWidth: layout.pixelW, pixelHeight: layout.pixelH,
-                            cols: layout.paneCols, rows: layout.paneRows, sourceRect: sourceRect)
+                            cols: layout.paneCols, rows: layout.paneRows, sourceRect: crop)
         stateLock.unlock()
+    }
+
+    // MARK: zoom follow
+
+    private func startFollow() {
+        guard options.zoomFollow, zoomScale > 1, followTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
+        timer.setEventHandler { [weak self] in self?.followPointerIfNeeded() }
+        timer.resume()
+        followTimer = timer
+    }
+
+    /// Pan, do not chase: the crop moves only when the pointer is inside the outer 15 % band, and
+    /// then only far enough to put it back on that edge. Restarting the stream is the price of
+    /// cropping on the capture side (a CPU crop would trade the bandwidth win for it).
+    private func followPointerIfNeeded() {
+        guard !cleanedUp, !captureRestarting, let geometry,
+              let pointer = CGEvent(source: nil)?.location else { return }
+        let crop = currentCrop()
+        guard crop.width > 1, crop.height > 1,
+              crop.width < fullRect.width - 0.5 || crop.height < fullRect.height - 0.5 else { return }
+        let marginX = crop.width * 0.15, marginY = crop.height * 0.15
+        var dx = 0.0, dy = 0.0
+        if pointer.x < crop.minX + marginX { dx = pointer.x - (crop.minX + marginX) }
+        if pointer.x > crop.maxX - marginX { dx = pointer.x - (crop.maxX - marginX) }
+        if pointer.y < crop.minY + marginY { dy = pointer.y - (crop.minY + marginY) }
+        if pointer.y > crop.maxY - marginY { dy = pointer.y - (crop.maxY - marginY) }
+        guard dx != 0 || dy != 0 else { return }
+        zoomFocus = CGPoint(x: crop.midX + dx, y: crop.midY + dy)
+        applyLayout(geometry: geometry)
+        restartCapture()
+    }
+
+    private func restartCapture() {
+        guard let filter, let layout = currentGrid(), !cleanedUp else { return }
+        if captureRestarting { restartPending = true; return }
+        captureRestarting = true
+        let crop = cropForFilter()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.capturer.stop()
+            do {
+                try await self.capturer.start(filter: filter, sourceRect: crop,
+                                              width: layout.pixelW, height: layout.pixelH,
+                                              fps: self.options.fps)
+            } catch {
+                Log.write("krd: could not restart capture after a zoom pan: \(error)\n")
+            }
+            self.captureRestarting = false
+            if self.restartPending {
+                self.restartPending = false
+                self.restartCapture()
+            }
+        }
     }
 
     private func currentGrid() -> TileGrid? {
@@ -764,9 +900,11 @@ final class Desk {
         guard let layout = currentGrid(), layout.pixelW > 8, layout.pixelH > 8 else { return }
         writer.clear()
         let capturer = self.capturer
+        let crop = cropForFilter()
         Task {
             await capturer.stop()
-            try? await capturer.start(filter: filter, width: layout.pixelW, height: layout.pixelH, fps: options.fps)
+            try? await capturer.start(filter: filter, sourceRect: crop,
+                                      width: layout.pixelW, height: layout.pixelH, fps: options.fps)
         }
         if options.debug {
             Log.write("resize: \(layout.pixelW)x\(layout.pixelH) in \(layout.paneCols)x\(layout.paneRows) cells\n")
@@ -833,6 +971,7 @@ final class Desk {
     func shutdown() {
         guard !cleanedUp else { return }
         cleanedUp = true
+        followTimer?.cancel()
         input?.restore()
         writer.endSession()
         exit(0)

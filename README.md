@@ -47,6 +47,9 @@ Everything is explained in [docs/DEPLOY.md](docs/DEPLOY.md); the script itself i
 krd --fps 20                 # mirror the display the pointer is on
 krd --list                   # displays and windows; backdrop entries are marked
 krd --window Safari          # mirror a single window (a backdrop window is refused, not shown black)
+krd --zoom 2                 # show half the screen at twice the density (crop on the capture side)
+krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global screen points
+krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
 krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --no-cursor              # no pointer in the picture, and a moving mouse stops dirtying tiles
@@ -118,7 +121,7 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 39 symptoms with root causes |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 41 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
 ## Contributing
