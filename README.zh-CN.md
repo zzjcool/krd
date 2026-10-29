@@ -108,7 +108,9 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 | 可用（剪贴板） | 剪贴板桥，`--clipboard=in|out|both` 显式打开：镜像桌面里复制 = 给本地终端发一条 OSC 52
 （`in`）；`Ctrl-V` = 向终端索取剪贴板、放进镜像端 pasteboard 再投 `Cmd-V`（`out`，需要终端支持 OSC 52 读回，
 不支持就用 `--clipboard-paste <file>`） |
-| 还没做 | 输入法、多显示器热切换 |
+| 可用（输入法/CJK） | `--ime`（`auto` / `raw` / `unicode`）：物理键直接发给目标端，由**它的**输入法组合
+（候选窗画在镜像画面里）；没有按键的字符退回注入文本，并打一行日志——见 TROUBLESHOOTING §19 |
+| 还没做 | 多显示器热切换 |
 
 ## 文档
 

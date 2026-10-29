@@ -143,3 +143,77 @@ enum Keyboard {
         return nil
     }
 }
+
+/// How a character gets to the mirrored Mac (issue #16).
+///
+/// The distinction is not cosmetic: `postUnicode` is `virtualKey 0` plus a string, so the target's
+/// input method never sees a keystroke — no composition, no candidate window, and an app that reads
+/// keycodes (Electron, Terminal.app, most custom text views) sees nothing at all. Pressing the
+/// physical key instead lets the *target's* IME do the composing, which is what a real machine does.
+enum IMEMode: String, CaseIterable {
+    /// Physical key when the terminal reports one, injected text otherwise. The default: never
+    /// worse than the old behaviour, and the log says when it had to inject.
+    case auto
+    /// Physical keys only. Text the terminal sent with no recoverable key is dropped, so a
+    /// composition never gets half-injected text in the middle of it (Korean jamo → syllable).
+    case raw
+    /// Injected text for anything that is not plain ASCII: what krd always did, and the right
+    /// answer when the user already composed the character locally.
+    case unicode
+
+    init?(spec: String) { self.init(rawValue: spec.lowercased()) }
+}
+
+/// What one key report should become. Pure so the table is tested instead of the tty.
+enum KeyPlan: Equatable {
+    /// Press this key; the target's layout and input method decide the character.
+    case key(CGKeyCode, CGEventFlags)
+    /// Inject the character directly (bypasses any input method).
+    case text(Character)
+    /// Nothing this mode can do with it.
+    case drop
+}
+
+extension Keyboard {
+    /// The character the user actually typed. `code` is the unshifted codepoint *on the terminal's
+    /// layout*, which is what "typed" means here; `base` is the physical key, i.e. what the target's
+    /// layout may or may not make of it, so it is deliberately not used for this.
+    static func character(for report: KeyReport) -> Character? {
+        guard report.code < 0xE000, let scalar = UnicodeScalar(UInt32(report.code)) else { return nil }
+        return Character(scalar)
+    }
+
+    /// Modifiers to press with: the report's own, plus shift when the character lives on a shifted
+    /// key and the terminal did not say so. `!` arrives as `code 33` from terminals that never send
+    /// the `shifted` field, and pressing `1` bare would type `1`.
+    static func pressFlags(for report: KeyReport) -> CGEventFlags {
+        var flags = report.flags
+        if let physical = text(report), Keys.shifted[physical] != nil { flags.insert(.maskShift) }
+        return flags
+    }
+
+    /// The decision for one report under `--ime`.
+    ///
+    /// ASCII always presses a key, in every mode: injecting `a` as text would blind every
+    /// keycode-reading app for no benefit, and it is the fast path that must not regress.
+    /// Functional keys (F13, Esc, …) press their key too — they are not characters at all.
+    static func plan(for report: KeyReport, mode: IMEMode) -> KeyPlan {
+        let key = keyCode(report)
+        let typed = character(for: report)
+        let flags = pressFlags(for: report)
+        switch mode {
+        case .auto:
+            if let key { return .key(key, flags) }
+            if let typed { return .text(typed) }
+            return .drop
+        case .raw:
+            if let key { return .key(key, flags) }
+            return .drop
+        case .unicode:
+            // A functional key has no character (`typed == nil`) and must still be pressed.
+            if let key, typed == nil || typed?.isASCII == true { return .key(key, flags) }
+            if let typed { return .text(typed) }
+            return .drop
+        }
+    }
+}

@@ -114,7 +114,10 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the terminal
 for its clipboard, puts it on the target's pasteboard and posts `Cmd-V` (`out`, needs a terminal
 that answers the OSC 52 read — `--clipboard-paste <file>` is the path that always works) |
-| Not yet | IME input, multi-display hot switch |
+| Solid (IME/CJK) | `--ime` (`auto` / `raw` / `unicode`): physical keys go to the target so *its* input method composes
+(candidate window renders in the mirrored picture); characters with no key fall back to injected
+text, with a log line — see TROUBLESHOOTING §19 |
+| Not yet | multi-display hot switch |
 
 ## Docs
 

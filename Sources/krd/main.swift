@@ -16,6 +16,10 @@ struct Options {
     /// Pan the crop when the pointer reaches the edge of the picture (`--zoom-follow`).
     var zoomFollow = false
     var noInput = false
+    /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
+    /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
+    /// anything that is not plain ASCII.
+    var ime: IMEMode = .auto
     /// Clipboard bridge (issue #18). Off by default: silently rewriting a machine's clipboard is a
     /// surprise, and the terminal-to-target half presses keys into the mirrored app.
     var clipboard: ClipboardPolicy = .off
@@ -73,6 +77,8 @@ func usage() -> String {
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
       --log <path>        write diagnostics to a file instead of over the picture
       --full-frame        disable tiling, always resend the whole frame
+      --ime <m>           how characters reach the target: auto (default), raw (physical keys
+                          only, the target's IME composes), unicode (inject the character)
       --no-input          view only, do not inject events
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
@@ -110,6 +116,16 @@ func usage() -> String {
 
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
     """
+}
+
+/// `--ime <spec>`, or a usage error: a typo must not silently pick a mode.
+func parseIMESpec(_ spec: String) -> IMEMode {
+    guard let mode = IMEMode(spec: spec) else {
+        FileHandle.standardError.write(
+            Data("krd: --ime wants auto|raw|unicode, got \"\(spec)\"\n".utf8))
+        exit(2)
+    }
+    return mode
 }
 
 /// `--clipboard <spec>`, or a usage error: a typo must not read as "off".
@@ -201,6 +217,11 @@ func parseArguments() -> Options {
             options.logPath = args[safe: i + 1]
             i += 1
         case "--dry-run": options.dryRun = true
+        case "--ime":
+            options.ime = parseIMESpec(args[safe: i + 1] ?? "")
+            i += 1
+        case let arg where arg.hasPrefix("--ime="):
+            options.ime = parseIMESpec(String(arg.dropFirst("--ime=".count)))
         case "--clipboard":
             options.clipboard = parseClipboardSpec(args[safe: i + 1] ?? "")
             i += 1
@@ -451,6 +472,11 @@ final class Desk {
             let reader = InputReader(viewport: { [weak self] in self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero) },
                                      dryRun: options.dryRun) { [weak self] in self?.shutdown() }
             reader.trace = options.debug
+            reader.ime = options.ime
+            if options.debug {
+                Log.write("krd: ime \(options.ime.rawValue) (auto = keys where the terminal reports them, "
+                          + "raw = keys only, unicode = inject the character)\n")
+            }
             if let target = windowTarget {
                 reader.targetPid = { [weak self] in self?.aliveWindowPid() }
                 if options.debug {
