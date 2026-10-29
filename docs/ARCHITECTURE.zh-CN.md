@@ -53,7 +53,9 @@ Sources/krd/              <- 所有碰操作系统的部分
   8x4 瓦片）和固定 zlib level 下渲染两帧，逐字节比对
   `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump`。逃逸格式、切块方式或 level 策略一旦
   变化，测试会在第一个不同的字节上失败。确实要改格式时用
-  `KRD_UPDATE_FIXTURE=1 swift test --filter Golden` 重新生成。
+  `KRD_UPDATE_FIXTURE=1 swift test`（**不要加 `--filter`**：带过滤时 SwiftPM 可能整个跳过这个
+  bundle，在 Swift 5.10 上会打印 `Executed 0 tests` 而实际什么都没跑，于是"0 failures"并不代表
+  fixture 被重写；更新成功时会打印 `golden fixture written: <path> (<n> B)`）重新生成。
 - **`ScreenWriter` 有一个 `sink`。** 生产环境是 nil，字节直接进 pty；黄金测试把它设成收集字节流。
   `discardOutput`（bench 用）行为不变：仍然在写入 dump 之前就丢弃。
 

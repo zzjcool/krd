@@ -9,7 +9,11 @@ import XCTest
 /// and compares against a dump committed to the repository. If a change to the escapes, the tiling
 /// or the level policy reaches production, this fails with the first differing byte.
 ///
-/// Regenerate on an intentional format change: `KRD_UPDATE_FIXTURE=1 swift test --filter Golden`.
+/// Regenerate on an intentional format change: `KRD_UPDATE_FIXTURE=1 swift test` — **without
+/// `--filter`**. With a filter, SwiftPM can skip this bundle entirely (seen on Swift 5.10: it prints
+/// `Executed 0 tests` for the bundle that did not match, so "0 failures" is not evidence that the
+/// fixture was rewritten — the next CI run then fails on bytes nobody changed). The update run
+/// prints `golden fixture written: <path> (<n> B)`; no such line means nothing was regenerated.
 final class GoldenDumpTests: XCTestCase {
     /// 80x24 cells of 17x33 px, 8x4-cell tiles — the geometry `--selftest --pane 80x24 --cell 17x33`
     /// uses, so the numbers here mean the same thing as the CLI's.
@@ -104,7 +108,10 @@ final class GoldenDumpTests: XCTestCase {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
             try Data(got).write(to: url)
-            print("golden fixture written: \(url.path) (\(got.count) B)")
+            // stderr on purpose: XCTest swallows the test process's stdout, so a `print` here
+            // would not be visible in `swift test` output — and an invisible confirmation is how
+            // the broken `--filter` recipe went unnoticed.
+            FileHandle.standardError.write(Data("golden fixture written: \(url.path) (\(got.count) B)\n".utf8))
             return
         }
 

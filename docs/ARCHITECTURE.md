@@ -58,7 +58,10 @@ Two consequences worth knowing:
   geometry (80x24 cells of 17x33 px, 8x4 tiles) with a fixed zlib level, and compares every byte
   against `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump`. A change to the escapes, the
   tiling or the level policy fails at the first differing byte. Regenerate on purpose with
-  `KRD_UPDATE_FIXTURE=1 swift test --filter Golden`.
+  `KRD_UPDATE_FIXTURE=1 swift test` — **without `--filter`**: a filter can skip this bundle
+  entirely (Swift 5.10 prints `Executed 0 tests` for the bundle that did not match, so
+  "0 failures" does not mean the fixture was rewritten), and the update run prints
+  `golden fixture written: <path> (<n> B)` when it actually regenerated it.
 - **`ScreenWriter` has a `sink`.** In production it is nil and bytes go to the pty; the golden test
   sets it to collect the stream in memory. `discardOutput` (bench) is unchanged: it still drops
   bytes before they would reach the dump.
