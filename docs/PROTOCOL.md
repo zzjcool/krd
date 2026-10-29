@@ -38,13 +38,15 @@ behind. Re-running krd fixes such a pane automatically; by hand it is
 
 ## 2. One tile
 
-A tile is emitted with its own synchronized-update block and flushed on its own
-(`ScreenWriter.emitTile`), so a terminal can never show a half-transferred tile:
+The whole frame shares one synchronized-update block, opened by `ScreenWriter.beginFrame` and
+committed by `endFrame` — 16 bytes per frame instead of 16 bytes per tile, and one commit
+instead of one per tile (`KRD_SYNC=tile` restores the old per-tile blocks for slow links,
+`KRD_NOSYNC=1` disables them entirely):
 
 ```
 ESC [ ? 2026 h                                        # begin synchronized update
 ESC [ <row> ; <col> H                                 # CUP to the tile's top-left cell
-ESC _ G f=32,s=<w>,v=<h>,a=t,o=z,q=<Q>,i=<iid>,m=1;<base64 chunk> ESC \
+ESC _ G f=24,s=<w>,v=<h>,a=t,o=z,q=<Q>,i=<iid>,m=1;<base64 chunk> ESC \
 ESC _ G m=1;<base64 chunk> ESC \                      # … repeated, 4096 chars per chunk
 ESC _ G m=0;<base64 chunk> ESC \                      # last chunk
 ESC _ G i=<iid>,p=<pid>,a=p,q=<Q>,C=1,c=<cols>,r=<rows> ESC \
@@ -55,7 +57,7 @@ Field by field:
 
 | Field | Value in krd | Why |
 |---|---|---|
-| `f=32` | RGBA, 8 bits per channel | `Capture` already produces RGBA; no palette, no PNG |
+| `f=24` / `f=32` | RGB / RGBA, 8 bits per channel | the desktop is opaque, so the default is `f=24` (25 % fewer bytes; `--format rgba` falls back); no palette, no PNG |
 | `s=<w>`, `v=<h>` | tile size in pixels | the tile's own rect, not the frame's |
 | `a=t` | transmit only | placement is a separate command, see below |
 | `o=z` | zlib-compressed payload | RFC **1950** stream (see §6.1) |
@@ -72,7 +74,7 @@ A concrete first tile of the 137×44-cell layout (tile 0 of 9×6, 272×264 px, 1
 ```
 ESC[?2026h
 ESC[1;1H
-ESC_Gf=32,s=272,v=264,a=t,o=z,q=2,i=100,m=1,<4096 base64 chars>ESC\
+ESC_Gf=24,s=272,v=264,a=t,o=z,q=2,i=100,m=1,<4096 base64 chars>ESC\
 ESC_Gm=0,<remaining base64 chars>ESC\
 ESC_Gi=100,p=1000,a=p,q=2,C=1,c=16,r=8ESC\
 ESC[?2026l
@@ -88,7 +90,7 @@ One synchronized block for the whole frame, one image id (`2`) and one placement
 ```
 ESC [ ? 2026 h
 ESC [ 1 ; 1 H
-ESC _ G f=32,s=<W>,v=<H>,a=t,o=z,q=<Q>,i=2,m=1;<chunk> ESC \
+ESC _ G f=24,s=<W>,v=<H>,a=t,o=z,q=<Q>,i=2,m=1;<chunk> ESC \
 ESC _ G m=…;<chunk> ESC \        (repeated)
 ESC _ G i=2,p=2,a=p,q=<Q>,C=1,c=<cols>,r=<rows> ESC \
 ESC [ ? 2026 l

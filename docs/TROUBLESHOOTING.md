@@ -26,6 +26,15 @@ and with `q=2` the error is invisible, so all you see is black.
 **Fix.** Compress with the system libz: `compress2()` via the `CZlib` module, level 5
 (`Render.swift`). Never `COMPRESSION_ZLIB` for this protocol.
 
+### 1b. Black or garbled tiles on a terminal that used to work (0.1.2+)
+
+**Cause.** Since 0.1.2 the wire format is `f=24` (RGB) instead of `f=32` (RGBA): the desktop is
+opaque, so the alpha byte was dead weight (25 % of the payload). Every implementation that handles
+`f=32` handles `f=24` — they differ only in bytes per pixel — but a terminal with a hand-rolled
+RGB path can still get it wrong, and with `q=2` it fails silently.
+**Fix.** `krd --format rgba` (or `KRD_FORMAT=rgba`) restores the old payload byte for byte. If that
+fixes it, it is a terminal bug worth reporting upstream, not a krd bug.
+
 ### 2. Black pane and no error anywhere
 
 **Cause.** `q=2` suppresses every protocol reply, including errors. This is the right default
@@ -72,7 +81,7 @@ Ctrl-\\ or `kill` (SIGTERM) run the cleanup path.
 **Cause.** Missing `C=1`: placing an image moves the cursor, in some terminals onto/past the last
 row, and a write at the bottom row scrolls the grid. Since every tile is positioned by absolute
 `CUP`, a scroll shifts the whole picture.
-**Fix.** `C=1` on every placement command (`emitTile`, `emitFullFrame`).
+**Fix.** `C=1` on every placement command (`ScreenWriter.emit`, `emitFullFrame`).
 
 ### 8. One tile keeps showing stale content
 

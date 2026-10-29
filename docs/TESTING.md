@@ -23,7 +23,7 @@ terminal — CI has no pty to draw into and no screen to capture.
 `--selftest` runs entirely offline: no ScreenCaptureKit, no TCC, no window server juggling. It
 pretends the source is a 1440×2560 pt (portrait) region so the aspect-fit path is exercised, takes
 the pane geometry from `TIOCGWINSZ` (or `--cell`), and pushes 40 synthetic frames through
-`handleFrame` → `TileGrid.dirty` → `emitTile` → zlib → base64 → the terminal, one every 250 ms.
+`handleFrame` → `TileGrid.dirty` → zlib (parallel) → `emit` → base64 → the terminal, one every 250 ms.
 You should see four solid quadrants with a dim checkerboard and a bright bar sweeping left to
 right. Anything else is the terminal or the protocol, not the capture path.
 
@@ -120,12 +120,25 @@ Replies arrive on **stdin**, which is also the input source, so a reply gets par
 KRD_Q=0 krd --selftest --no-input      # watch replies in the pane, nothing is typed into the desktop
 ```
 
-## 5. `KRD_DUMP=<path>` — every byte, offline
+## 5. `--bench` — the encoder, without a terminal
+
+`krd --bench` runs the real tile pipeline (extract → zlib → base64 → escapes) on synthetic
+frames and prints bytes and milliseconds per case. It exits by itself and needs no tty, so it is
+the way to compare two builds:
+
+```sh
+.build/release/krd --bench --pane 137x44 --cell 17x33 --log /tmp/bench.log; cat /tmp/bench.log
+```
+
+The case list and the pane size are fixed on purpose; `--tile` and `--format` change what is
+measured. Current numbers and the reasoning behind them: [ENCODING.md](ENCODING.md).
+
+## 6. `KRD_DUMP=<path>` — every byte, offline
 
 | | |
 |---|---|
 | Verifies | exactly what was sent, independent of what the screen shows |
-| Passes when | the dump contains the session frame, then per tile `?2026h`, CUP, `f=32,…,a=t,…,i=<100+n>`, 4096-char chunks, the `a=p` placement, `?2026l` |
+| Passes when | the dump contains the session frame, then one `?2026h` per frame, and per dirty tile: CUP, `f=24,…,a=t,…,i=<100+n>`, 4096-char chunks, the `a=p` placement; then `?2026l` |
 | Fails when | you can count the bytes yourself — that is the point |
 
 ```bash
@@ -139,7 +152,7 @@ and the `2J` clear, so it is a faithful transcript. Comparing two dumps (e.g. `-
 `--full-frame`) is the fastest way to see a protocol change. Redirect stdout to `/dev/null` when you
 only want the dump — otherwise the same escapes also go to the terminal.
 
-## 6. `--dry-run` — input parsing without consequences
+## 7. `--dry-run` — input parsing without consequences
 
 | | |
 |---|---|
@@ -165,7 +178,7 @@ input: key code=0 flags=256
 first line exists and the second does not, the event was outside the placement (click outside the
 picture) or the parser dropped it.
 
-## 7. The other switches
+## 8. The other switches
 
 | Switch | Verifies |
 |---|---|
@@ -189,7 +202,7 @@ Reading it: `tiles/s 0` and `dirty 0` for several seconds = nothing changed (or 
 a pixel buffer, usually a capture/permission problem; `write` in the tens of ms regularly = the
 terminal is not keeping up with the byte rate, lower `--fps` or use bigger tiles.
 
-## 8. Calibrating a new terminal
+## 9. Calibrating a new terminal
 
 Run this once per terminal you intend to support, in order, and record the answers in the
 compatibility table of the README:
@@ -206,7 +219,7 @@ compatibility table of the README:
    follow? If it does not, the terminal ignores `?1003h` (any-motion tracking); clicks and drags
    still work, hover does not
 
-## 9. Independent cross-checks (`probe/`)
+## 10. Independent cross-checks (`probe/`)
 
 Pure-Python scripts, standard library only, no Swift and no krd involved. They are the fastest way
 to decide "is this the terminal or is this krd?" — each one prints its own narration:

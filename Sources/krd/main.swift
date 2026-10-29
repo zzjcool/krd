@@ -10,14 +10,21 @@ struct Options {
     var windowQuery: String? = nil
     var noInput = false
     var selftest = false
+    var bench = false
     var logPath: String? = nil
     var dryRun = false
     var listOnly = false
     var debug = false
     var fullFrame = false
-    var tileCols = 16
-    var tileRows = 8
+    // 8x4 cells (issue #5): at 16x8 a single changed character re-sends 5.2 KB, at 8x4 it is
+    // 1.6 KB, and a full-width line still gets 1.7x smaller. Below 4x2 the per-image escape
+    // overhead starts to dominate the payload, so this is the knee of the curve.
+    var tileCols = 8
+    var tileRows = 4
+    var pixelFormat: PixelFormat? = nil
     var cell: (w: Double, h: Double)? = nil
+    /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
+    var pane: (cols: Int, rows: Int)? = nil
 }
 
 func usage() -> String {
@@ -28,7 +35,8 @@ func usage() -> String {
       --fps <n>           capture rate cap (default 20)
       --display <i>       display index from --list (default: the one under the pointer)
       --window <q>        capture a single window: numeric id or title substring
-      --tile <c>x<r>      dirty-tile size in cells (default 16x8)
+      --tile <c>x<r>      dirty-tile size in cells (default 8x4; 16x8 = fewer, bigger images)
+      --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
       --log <path>        write diagnostics to a file instead of over the picture
       --full-frame        disable tiling, always resend the whole frame
@@ -37,6 +45,11 @@ func usage() -> String {
       --debug             geometry + per-second stats on stderr
       --list              list displays and windows, then exit
       -v, --version       print the version and exit
+
+    test modes (no screen access, no terminal needed):
+      --selftest          paint a synthetic pattern through the tile pipeline
+      --bench             time the encoder on synthetic frames, then exit
+      --pane <c>x<r>      force the pane size in cells (bench/selftest only)
 
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
     """
@@ -63,9 +76,23 @@ func parseArguments() -> Options {
                 options.cell = (w, h)
             }
             i += 1
+        case "--format":
+            switch (args[safe: i + 1] ?? "").lowercased() {
+            case "rgb", "f=24", "24": options.pixelFormat = .rgb
+            case "rgba", "f=32", "32": options.pixelFormat = .rgba
+            default: break
+            }
+            i += 1
+        case "--pane":
+            if let spec = args[safe: i + 1], case let parts = spec.split(separator: "x"), parts.count == 2,
+               let c = Int(parts[0]), let r = Int(parts[1]), c > 1, r > 1 {
+                options.pane = (c, r)
+            }
+            i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
         case "--selftest": options.selftest = true
+        case "--bench": options.bench = true
         case "--log":
             options.logPath = args[safe: i + 1]
             i += 1
@@ -109,6 +136,9 @@ final class Desk {
 
     init(options: Options) {
         self.options = options
+        if let format = options.pixelFormat { writer.format = format }
+        capturer.format = writer.format
+        writer.resize(tiles: 0)
     }
 
     func run() async throws {
@@ -118,9 +148,21 @@ final class Desk {
             FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
         }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
+        if options.bench {
+            if let cell = options.cell { TermGeometry.fallbackCell = cell }
+            var geometry = TermGeometry.read()
+            if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
+            self.sourceRect = CGRect(x: 0, y: 0, width: 1440, height: 2560)
+            applyLayout(geometry: geometry)
+            guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
+            runBench(layout: layout)
+            return
+        }
+
         if options.selftest {
             if let cell = options.cell { TermGeometry.fallbackCell = cell }
-            let geometry = TermGeometry.read()
+            var geometry = TermGeometry.read()
+            if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
             let bounds = CGRect(x: 0, y: 0, width: 1440, height: 2560)
             self.filter = nil
             self.sourceRect = bounds
@@ -236,6 +278,128 @@ final class Desk {
         }
     }
 
+    // MARK: bench
+
+    /// Time the encoder on synthetic content, with no terminal attached: this is what
+    /// `docs/ENCODING.md` quotes, and the only way to compare two builds on equal terms.
+    private func runBench(layout: TileGrid) {
+        writer.discardOutput = true
+        let w = layout.pixelW, h = layout.pixelH, bpp = layout.bpp
+        func makeFrame(_ paint: (Int, Int) -> (UInt8, UInt8, UInt8)) -> [UInt8] {
+            var px = [UInt8](repeating: 0, count: w * h * bpp)
+            px.withUnsafeMutableBufferPointer { buf in
+                for y in 0..<h {
+                    for x in 0..<w {
+                        let c = paint(x, y)
+                        let o = (y * w + x) * bpp
+                        buf[o] = c.0; buf[o + 1] = c.1; buf[o + 2] = c.2
+                        if bpp == 4 { buf[o + 3] = 255 }
+                    }
+                }
+            }
+            return px
+        }
+
+        // Flat UI with glyph-like strokes: what a text editor / browser looks like to zlib.
+        func textPixel(_ x: Int, _ y: Int) -> (UInt8, UInt8, UInt8) {
+            let glyph = (x % 23 < 3 || y % 41 < 2) ? UInt8(20) : UInt8(245)
+            return (glyph, glyph, y % 97 < 2 ? 0 : glyph)
+        }
+        // Real sensor noise: no LZ77 matches at all, so only the 25 % fewer bytes of RGB help.
+        func photoPixel(_ x: Int, _ y: Int) -> (UInt8, UInt8, UInt8) {
+            var h = UInt32(truncatingIfNeeded: x &* 73856093) ^ UInt32(truncatingIfNeeded: y &* 19349663)
+            h ^= h >> 13; h = h &* 1274126177; h ^= h >> 16
+            return (UInt8(truncatingIfNeeded: h), UInt8(truncatingIfNeeded: h >> 8), UInt8(truncatingIfNeeded: h >> 16))
+        }
+
+        struct Case { let name: String; let pixels: (Int, Int) -> (UInt8, UInt8, UInt8); let dirty: (TileGrid) -> [Int] }
+        let rectDirty: (Int, Int, Int, Int) -> ((TileGrid) -> [Int]) = { x, y, rw, rh in
+            { grid in
+                var out: [Int] = []
+                for ty in 0..<grid.tilesY {
+                    for tx in 0..<grid.tilesX {
+                        let r = grid.rect(tx, ty)
+                        if r.x < x + rw, r.x + r.w > x, r.y < y + rh, r.y + r.h > y {
+                            out.append(ty * grid.tilesX + tx)
+                        }
+                    }
+                }
+                return out
+            }
+        }
+        let cases = [
+            Case(name: "one character", pixels: textPixel, dirty: rectDirty(w / 2, h / 2, 24, 48)),
+            Case(name: "one text line", pixels: textPixel, dirty: rectDirty(0, h / 3, w, 48)),
+            Case(name: "text repaint", pixels: textPixel, dirty: { Array(0..<$0.count) }),
+            Case(name: "photo repaint", pixels: photoPixel, dirty: { Array(0..<$0.count) }),
+            Case(name: "600x400 drag", pixels: photoPixel, dirty: rectDirty(w / 4, h / 4, 600, 400)),
+        ]
+
+        let formatLabel = writer.format == .rgb ? "rgb (f=24)" : "rgba (f=32)"
+        Log.write("krd: bench \(w)x\(h) px, \(layout.tilesX)x\(layout.tilesY) tiles of "
+                  + "\(layout.tileCols)x\(layout.tileRows) cells, \(formatLabel)\n")
+        Log.write("\n  case                 tiles   bytes/frame   serial ms   parallel ms   MB/s\n")
+        for c in cases {
+            let frame = makeFrame(c.pixels)
+            let dirty = c.dirty(layout)
+            let rects = dirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
+            let levels = dirty.map { writer.level(for: $0) }
+            func compressAll(parallel: Bool) -> ([CompressedTile?], Double) {
+                let t0 = Date()
+                var packed = [CompressedTile?](repeating: nil, count: dirty.count)
+                if parallel {
+                    packed.withUnsafeMutableBufferPointer { buffer in
+                        let base = buffer.baseAddress!
+                        DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
+                            base[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
+                                                            pixels: layout.extract(frame, rect: rects[i]),
+                                                            level: levels[i])
+                        }
+                    }
+                } else {
+                    for i in 0..<dirty.count {
+                        packed[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
+                                                          pixels: layout.extract(frame, rect: rects[i]),
+                                                          level: levels[i])
+                    }
+                }
+                return (packed, Date().timeIntervalSince(t0) * 1000)
+            }
+            var bytes = 0
+            var tiles = 0
+            var serialMs = Double.infinity
+            var parallelMs = Double.infinity
+            for round in 0..<6 {
+                let (packed, ms) = compressAll(parallel: round % 2 == 1)
+                if round % 2 == 1 { parallelMs = min(parallelMs, ms) } else { serialMs = min(serialMs, ms) }
+                writer.beginFrame()
+                for case let tile? in packed {
+                    writer.emit(tile, sync: writer.perTileSync)
+                    writer.observe(index: tile.index, ratio: tile.ratio)
+                }
+                writer.endFrame()
+                bytes = writer.lastFrameBytes
+                tiles = packed.compactMap { $0 }.count
+            }
+            // the two runs compress the same content; keep the level policy in sync afterwards
+            for (i, index) in dirty.enumerated() {
+                _ = i
+                if let packed = ScreenWriter.compress(index: index, rect: rects[dirty.firstIndex(of: index) ?? 0],
+                                                     pixels: layout.extract(frame, rect: rects[dirty.firstIndex(of: index) ?? 0]),
+                                                     level: writer.level(for: index)) {
+                    writer.observe(index: index, ratio: packed.ratio)
+                }
+            }
+            let mbps = Double(bytes) / parallelMs / 1000.0
+            Log.write(String(format: "  %-18s  %5d  %10d  %10.2f  %11.2f  %6.1f\n",
+                             (c.name as NSString).utf8String!, tiles, bytes, serialMs, parallelMs, mbps))
+        }
+        Log.write("\nkrd: bench done, \(writer.framesEmitted) tile emissions\n")
+        writer.discardOutput = false
+        fflush(stdout); fflush(stderr)
+        exit(0)
+    }
+
     // MARK: selftest
 
     /// Paint a synthetic pattern through the real tile pipeline -- no ScreenCaptureKit,
@@ -243,6 +407,7 @@ final class Desk {
     /// it obvious which tiles arrived and whether the placement lands where we asked.
     private func runSelfTest(layout: TileGrid) async throws {
         let w = layout.pixelW, h = layout.pixelH
+        let bpp = layout.bpp
         let quadrants: [(UInt8, UInt8, UInt8)] = [(255, 0, 255), (255, 255, 0), (0, 255, 255), (255, 128, 0)]
         Log.write("krd: selftest \(w)x\(h) px, \(layout.tilesX)x\(layout.tilesY) tiles\n")
         if ProcessInfo.processInfo.environment["KRD_QUADRANTS"] != nil {
@@ -250,11 +415,11 @@ final class Desk {
             let palette: [(UInt8, UInt8, UInt8)] = [(255, 0, 255), (255, 255, 0), (0, 255, 255), (255, 255, 255)]
             let colsHalf = layout.paneCols / 2, rowsHalf = layout.paneRows / 2
             for v in 0..<4 {
-                var px = [UInt8](repeating: 255, count: half.w * half.h * 4)
+                var px = [UInt8](repeating: 255, count: half.w * half.h * bpp)
                 let c = palette[v]
                 for y in 0..<half.h {
                     for x in 0..<half.w {
-                        let o = (y * half.w + x) * 4
+                        let o = (y * half.w + x) * bpp
                         let edge = x < 6 || y < 6 || x >= half.w - 6 || y >= half.h - 6
                         px[o] = edge ? 0 : c.0
                         px[o + 1] = edge ? 0 : c.1
@@ -281,7 +446,7 @@ final class Desk {
         if ProcessInfo.processInfo.environment["KRD_GRID"] != nil {
             // Each tile gets its own colour and a white border, so a screenshot can be
             // checked for misplacement without any guessing.
-            var px = [UInt8](repeating: 0, count: w * h * 4)
+            var px = [UInt8](repeating: 0, count: w * h * bpp)
             for ty in 0..<layout.tilesY {
                 for tx in 0..<layout.tilesX {
                     let r = layout.rect(tx, ty)
@@ -289,12 +454,12 @@ final class Desk {
                     let col = (UInt8(55 + (index * 37) % 200), UInt8(55 + (index * 71) % 200), UInt8(200))
                     for y in r.y..<(r.y + r.h) {
                         for x in r.x..<(r.x + r.w) {
-                            let o = (y * w + x) * 4
+                            let o = (y * w + x) * bpp
                             let border = x - r.x < 3 || y - r.y < 3 || (r.x + r.w - x) <= 3 || (r.y + r.h - y) <= 3
                             px[o] = border ? 255 : col.0
                             px[o + 1] = border ? 255 : col.1
                             px[o + 2] = border ? 255 : col.2
-                            px[o + 3] = 255
+                            if bpp == 4 { px[o + 3] = 255 }
                         }
                     }
                 }
@@ -311,7 +476,7 @@ final class Desk {
             return
         }
         for pass in 0..<40 {
-            var px = [UInt8](repeating: 0, count: w * h * 4)
+            var px = [UInt8](repeating: 0, count: w * h * bpp)
             px.withUnsafeMutableBufferPointer { buf in
                 for y in 0..<h {
                     for x in 0..<w {
@@ -319,11 +484,11 @@ final class Desk {
                         let c = quadrants[q]
                         let dim: UInt8 = ((x / 32 + y / 32) % 2 == 0) ? 255 : 190
                         let bar = abs(x - (pass * w / 40)) < 8 ? 1.0 : 0.0
-                        let o = (y * w + x) * 4
+                        let o = (y * w + x) * bpp
                         buf[o] = bar > 0 ? 255 : c.0
                         buf[o + 1] = bar > 0 ? 255 : c.1
                         buf[o + 2] = bar > 0 ? 255 : c.2
-                        buf[o + 3] = bar > 0 ? 255 : dim
+                        if bpp == 4 { buf[o + 3] = bar > 0 ? 255 : dim }
                     }
                 }
             }
@@ -332,6 +497,7 @@ final class Desk {
         }
         writer.endSession()
         Log.write("krd: selftest done, \(writer.framesEmitted) frames, \(writer.totalBytes) bytes\n")
+        exit(0)
     }
 
     // MARK: layout
@@ -339,7 +505,8 @@ final class Desk {
     private func applyLayout(geometry: TermGeometry) {
         let aspect = sourceRect.width / max(sourceRect.height, 1)
         let layout = TileGrid.make(geometry: geometry, aspect: aspect,
-                                   tileCols: options.tileCols, tileRows: options.tileRows)
+                                   tileCols: options.tileCols, tileRows: options.tileRows,
+                                   bpp: writer.format.bytesPerPixel)
         stateLock.lock()
         grid = layout
         previousFrame = []
@@ -381,24 +548,46 @@ final class Desk {
         previousFrame = pixels
         lastDirtyCount = dirty.count
         stateLock.unlock()
+
+        writer.resize(tiles: grid.count)
         writer.beginFrame()
-        guard !dirty.isEmpty else { writer.nudge(); return }
+        guard !dirty.isEmpty else {
+            writer.nudge()
+            writer.endFrame()               // the frame's synchronized block must still be closed
+            return
+        }
 
         if options.fullFrame {
-            writer.beginBatch()
-            let rect = grid.rect(0, 0)
-            _ = rect
             writer.emitFullFrame(rgba: pixels, width: width, height: height,
                                  cols: grid.paneCols, rows: grid.paneRows)
-            writer.endBatch()
-        } else {
-            for index in dirty {
-                let tx = index % grid.tilesX
-                let ty = index / grid.tilesX
-                let rect = grid.rect(tx, ty)
-                writer.emitTile(index: index, rect: rect, pixels: grid.extract(pixels, rect: rect))
+            writer.endFrame()
+            return
+        }
+
+        // Compressing a dirty tile is >90 % of the frame budget and touches no shared state, so
+        // the dirty tiles of a frame go through zlib concurrently. On a full repaint that is the
+        // difference between ~477 ms and ~75 ms for 54 tiles (see issue #2).
+        let compressStart = Date()
+        var packed = [CompressedTile?](repeating: nil, count: dirty.count)
+        packed.withUnsafeMutableBufferPointer { buffer in
+            let base = buffer.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
+                let index = dirty[i]
+                let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
+                let level = writer.level(for: index)
+                base[i] = ScreenWriter.compress(index: index, rect: rect,
+                                                pixels: grid.extract(pixels, rect: rect),
+                                                level: level)
             }
         }
+        writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
+
+        // Assembly stays serial: the escapes must reach the pty in a deterministic order.
+        for case let tile? in packed {
+            writer.emit(tile, sync: writer.perTileSync)
+            writer.observe(index: tile.index, ratio: tile.ratio)
+        }
+        writer.endFrame()
     }
 
     // MARK: lifecycle
@@ -454,7 +643,7 @@ final class Desk {
             let frames = writer.framesEmitted
             let layout = self.currentGrid()
             let line = String(
-                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f]  %dx%d px %dx%d cells  idle=%d bad=%d\n",
+                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d\n",
                 frames - lastFrames,
                 self.lastDirtyCount,
                 writer.lastFrameBytes / 1024,
@@ -462,6 +651,7 @@ final class Desk {
                 writer.lastCompressMs, writer.lastWriteMs,
                 layout?.pixelW ?? 0, layout?.pixelH ?? 0,
                 layout?.paneCols ?? 0, layout?.paneRows ?? 0,
+                capturer.framesDelivered, capturer.framesSkipped, capturer.callbacks,
                 capturer.idleFrames, capturer.badFrames
             )
             Log.write(line)

@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .systemLibrary(name: "CZlib", path: "Sources/CZlib"),
-        .executableTarget(name: "krd", dependencies: ["CZlib"], path: "Sources/krd")
+        .executableTarget(name: "krd", dependencies: ["CZlib"], path: "Sources/krd"),
+        .testTarget(name: "krdTests", dependencies: ["krd", "CZlib"], path: "Tests/krdTests")
     ]
 )

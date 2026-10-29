@@ -8,8 +8,15 @@ import ScreenCaptureKit
 final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let queue = DispatchQueue(label: "krd.capture", qos: .userInteractive)
     private var stream: SCStream?
+    /// Frame buffer, in the wire format (3 bytes/px for RGB, 4 for RGBA).
     private var rgba = [UInt8]()
+    /// Second buffer. Reusing one buffer every frame means the mutation below has to copy the
+    /// whole frame first (the previous frame still references it); alternating two buffers keeps
+    /// each one uniquely referenced when it is written. See issue #1.
+    private var spare = [UInt8]()
     private var previous: [UInt8]?
+    /// Matches ScreenWriter.format; set before start().
+    var format: PixelFormat = .rgb
 
     private(set) var framesDelivered = 0
     private(set) var framesSkipped = 0
@@ -68,8 +75,14 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
         let h = CVPixelBufferGetHeight(pixelBuffer)
         guard w > 0, h > 0, let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
 
-        let needed = w * h * 4
-        if rgba.count != needed { rgba = [UInt8](repeating: 0, count: needed) }
+        let bpp = format.bytesPerPixel
+        let needed = w * h * bpp
+        if rgba.count != needed {
+            rgba = [UInt8](repeating: 0, count: needed)
+            spare = [UInt8](repeating: 0, count: needed)
+        } else if previous != nil {
+            swap(&rgba, &spare)         // never write into the buffer `previous` is holding
+        }
 
         var src = vImage_Buffer(
             data: base,
@@ -77,16 +90,21 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
             width: vImagePixelCount(w),
             rowBytes: CVPixelBufferGetBytesPerRow(pixelBuffer)
         )
-        // ScreenCaptureKit hands us BGRA; the protocol wants RGBA. One SIMD pass.
-        let permute: [UInt8] = [2, 1, 0, 3]
+        // ScreenCaptureKit hands us BGRA. The desktop is opaque, so RGB is enough: one SIMD pass
+        // that drops the alpha byte and rotates the channels (issue #4). RGBA keeps the old path.
         rgba.withUnsafeMutableBytes { dst in
             var out = vImage_Buffer(
                 data: dst.baseAddress,
                 height: vImagePixelCount(h),
                 width: vImagePixelCount(w),
-                rowBytes: w * 4
+                rowBytes: w * bpp
             )
-            vImagePermuteChannels_ARGB8888(&src, &out, permute, vImage_Flags(kvImageNoFlags))
+            if format == .rgb {
+                vImageConvert_BGRA8888toRGB888(&src, &out, vImage_Flags(kvImageNoFlags))
+            } else {
+                let permute: [UInt8] = [2, 1, 0, 3]
+                vImagePermuteChannels_ARGB8888(&src, &out, permute, vImage_Flags(kvImageNoFlags))
+            }
         }
 
         // A static desktop costs zero bandwidth: skip byte-identical frames.

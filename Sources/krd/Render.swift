@@ -1,29 +1,59 @@
 import Foundation
 import CZlib
 
-/// Turns RGBA frames into kitty graphics escapes on the pty.
+/// Turns pixel frames into kitty graphics escapes on the pty.
 ///
-/// Two rules learned the hard way:
-///  * never let the screen hold "no image" between two frames -> we place the new
-///    placement first and only then delete the old one (delete-then-place flashes black);
-///  * per-image-id replacement is not guaranteed to be atomic on every terminal, so
-///    each tile rotates between two image ids.
+/// One rule learned the hard way: never let the screen hold "no image" between two frames,
+/// and never depend on a delete. Each tile owns a fixed image id + placement id and simply
+/// overwrites itself every frame (see `compress`), so no terminal state machine has to get
+/// an eviction order right.
+///
+/// Compression is stateless (parallel, see `main.handleFrame`); everything below `emit` is
+/// strictly serial because the escapes have to reach the pty in order.
 final class ScreenWriter {
     /// q=2 silences every protocol reply; KRD_Q=0 reveals them while debugging.
     private let quiet = ProcessInfo.processInfo.environment["KRD_Q"] ?? "2"
+    /// Pixel format on the wire: the desktop is opaque, so RGB (`f=24`) is ~17 % smaller than
+    /// RGBA (`f=32`) and also compresses faster. `KRD_FORMAT=rgba` is the documented fallback
+    /// for a terminal that does not implement `f=24`.
+    var format: PixelFormat = {
+        (ProcessInfo.processInfo.environment["KRD_FORMAT"] ?? "rgb").lowercased() == "rgba" ? .rgba : .rgb
+    }()
+    /// How the tiles of one frame are wrapped in DEC 2026 synchronized-update blocks.
+    /// Reading the environment once here matters: it used to happen per tile, i.e. 54–770
+    /// dictionary builds per frame, for a value that cannot change at runtime.
+    private let syncMode: SyncMode = {
+        let env = ProcessInfo.processInfo.environment
+        if env["KRD_NOSYNC"] != nil { return .none }
+        if (env["KRD_SYNC"] ?? "").lowercased() == "tile" { return .tile }
+        return .frame
+    }()
+    private var batchOpen = false
     private var out = [UInt8]()
-    private var generation = 0
 
     private(set) var framesEmitted = 0
     private(set) var lastFrameBytes = 0
     private(set) var totalBytes = 0
     private(set) var lastCompressMs = 0.0
-    private(set) var lastEncodeMs = 0.0
     private(set) var lastWriteMs = 0.0
+
+    /// Per-tile zlib level, learned from the previous frame's compression ratio.
+    private var levels = LevelPolicy(tiles: 0)
+    private(set) var lastCompressedTiles = 0
 
     init() {
         out.reserveCapacity(1 << 21)
     }
+
+    /// Called when the grid (and therefore the tile count) changes.
+    func resize(tiles: Int) {
+        if tiles != levels.count { levels = LevelPolicy(tiles: tiles) }
+    }
+
+    func level(for index: Int) -> Int { levels.level(for: index) }
+    /// The tile loop compresses in parallel and reports the wall time once.
+    func addCompressTime(_ ms: Double) { lastCompressMs += ms }
+    func observe(index: Int, ratio: Double) { levels.observe(index: index, ratio: ratio) }
 
     // MARK: session
 
@@ -63,14 +93,14 @@ final class ScreenWriter {
         write("\u{1B}[?1003l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
     }
 
-    /// Placements accumulate (we never delete one by one), so every so often drop the whole
-    /// set and repaint. Cheap: one full frame every `reapInterval` updates.
+    /// Frames between "drop every image and repaint everything" cycles.
+    ///
+    /// 0 disables it, which is the default: each tile overwrites its own fixed placement, so
+    /// placements cannot pile up and there is nothing to reclaim. Set `KRD_REAP=<n>` only on a
+    /// terminal that leaks placements (symptom: memory grows, tiles go stale after a while) --
+    /// the cost is one full repaint, i.e. a visible blink, every n frames.
+    var reapInterval = Int(ProcessInfo.processInfo.environment["KRD_REAP"] ?? "0") ?? 0
     private var sinceReap = 0
-    /// With per-tile deletes working, placements cannot pile up, so the periodic "drop
-    /// everything and repaint" is off by default (it used to be the only way to reclaim
-    /// them, at the cost of one visible blink every few minutes). Raise it if a terminal
-    /// ignores `a=d,i=` (then also set KRD_NO_DELETE=1).
-    var reapInterval = 0
 
     /// Returns true when the caller must repaint everything.
     func reapIfNeeded() -> Bool {
@@ -97,24 +127,41 @@ final class ScreenWriter {
     // MARK: batching
 
     /// DEC 2026: the terminal commits everything until endBatch() in one repaint.
-    /// Reset the per-frame counters (the tile path emits one sync block per tile).
+    /// Reset the per-frame counters and, in the default mode, open the single synchronized
+    /// block that wraps every tile of this frame.
     func beginFrame() {
-        generation &+= 1
         lastFrameBytes = 0
         lastCompressMs = 0
         lastWriteMs = 0
+        lastCompressedTiles = 0
+        if syncMode == .frame && !batchOpen {
+            append("\u{1B}[?2026h")
+            batchOpen = true
+        }
+    }
+
+    /// Close the frame's synchronized block and push the bytes out.
+    func endFrame() {
+        if batchOpen {
+            append("\u{1B}[?2026l")
+            batchOpen = false
+        }
+        let t0 = Date()
+        flush()
+        lastWriteMs = Date().timeIntervalSince(t0) * 1000
     }
 
     func beginBatch() {
         out.removeAll(keepingCapacity: true)
         append("\u{1B}[?2026h")
-        generation &+= 1
+        batchOpen = true
         lastFrameBytes = 0
         lastCompressMs = 0
     }
 
     func endBatch() {
         append("\u{1B}[?2026l")
+        batchOpen = false
         let t0 = Date()
         flush()
         lastWriteMs = Date().timeIntervalSince(t0) * 1000
@@ -122,36 +169,42 @@ final class ScreenWriter {
 
     // MARK: tiles
 
-    /// Place a tile. Order is: transmit -> place (z above the previous one) -> delete the
-    /// previous id, so no repaint can ever land in a gap.
-    func emitTile(index: Int, rect r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int),
-                  pixels: [UInt8]) {
-        // One image id *and* one placement id per tile, reused every frame.
-        //
-        // Deletes are not an option here: both Herdr and rex treat `a=d,i=<id>` as "drop the
-        // whole image set", which shows up as a black screen. Alternating ids is not an
-        // option either: two images then own the same cells and the stale one shows through.
-        // Reusing the pair means every tile owns exactly one placement that simply gets
-        // overwritten, so there is nothing to delete and nothing to leave behind.
-        let iid = 100 + index
-        let pid = 1000 + index
+    // MARK: tiles
 
-        let t0 = Date()
-        guard let compressed = zlibCompress(pixels), !compressed.isEmpty else { return }
-        lastCompressMs += Date().timeIntervalSince(t0) * 1000
-        lastFrameBytes += compressed.count
-        totalBytes += compressed.count
+    /// Compress one tile. Pure: touches no writer state and allocates its own output, so the
+    /// dirty tiles of a frame can be compressed concurrently.
+    ///
+    /// The image id and the placement id are fixed per tile and reused every frame. Deletes are
+    /// not an option (Herdr and rex treat `a=d,i=<id>` as "drop the whole image set" -> black
+    /// screen) and alternating ids are not an option either (two images then own the same cells
+    /// and the stale one shows through), so a tile simply overwrites its own placement.
+    static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int) -> CompressedTile? {
+        guard let payload = zlibCompress(pixels, level: level), !payload.isEmpty else { return nil }
+        let ratio = pixels.isEmpty ? 0 : Double(payload.count) / Double(pixels.count)
+        return CompressedTile(index: index, rect: rect, payload: payload, ratio: ratio)
+    }
+
+    /// Turn an already compressed tile into escapes. Single-threaded: the order of the tiles
+    /// (and therefore the cursor moves) has to stay deterministic.
+    func emit(_ tile: CompressedTile, sync: Bool) {
+        let r = tile.rect
+        let iid = 100 + tile.index
+        let pid = 1000 + tile.index
+
+        lastCompressMs += 0                                     // timing is measured by the caller
+        lastFrameBytes += tile.payload.count
+        totalBytes += tile.payload.count
         framesEmitted += 1
+        lastCompressedTiles += 1
 
-        let b64 = Data(compressed).base64EncodedString()
+        let b64 = Data(tile.payload).base64EncodedString()
         let chars = Array(b64.utf8)
 
-        let sync = ProcessInfo.processInfo.environment["KRD_NOSYNC"] == nil
         if sync { append("\u{1B}[?2026h") }
         append("\u{1B}[\(r.row);\(r.col)H")
         var i = 0
         var first = true
-        let control = "Gf=32,s=\(r.w),v=\(r.h),a=t,o=z,q=\(quiet),i=\(iid)"
+        let control = "Gf=\(format.protocolChannels),s=\(r.w),v=\(r.h),a=t,o=z,q=\(quiet),i=\(iid)"
         while i < chars.count {
             let end = min(i + 4096, chars.count)
             let more = end == chars.count ? 0 : 1
@@ -164,10 +217,10 @@ final class ScreenWriter {
         }
         append("\u{1B}_Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(r.cols),r=\(r.rows)\u{1B}\\")
         if sync { append("\u{1B}[?2026l") }
-        let t1 = Date()
-        flush()
-        lastWriteMs = Date().timeIntervalSince(t1) * 1000
     }
+
+    /// Should `emit` wrap this tile in its own synchronized block?
+    var perTileSync: Bool { syncMode == .tile }
 
     /// Diagnostic: draw one block with an explicitly chosen protocol shape, so a human can
     /// tell which variant a terminal actually honours.
@@ -229,7 +282,7 @@ final class ScreenWriter {
             let more = end == chars.count ? 0 : 1
             append("\u{1B}_")
             append(first
-                   ? "Gf=32,s=\(width),v=\(height),a=t,o=z,q=\(quiet),i=\(newID),m=\(more);"
+                   ? "Gf=\(format.protocolChannels),s=\(width),v=\(height),a=t,o=z,q=\(quiet),i=\(newID),m=\(more);"
                    : "Gm=\(more);")
             out.append(contentsOf: chars[i..<end])
             append("\u{1B}\\")
@@ -257,8 +310,15 @@ final class ScreenWriter {
         return FileHandle(forWritingAtPath: path)
     }()
 
+    /// Benchmarks exercise the whole encoder without a terminal to write to.
+    var discardOutput = false
+
     private func flush() {
         guard !out.isEmpty else { return }
+        if discardOutput {
+            out.removeAll(keepingCapacity: true)
+            return
+        }
         if let dump = ScreenWriter.dumpHandle {
             dump.write(Data(out))
         }
@@ -276,13 +336,13 @@ final class ScreenWriter {
 
 /// RFC1950 zlib via system libz -- exactly what the protocol's `o=z` requires.
 /// (Apple's COMPRESSION_ZLIB emits *raw* DEFLATE, which the terminal rejects.)
-func zlibCompress(_ input: [UInt8]) -> [UInt8]? {
+func zlibCompress(_ input: [UInt8], level: Int = 5) -> [UInt8]? {
     guard !input.isEmpty else { return nil }
     var capacity = compressBound(uLong(input.count))
     var out = [UInt8](repeating: 0, count: Int(capacity))
     let status = input.withUnsafeBufferPointer { src -> Int32 in
         out.withUnsafeMutableBufferPointer { dst -> Int32 in
-            compress2(dst.baseAddress, &capacity, src.baseAddress, uLong(src.count), 5)
+            compress2(dst.baseAddress, &capacity, src.baseAddress, uLong(src.count), Int32(level))
         }
     }
     guard status == Z_OK else { return nil }

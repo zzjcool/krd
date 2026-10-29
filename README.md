@@ -50,6 +50,8 @@ krd --window Safari          # mirror a single window
 krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --debug                  # stats to a log file, never to the screen
+krd --format rgba            # fall back to f=32 if the terminal rejects f=24
+krd --bench                  # time the encoder on synthetic frames, no terminal needed
 ```
 
 Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a real machine.
@@ -68,7 +70,7 @@ Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/AR
 
 | | |
 |---|---|
-| Solid | tile-dirty rendering, static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, window mode, SSH |
+| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, window mode, SSH |
 | Rough | colour-heavy full-screen motion (no codec yet), Herdr's image-delete semantics |
 | Not yet | kitty keyboard protocol (`Cmd` combinations, key release), clipboard, IME input, multi-display hot switch |
 
@@ -79,6 +81,7 @@ Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/AR
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | capture → tiles → protocol → injection, CLI and env vars |
 | [PROTOCOL](docs/PROTOCOL.md) | every escape sequence krd sends, and why |
 | [TESTING](docs/TESTING.md) | self-test, tile/placement calibration, how to test a new terminal |
+| [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 36 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 

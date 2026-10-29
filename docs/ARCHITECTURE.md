@@ -25,7 +25,8 @@ Sources/krd/
   Geometry.swift  TermGeometry (CSI 16t/14t, TIOCGWINSZ) and Viewport (cells/pixels → points)
   Tiles.swift     TileGrid: whole-cell grid, per-tile pixel rects, extraction, dirty detection
   Capture.swift   Capturer: SCStream setup, BGRA→RGBA, byte-identical frame dropping
-  Render.swift    ScreenWriter: session frame, per-tile kitty escapes, zlib, KRD_DUMP
+  Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP
+  Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy (the encoding policy)
   Input.swift     InputReader: raw tty, SGR/SGR-Pixels mouse, keys → CGEvent
   Log.swift       File logger (never the tty)
 ```
@@ -87,10 +88,12 @@ SCStream callback (capture queue)
                ├─ size != layout ? log once, drop
                ├─ dirty = TileGrid.dirty(previousFrame, pixels, grid)
                │          (or all tiles when --full-frame, or when the frame size changed)
-               ├─ writer.beginFrame()   (reset per-frame counters)
-               ├─ dirty.isEmpty → writer.nudge() and return
-               └─ per dirty tile: writer.emitTile(index, rect, extract(...))
-                    zlib(compress2, level 5) → base64 → 4096-char chunks → escape per tile → flush
+               ├─ writer.beginFrame()   (reset counters, open the frame's ?2026h block)
+               ├─ dirty.isEmpty → writer.nudge(), writer.endFrame() and return
+               ├─ concurrentPerform over the dirty tiles (compression is stateless):
+               │     extract(rect) → zlib(compress2, level = LevelPolicy[tile]) → CompressedTile
+               └─ then, serially, per tile: writer.emit(tile)  (escape assembly only)
+                    CUP → base64 chunks → a=t transmit → a=p place  … writer.endFrame() (?2026l + flush)
 ```
 
 Two independent dedupe stages exist for a reason: the capture stage compares whole frames
@@ -189,9 +192,12 @@ which is why §7.6 exists.
 | `--debug` | `Log.configure` + `startStats()` + `reader.trace` + geometry/accessibility lines |
 | `--log <path>` | `Log.configure` only (no stats, no input trace) |
 | `--dry-run` | `InputReader(dryRun:)`: parse and log, never call `CGEvent.post` |
-| `--selftest` | `runSelfTest(layout:)`: synthetic RGBA through the real `handleFrame`/`emitTile` |
+| `--selftest` | `runSelfTest(layout:)`: synthetic frames (in the active `--format`) through the real `handleFrame`/`emit` |
 | `KRD_DUMP` | `ScreenWriter.flush` tees every flushed buffer to a file |
 | `KRD_Q` | the `q=` field of every escape (default `2` = silent) |
+| `KRD_FORMAT` | `rgb` (default, `f=24`) or `rgba` (`f=32`) |
+| `KRD_SYNC` | `tile` restores one synchronized block per tile; `KRD_NOSYNC=1` disables them |
+| `KRD_REAP` | repaint everything after n frames (0 = off, the default) |
 
 The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
 
@@ -200,8 +206,9 @@ stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms
 ```
 
 `tiles/s` is the delta of `framesEmitted` (tiles, not frames), `KB` is the last frame's compressed
-payload, `MB/s` is bytes written in the last second, `idle`/`bad` are ScreenCaptureKit frames
-without a pixel buffer split by the status attachment.
+payload, `MB/s` is bytes written in the last second, `cap` is ScreenCaptureKit's
+delivered/skipped/callback counts, `idle`/`bad` are frames without a pixel buffer split by the
+status attachment.
 
 ## 10. Extension points
 
@@ -212,22 +219,18 @@ without a pixel buffer split by the status attachment.
   `event.post(tap: .cghidEventTap)` with `CGEventPostToPid` when `--window` selected a process.
 - **Clipboard** — `InputReader` (OSC 52 in) and `ScreenWriter` (OSC 52 out); nothing in the render
   path assumes the stream is image-only apart from the "no text" rule.
-- **Another encoder** — `ScreenWriter.emitTile` is the only place that knows the payload format;
+- **Another encoder** — `ScreenWriter.compress`/`emit` is the only place that knows the payload format;
   `--full-frame` already demonstrates a second path through the same session frame.
 
 ## 11. Known rough edges
 
 Documented so the next reader does not chase ghosts:
 
-- `Render.swift`'s class comment still mentions tiles "rotating between two image ids"; the code
-  uses one fixed id pair per tile (§7.1). The comment predates that decision.
-- The comment on `ScreenWriter.reapInterval` in `Render.swift` promises an opt-out from per-tile
-  deletes; no such switch is read by any code, so the comment is aspirational.
-- `ScreenWriter.reapInterval` defaults to `0`, which disables the periodic "delete everything and
-  repaint" path entirely; `reapIfNeeded()` therefore always returns `false` today.
-- `ScreenWriter.generation` and `lastEncodeMs` are written but never read.
-- `Viewport.fit(source:into:)` and `TermGeometry.usablePixels` are leftovers of the first layout
-  algorithm; the live path is `TileGrid.make`. `Geometry.swift`'s `fallbackCell` comment still says
-  "8x16 is the common default" while the actual default is `8x20`.
-- `Capturer.framesDelivered` / `framesSkipped` / `callbacks` are counted but not printed; only
-  `idleFrames` and `badFrames` reach the stats line.
+- `TileGrid.bpp` is taken from the writer at layout time; a `--format` change mid-session (there is
+  none today) would invalidate the grid and the `previousFrame` it was measured against.
+- `LevelPolicy` starts every tile at level 5 and needs one frame per tile to learn; after a resize
+  all tiles relearn, which shows up as a slightly larger first frame.
+- `Capturer.format` has to be set before `start()`; it is a plain `var`, not a constructor argument,
+  because `Desk` builds the writer first.
+- The `KRD_QUADRANTS` / `KRD_DELTEST` / `KRD_GRID` self-test switches still describe terminals that
+  ignore `a=d`. They are kept as calibration tools even though the live path never deletes.

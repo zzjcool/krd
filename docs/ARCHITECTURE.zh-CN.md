@@ -84,8 +84,10 @@ SCStream 回调（采集队列）
                │          （--full-frame 或帧尺寸变化时 = 全部瓦片）
                ├─ writer.beginFrame()   （清空每帧计数）
                ├─ dirty 为空 → writer.nudge() 后返回
-               └─ 逐个脏瓦片：writer.emitTile(index, rect, extract(...))
-                    zlib(compress2, level 5) → base64 → 4096 字符分块 → 每块瓦片一个转义 → flush
+               ├─ 在脏瓦片上 concurrentPerform（压缩无状态）：
+               │     extract(rect) → zlib(compress2, level = LevelPolicy[瓦片]) → CompressedTile
+               └─ 然后串行逐块：writer.emit(tile)（只做转义拼装）
+                    CUP → base64 分块 → a=t 传输 → a=p 放置 … writer.endFrame()（?2026l + flush）
 ```
 
 两级去重是刻意保留的：采集侧比较整帧（`previous == rgba`，Array 相等，底层一次 memcmp）干掉真正
@@ -176,14 +178,17 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `--debug` | `Log.configure` + `startStats()` + `reader.trace` + 几何/辅助功能那几行日志 |
 | `--log <path>` | 只有 `Log.configure`（没有统计，没有输入轨迹） |
 | `--dry-run` | `InputReader(dryRun:)`：解析并记日志，绝不调用 `CGEvent.post` |
-| `--selftest` | `runSelfTest(layout:)`：合成 RGBA 走真正的 `handleFrame`/`emitTile` |
+| `--selftest` | `runSelfTest(layout:)`：合成帧（按当前 `--format`）走真正的 `handleFrame`/`emit` |
 | `KRD_DUMP` | `ScreenWriter.flush` 把每次 flush 的缓冲同时写一份到文件 |
 | `KRD_Q` | 每条转义里的 `q=` 字段（默认 `2` = 静默） |
+| `KRD_FORMAT` | `rgb`（默认，`f=24`）或 `rgba`（`f=32`） |
+| `KRD_SYNC` | `tile` 恢复每瓦片一个同步块；`KRD_NOSYNC=1` 完全关掉 |
+| `KRD_REAP` | 每 n 帧整屏重绘（0 = 关闭，默认） |
 
 1 Hz 的统计行就是 `Desk.startStats()` 里一次 `String(format:)`：
 
 ```
-stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms>]  <WxH> px <CxR> cells  idle=<n> bad=<n>
+stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms>]  <WxH> px <CxR> cells  cap=<delivered>/<skipped>/<callbacks> idle=<n> bad=<n>
 ```
 
 `tiles/s` 是 `framesEmitted` 的增量（数的是瓦片，不是帧）；`KB` 是最近一帧压缩后的负载；`MB/s` 是最近
@@ -197,22 +202,18 @@ stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> wr
   `event.post(tap: .cghidEventTap)` 换成 `CGEventPostToPid`。
 - **剪贴板** —— 入口是 `InputReader`（OSC 52 入）和 `ScreenWriter`（OSC 52 出）；除了「不写文字」这条，
   渲染路径并不假设这条流只能是图像。
-- **换编码器** —— `ScreenWriter.emitTile` 是唯一知道负载格式的地方；`--full-frame` 已经演示了在同一套
+- **换编码器** —— `ScreenWriter.compress`/`emit` 是唯一知道负载格式的地方；`--full-frame` 已经演示了在同一套
   会话框架里走第二条路径。
 
 ## 11. 已知的粗糙处
 
-写在这里，免得下一个人去追鬼：
+写下来是为了让后来的人不去追鬼：
 
-- `Render.swift` 的类注释还写着瓦片在「两个 image id 之间轮换」；代码用的是每块瓦片固定的一对 id
-  （§7.1）。注释比决策老。
-- `Render.swift` 里 `ScreenWriter.reapInterval` 的注释许诺了一个「关掉逐块瓦片删除」的开关；实际上没有
-  任何代码读它，那只是注释里的设想。
-- `ScreenWriter.reapInterval` 默认 `0`，等于把「定期全删再重绘」整条路关掉；所以今天
-  `reapIfNeeded()` 永远返回 `false`。
-- `ScreenWriter.generation` 和 `lastEncodeMs` 只写不读。
-- `Viewport.fit(source:into:)` 和 `TermGeometry.usablePixels` 是第一版布局算法的遗留物，实际路径是
-  `TileGrid.make`。`Geometry.swift` 里 `fallbackCell` 的注释还写着「8x16 是常见默认值」，而实际默认是
-  `8x20`。
-- `Capturer.framesDelivered` / `framesSkipped` / `callbacks` 有计数但从不打印，只有 `idleFrames` 和
-  `badFrames` 进了统计行。
+- `TileGrid.bpp` 在算布局时从 writer 取；如果哪天支持中途换 `--format`，网格和它对应的
+  `previousFrame` 都会失效。
+- `LevelPolicy` 每块瓦片从 level 5 起步，需要一帧才能学到；改窗口大小之后所有瓦片重新学，
+  表现为第一帧略大。
+- `Capturer.format` 必须在 `start()` 之前设置；它是普通 `var` 而不是构造参数，因为 `Desk`
+  先建 writer 再建 capturer。
+- `KRD_QUADRANTS` / `KRD_DELTEST` / `KRD_GRID` 这几个自检开关仍然在描述「终端会忽略 `a=d`」
+  的世界。它们作为标定工具保留，尽管线上路径从不删除。

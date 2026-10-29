@@ -36,17 +36,13 @@ struct TermGeometry {
         return grid
     }
 
-    /// Cell size in pixels, either measured or assumed (8x16 is the common default).
+    /// Cell size in pixels, either measured (CSI 16t) or assumed. 8x20 is what a default
+    /// Terminal.app/Ghostty window gives; `--cell` overrides it.
     var cellSize: (w: Double, h: Double) {
         if pixelWidth > 0, pixelHeight > 0 {
             return (Double(pixelWidth) / Double(cols), Double(pixelHeight) / Double(rows))
         }
         return (TermGeometry.fallbackCell.w, TermGeometry.fallbackCell.h)
-    }
-
-    var usablePixels: (w: Int, h: Int) {
-        let c = cellSize
-        return (Int(Double(cols) * c.w), Int(Double(rows) * c.h))
     }
 }
 
@@ -61,17 +57,6 @@ struct Viewport {
     /// Source region in global screen *points* (CGEvent coordinate space).
     var sourceRect: CGRect
 
-    /// Fit `sourceSize` (points) into the pane's usable pixels, preserving aspect.
-    static func fit(source: CGSize, into geo: TermGeometry) -> (pixels: (w: Int, h: Int), cells: (c: Int, r: Int)) {
-        let usable = geo.usablePixels
-        let cell = geo.cellSize
-        let scale = min(Double(usable.w) / max(source.width, 1), Double(usable.h) / max(source.height, 1))
-        let pw = max(2, Int(source.width * scale))
-        let ph = max(2, Int(source.height * scale))
-        let c = max(1, min(geo.cols, Int((Double(pw) / cell.w).rounded())))
-        let r = max(1, min(geo.rows, Int((Double(ph) / cell.h).rounded())))
-        return ((pw, ph), (c, r))
-    }
 
     /// Terminal cell (1-based, relative to the placement origin) -> global screen point.
     func point(forCell cx: Int, _ cy: Int) -> CGPoint {

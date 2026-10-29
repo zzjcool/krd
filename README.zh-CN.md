@@ -48,6 +48,8 @@ krd --window Safari          # 只镜像一个窗口
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
 krd --debug                  # 统计写日志文件，不会打到画面上
+krd --format rgba            # 终端不认 f=24 时退回 f=32
+krd --bench                  # 在合成帧上给编码器计时，不需要终端
 ```
 
 退出按 **`Ctrl-\`**；`Ctrl-C` 会转发给远程桌面，和真机一致。
@@ -76,6 +78,7 @@ krd --debug                  # 统计写日志文件，不会打到画面上
 | [ARCHITECTURE](docs/ARCHITECTURE.zh-CN.md) | 采集 → 瓦片 → 协议 → 注入，以及命令行与环境变量 |
 | [PROTOCOL](docs/PROTOCOL.zh-CN.md) | 每一条发出去的转义序列，以及为什么 |
 | [TESTING](docs/TESTING.zh-CN.md) | 自检、瓦片定位标定、怎么验一个新终端 |
+| [ENCODING](docs/ENCODING.zh-CN.md) | 字节和毫秒花在哪，以及背后的基准测试 |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 36 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 

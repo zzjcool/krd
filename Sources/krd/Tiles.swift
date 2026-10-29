@@ -15,13 +15,16 @@ struct TileGrid {
     /// Scaled frame size in device pixels: exactly paneCols x paneRows cells.
     let pixelW: Int
     let pixelH: Int
+    /// Bytes per pixel in the frame buffer we are handed (3 for RGB, 4 for RGBA).
+    let bpp: Int
 
     var tilesX: Int { (paneCols + tileCols - 1) / tileCols }
     var tilesY: Int { (paneRows + tileRows - 1) / tileRows }
     var count: Int { tilesX * tilesY }
 
     /// Fit `aspect` (width / height) into the pane, using whole cells.
-    static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int) -> TileGrid {
+    static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int,
+                     bpp: Int = 3) -> TileGrid {
         let cell = geometry.cellSize
         // Largest cell rectangle with the source aspect that fits the pane.
         var cols = geometry.cols
@@ -37,7 +40,8 @@ struct TileGrid {
             cellW: cell.w, cellH: cell.h,
             tileCols: tileCols, tileRows: tileRows,
             pixelW: max(2, Int((Double(cols) * cell.w).rounded())),
-            pixelH: max(2, Int((Double(rows) * cell.h).rounded()))
+            pixelH: max(2, Int((Double(rows) * cell.h).rounded())),
+            bpp: bpp
         )
     }
 
@@ -53,16 +57,17 @@ struct TileGrid {
                 tx * tileCols + 1, ty * tileRows + 1, cx, cy)
     }
 
-    /// Copy one tile out of a full RGBA frame into a tight buffer.
-    func extract(_ frame: [UInt8], rect r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)) -> [UInt8] {
-        var out = [UInt8](repeating: 0, count: r.w * r.h * 4)
-        let stride = pixelW * 4
+    /// Copy one tile out of a full frame into a tight buffer.
+    func extract(_ frame: [UInt8],
+                 rect r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)) -> [UInt8] {
+        var out = [UInt8](repeating: 0, count: r.w * r.h * bpp)
+        let stride = pixelW * bpp
+        let rowBytes = r.w * bpp
         frame.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
                 for row in 0..<r.h {
-                    let s = (r.y + row) * stride + r.x * 4
-                    let d = row * r.w * 4
-                    memcpy(dst.baseAddress! + d, src.baseAddress! + s, r.w * 4)
+                    let s = (r.y + row) * stride + r.x * bpp
+                    memcpy(dst.baseAddress! + row * rowBytes, src.baseAddress! + s, rowBytes)
                 }
             }
         }
@@ -73,16 +78,18 @@ struct TileGrid {
     static func dirty(previous: [UInt8], current: [UInt8], grid: TileGrid) -> [Int] {
         guard previous.count == current.count else { return Array(0..<grid.count) }
         var result: [Int] = []
-        let stride = grid.pixelW * 4
+        let stride = grid.pixelW * grid.bpp
+        let rowBytes = { (r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)) in r.w * grid.bpp }
         previous.withUnsafeBufferPointer { prev in
             current.withUnsafeBufferPointer { cur in
                 for ty in 0..<grid.tilesY {
                     for tx in 0..<grid.tilesX {
                         let r = grid.rect(tx, ty)
                         var differs = false
+                        let bytes = rowBytes(r)
                         for row in 0..<r.h {
-                            let off = (r.y + row) * stride + r.x * 4
-                            if memcmp(prev.baseAddress! + off, cur.baseAddress! + off, r.w * 4) != 0 {
+                            let off = (r.y + row) * stride + r.x * grid.bpp
+                            if memcmp(prev.baseAddress! + off, cur.baseAddress! + off, bytes) != 0 {
                                 differs = true
                                 break
                             }

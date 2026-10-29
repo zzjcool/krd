@@ -35,12 +35,14 @@ ESC [ ? 1016 h                       #   SGR *像素*：坐标单位是设备像
 
 ## 2. 一块瓦片
 
-每块瓦片自带一个同步更新块、并且单独 flush（`ScreenWriter.emitTile`），所以终端不可能显示半块瓦片：
+整帧只开一个同步更新块，所有脏瓦片在同一块里传完再一起提交（`ScreenWriter.beginFrame` /
+`endFrame`）：每帧 16 字节开销而不是每瓦片 16 字节，终端也只提交一次。`KRD_SYNC=tile` 可退回
+每瓦片一块，`KRD_NOSYNC=1` 完全关掉：
 
 ```
 ESC [ ? 2026 h                                        # 同步块开始
 ESC [ <row> ; <col> H                                 # CUP 到瓦片左上角
-ESC _ G f=32,s=<w>,v=<h>,a=t,o=z,q=<Q>,i=<iid>,m=1;<base64 分块> ESC \
+ESC _ G f=24,s=<w>,v=<h>,a=t,o=z,q=<Q>,i=<iid>,m=1;<base64 分块> ESC \
 ESC _ G m=1;<base64 分块> ESC \                       # …… 重复，每块 4096 字符
 ESC _ G m=0;<base64 分块> ESC \                       # 最后一块
 ESC _ G i=<iid>,p=<pid>,a=p,q=<Q>,C=1,c=<cols>,r=<rows> ESC \
@@ -51,7 +53,7 @@ ESC [ ? 2026 l                                        # 提交
 
 | 字段 | krd 给的值 | 为什么 |
 |---|---|---|
-| `f=32` | RGBA，每通道 8 位 | `Capture` 已经产出 RGBA；不需要调色板，也不需要 PNG |
+| `f=24` / `f=32` | RGB / RGBA，每通道 8 位 | 桌面不透明，默认 `f=24`（少 25 % 字节，`--format rgba` 可退回）；不需要调色板，也不需要 PNG |
 | `s=<w>`、`v=<h>` | 瓦片的像素尺寸 | 是这块瓦片自己的矩形，不是整帧 |
 | `a=t` | 只传输 | 放置是另一条命令，见下 |
 | `o=z` | zlib 压缩负载 | RFC **1950** 流（见 §6.1） |
@@ -68,7 +70,7 @@ ESC [ ? 2026 l                                        # 提交
 ```
 ESC[?2026h
 ESC[1;1H
-ESC_Gf=32,s=272,v=264,a=t,o=z,q=2,i=100,m=1,<4096 个 base64 字符>ESC\
+ESC_Gf=24,s=272,v=264,a=t,o=z,q=2,i=100,m=1,<4096 个 base64 字符>ESC\
 ESC_Gm=0,<剩下那些 base64 字符>ESC\
 ESC_Gi=100,p=1000,a=p,q=2,C=1,c=16,r=8ESC\
 ESC[?2026l
@@ -83,7 +85,7 @@ ESC[?2026l
 ```
 ESC [ ? 2026 h
 ESC [ 1 ; 1 H
-ESC _ G f=32,s=<W>,v=<H>,a=t,o=z,q=<Q>,i=2,m=1;<分块> ESC \
+ESC _ G f=24,s=<W>,v=<H>,a=t,o=z,q=<Q>,i=2,m=1;<分块> ESC \
 ESC _ G m=…;<分块> ESC \        （重复）
 ESC _ G i=2,p=2,a=p,q=<Q>,C=1,c=<cols>,r=<rows> ESC \
 ESC [ ? 2026 l

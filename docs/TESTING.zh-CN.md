@@ -19,7 +19,7 @@ CI（[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)）只负责机械
 
 `--selftest` 全程离线跑：不碰 ScreenCaptureKit、不碰 TCC、不折腾 window server。它假装信号源是一块
 1440×2560 pt（竖屏）区域，好让等比适配那条路径被走到；pane 几何从 `TIOCGWINSZ`（或 `--cell`）拿，
-然后把 40 帧合成画面推过 `handleFrame` → `TileGrid.dirty` → `emitTile` → zlib → base64 → 终端，
+然后把 40 帧合成画面推过 `handleFrame` → `TileGrid.dirty` → zlib（并行）→ `emit` → base64 → 终端，
 每 250 ms 一帧。你应该看到四个纯色象限、一层暗色棋盘格，以及一条从左扫到右的亮条。看到别的东西，说明
 问题在终端或协议，不在采集路径。
 
@@ -110,12 +110,24 @@ KRD_QUADRANTS=1 krd --selftest --no-input
 KRD_Q=0 krd --selftest --no-input      # watch replies in the pane, nothing is typed into the desktop
 ```
 
-## 5. `KRD_DUMP=<path>` —— 每一个字节，离线看
+## 5. `--bench` —— 不接终端测编码器
+
+`krd --bench` 在合成帧上跑真实的瓦片流水线（提取 → zlib → base64 → 转义序列），逐场景打印字节数和
+毫秒数。它自己退出、不需要 tty，所以是横向对比两个构建的办法：
+
+```sh
+.build/release/krd --bench --pane 137x44 --cell 17x33 --log /tmp/bench.log; cat /tmp/bench.log
+```
+
+场景列表和窗格尺寸是刻意固定的；`--tile`、`--format` 决定测什么。当前数字和取舍理由见
+[ENCODING.zh-CN.md](ENCODING.zh-CN.md)。
+
+## 6. `KRD_DUMP=<path>` —— 每一个字节，离线看
 
 | | |
 |---|---|
 | 验证什么 | 究竟发了什么，和屏幕上显示成什么样无关 |
-| 通过 | dump 里先是会话框架，然后每块瓦片是 `?2026h`、CUP、`f=32,…,a=t,…,i=<100+n>`、4096 字符分块、`a=p` 放置、`?2026l` |
+| 通过 | dump 里先是会话框架，然后每帧一个 `?2026h`，每块脏瓦片是 CUP、`f=24,…,a=t,…,i=<100+n>`、4096 字符分块、`a=p` 放置，最后 `?2026l` |
 | 失败 | 不适用：字节都在你手里，自己数就行 —— 这正是它的价值 |
 
 ```bash
@@ -128,7 +140,7 @@ wc -c /tmp/krd-dump.bin
 忠实记录。比较两份 dump（比如 `--tile 16x8` 对 `--full-frame`）是看出协议变化最快的办法。只想要 dump
 的时候把 stdout 重定向到 `/dev/null` —— 否则同样的转义序列也会打到终端上。
 
-## 6. `--dry-run` —— 只解析输入，不产生后果
+## 7. `--dry-run` —— 只解析输入，不产生后果
 
 | | |
 |---|---|
@@ -153,7 +165,7 @@ input: key code=0 flags=256
 `raw …` 证明终端确实送了东西；映射那一行证明几何是对的；如果第一行有、第二行没有，那要么事件落在了
 放置区域之外（点到了画面外面），要么解析器把它丢了。
 
-## 7. 其余开关
+## 8. 其余开关
 
 | 开关 | 验证什么 |
 |---|---|
@@ -176,7 +188,7 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 1
 还活着，但屏幕是静止的；`bad` 一直在涨 = 有帧没有像素缓冲区，通常是采集/权限问题；`write` 经常到
 几十毫秒 = 终端跟不上这个字节速率，把 `--fps` 调低，或者把瓦片调大。
 
-## 8. 标定一台新终端
+## 9. 标定一台新终端
 
 每支持一台终端，就按下面的顺序跑一遍，把答案记到 README 的兼容矩阵里
 （[中文](../README.zh-CN.md#终端兼容矩阵) / [English](../README.md#terminal-compatibility)）：
@@ -192,7 +204,7 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 1
 8. `krd --fps 20 --debug` 加 `--dry-run` —— 不点击、只移动指针：远端光标跟不跟？不跟的话，说明这个
    终端忽略了 `?1003h`（任意移动上报）；点击和拖动仍然可用，悬停不行
 
-## 9. 独立交叉验证（`probe/`）
+## 10. 独立交叉验证（`probe/`）
 
 纯 Python 脚本，只用标准库，不涉及 Swift，也不涉及 krd。要判断「这是终端的问题还是 krd 的问题」，
 它们是最快的办法 —— 每个脚本都会自己把过程讲一遍：
