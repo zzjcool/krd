@@ -347,6 +347,29 @@ needs no terminal cooperation.
 Because the payload shares stdout with the frames, the writer takes one lock: an OSC 52 landing
 between two tiles of an image would be decoded as image data and corrupt that tile.
 
+### 7.5 Where a character goes (`--ime`)
+
+The protocol delivers two different things, and they are not interchangeable:
+
+- a **key** — `CSI 97;5 u` says "the physical `a` key was pressed with ctrl", and the mirrored Mac's
+  own layout and input method decide what to make of it;
+- a **character** — a codepoint with no ANSI key (a CJK glyph, an accented letter from a layout the
+  terminal does not map), which can only be delivered as text via `keyboardSetUnicodeString`.
+
+Only the first one can compose. `--ime` decides which is preferred when both are possible:
+
+| mode | a key is available | no key (composed character) |
+|---|---|---|
+| `auto` | press the key | inject the text, and say so once in the log |
+| `raw` | press the key | **drop** it: a half-injected character in the middle of a composition is worse than nothing |
+| `unicode` | press the key for ASCII, inject otherwise | inject the text |
+
+ASCII always presses its key: injecting `a` as text would blind every app that reads keycodes for no
+benefit. The alternate-key field (`code:shifted:base`) is what makes "a key is available" true for a
+non-ASCII character — with `base`, a Cyrillic `ф` on the `a` key still reaches the target as a key
+press, which is the whole reason `--ime=raw` can work at all.
+
+
 ## 8. Replies
 
 With `q=2` every reply is suppressed, including errors — a black pane then has no explanation

@@ -179,12 +179,34 @@ modifier bits `& 4`/`& 8`/`& 16` become Shift/Option/Control on the event, and h
 (`& 64` with `& 3` = 2/3) goes out as `wheel2`. What still does not exist: drag-and-drop between
 apps, force/pressure events, and any input method (see 19).
 
-### 19. Typing Chinese/Japanese produces nothing useful
+### 19. Typing Chinese/Japanese/Korean produces nothing useful
 
-**Cause.** There is no IME integration: characters outside the US/ANSI map are posted as a Unicode
-string with `virtualKey 0`, which bypasses the input method entirely.
-**Fix.** Use an ASCII layout; IME support would need the kitty keyboard protocol plus a candidate
-window story that terminals do not have.
+**Cause.** Two different things, and they need opposite fixes:
+
+1. A character that arrives with no physical key is injected with `keyboardSetUnicodeString`
+   (`virtualKey 0`). No keycode reaches the target, so the target's input method never sees a
+   keystroke: no composition, no candidate window — and apps that read *keycodes* (Electron,
+   Terminal.app, most custom text views) receive nothing at all.
+2. A character only arrives *with* a key when your terminal reports one (the kitty protocol's
+   alternate-key field) and that key exists on your local layout.
+
+**Fix.** `--ime`:
+
+| mode | behaviour |
+|---|---|
+| `auto` (default) | press the physical key when the terminal reported one, inject the character otherwise; the log says when it had to inject |
+| `raw` | physical keys only — text with no key is **dropped**, so a composition never gets half-injected text in the middle of it (Korean jamo → syllable) |
+| `unicode` | inject anything that is not plain ASCII: krd's old behaviour, and the right answer when you already composed the character locally |
+
+For **IME input, turn the local input method off** and let the mirrored Mac's IME compose: the keys
+then travel raw, the candidate window renders inside the mirrored picture (which you are already
+looking at), and Space/arrows/numerals confirm and pick candidates. If the log says
+
+    krd: this character has no key on the local layout, so krd injects it as text …
+
+then your local IME composed it before it ever reached krd — that is the `auto` fallback, and
+`--ime=raw` would have dropped it instead. `--ime=raw` on a terminal that does not answer the
+keyboard-protocol handshake leaves only ASCII typable, which is the trade-off, not a bug.
 
 ### 20. With `--window`, clicks go to whatever is on top instead of the mirrored window
 

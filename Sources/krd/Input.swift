@@ -107,6 +107,12 @@ final class InputReader {
     private var loggedTarget = false
     private var loggedFallback = false
 
+    /// How characters reach the mirrored Mac (issue #16): physical keys so the target's input
+    /// method composes, or injected text that bypasses it.
+    var ime: IMEMode = .auto
+    private var loggedInjectedText = false
+    private var loggedDroppedText = false
+
     /// Clipboard directions (issue #18). `toTarget` gates `Ctrl-V` here; the target→terminal half
     /// lives in `ClipboardBridge`, because this class never reads the pasteboard itself.
     var clipboard: ClipboardPolicy = .off
@@ -337,12 +343,14 @@ final class InputReader {
             if trace { log("modifier \(report.code) \(report.phase) not forwarded") }
             return
         }
-        if let code = Keyboard.keyCode(report) {
-            postKey(code, report.flags, phase: report.phase)
-        } else if let ch = Keyboard.text(report) {
+        switch Keyboard.plan(for: report, mode: ime) {
+        case let .key(code, flags):
+            postKey(code, flags, phase: report.phase)
+        case let .text(ch):
+            noteInjectedText(ch)
             postUnicode(ch, report.flags, phase: report.phase)
-        } else if trace {
-            log("unmapped functional key \(report.code) ignored")
+        case .drop:
+            noteDroppedText(report.code)
         }
     }
 
@@ -617,7 +625,36 @@ final class InputReader {
             postKey(code, flags.union(.maskShift))
             return
         }
+        // No physical key to press: either the terminal did not report one, or it never will
+        // (a plain UTF-8 byte stream carries characters, not keys). Same policy as a report.
+        if ime == .raw {
+            noteDroppedText(Int(ch.unicodeScalars.first?.value ?? 0))
+            return
+        }
+        noteInjectedText(ch)
         postUnicode(ch, flags)
+    }
+
+    /// Text went in through `keyboardSetUnicodeString`, i.e. the target's input method was skipped.
+    /// Says so once, without the character itself: this is a diagnosis, not a keystroke log.
+    private func noteInjectedText(_ ch: Character) {
+        if trace { log("text \(ch.debugDescription) injected (no physical key)") }
+        guard !loggedInjectedText else { return }
+        loggedInjectedText = true
+        Log.write("krd: this character has no key on the local layout, so krd injects it as text:\n"
+                  + "         the target's input method never composes it (no candidate window, no\n"
+                  + "         Korean jamo assembly) and keycode-reading apps receive nothing.\n"
+                  + "         Turn the local input method off to type through the target's own IME.\n")
+    }
+
+    /// `--ime=raw` with nothing pressable: dropping is the point — half-injected text in the middle
+    /// of a composition is worse than nothing.
+    private func noteDroppedText(_ codepoint: Int) {
+        if trace { log("dropped U+\(String(codepoint, radix: 16, uppercase: true)) (--ime=raw)") }
+        guard !loggedDroppedText else { return }
+        loggedDroppedText = true
+        Log.write("krd: --ime=raw dropped text the terminal sent without a physical key.\n"
+                  + "         Turn the local input method off (so the keys arrive raw), or use --ime=auto.\n")
     }
 
     private func postKey(_ code: CGKeyCode, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
