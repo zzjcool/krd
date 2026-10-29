@@ -234,9 +234,11 @@ the pane on the alternate screen — pixel coordinates are relative to that orig
 |---|---|
 | `ESC [ A/B/C/D` | up / down / right / left (`Keys.up` … `Keys.left`) |
 | `ESC [ H` / `ESC [ F` | Home / End |
+| `ESC [ 1;…` | modifier bits: `n-1` & 1 shift, & 2 alt, & 4 ctrl, & 8 cmd. With event reporting on, the field is `<mods>:<event>` |
 | `ESC [ Z` | Shift-Tab |
-| `ESC [ 1;…` | modifier bits: `n-1` & 1 shift, & 2 alt, & 4 ctrl, & 8 cmd |
 | `ESC [ <code> ~` | 1,2,7 → Home; 3 → forward delete; 4,8 → End; 5/6 → page up/down; 11–14 → F1–F4; 15 → F5; 17–21 → F6–F10; 23,24 → F11,F12; 25,26 → F13,F14. One table (`Keys.numbered`): 16 and 22 are gaps in the numbering and are ignored, as is any number not listed |
+| `ESC [ <code> ; <mods> : <event> u` | kitty keyboard protocol (§7.3): a key report with an optional press/repeat/release event |
+| `ESC [ ? <flags> u` | the terminal's answer to the capability query (§7.3); consumed, never forwarded |
 | `ESC O A–D / H / F / P–S` | SS3 arrows, Home/End, F1–F4 (same key codes as `ESC [ 11 ~` … `ESC [ 14 ~`) |
 | `0x00` | Ctrl-Space |
 | `0x01`–`0x1A` | Ctrl-A … Ctrl-Z (with `maskControl`) |
@@ -248,8 +250,57 @@ the pane on the alternate screen — pixel coordinates are relative to that orig
 | printable ASCII | US/ANSI virtual keycode from `Keys.map`; shifted symbols (`!@#$…`) press the base key with `maskShift`; uppercase likewise |
 | anything else | a `CGEvent` with `virtualKey 0` and the character set via `keyboardSetUnicodeString` |
 
-There is **no kitty keyboard protocol** handshake (`CSI > 9 u`), so modifiers alone, key release
-and Cmd combinations never arrive. Alt+key does, as `ESC`+key.
+There **is** a kitty keyboard handshake — §7.3 — but a terminal that ignores it keeps the legacy
+encoding above unchanged, which is what every row in this table describes.
+
+### 7.3 Keyboard protocol (kitty)
+
+Without it, `Cmd` combinations, key release and repeat never arrive: macOS gets a keyboard that can
+type but not *work*. The handshake is two sequences on **stdout**, sent once when input starts:
+
+```
+CSI > 15 u      # push: disambiguate(1) | events(2) | alternates(4) | all keys as escapes(8)
+CSI ? u         # query: "which flags are in effect?"
+```
+
+A terminal that implements the protocol answers `CSI ? <flags> u` on **stdin**; krd records it and
+`--debug` prints `input: keyboard protocol flags=<n>`. No answer means "legacy only", which is a
+supported state, not an error. On exit the push is popped (`CSI < u`) so the shell behind krd gets
+its own keyboard mode back.
+
+Bit 16 ("associated text") is deliberately not requested — IME input is #16, and the text field it
+adds would be dead weight until then.
+
+With the push accepted, key reports arrive as
+
+```
+CSI code[:shifted[:base]] ; modifiers[:event] [; text] u
+```
+
+- `code` is the **un-shifted** unicode codepoint (`ctrl+shift+a` is `97`, never `65`), or a
+  functional key from the Private Use Area (57344–63743).
+- `shifted` / `base` are only sent because bit 4 is on. `base` is the PC-101 key for the same
+  physical key, which is what makes `ctrl+С` on a Cyrillic layout press the `c` key.
+- `modifiers` is the same `1 + bits` encoding as the legacy field: 1 shift, 2 alt, 4 ctrl, 8 super
+  (**Cmd**). Hyper (16), meta (32) and the locks (64/128) decode into the report but map to nothing
+  in `CGEventFlags` on purpose.
+- `event` exists because bit 2 is on: 1 press, 2 repeat, 3 release.
+
+What krd does with them (`Sources/krd/Keyboard.swift`):
+
+| Report | Posted as |
+|---|---|
+| press, repeat | `CGEvent` down+up with the report's flags — what every key did before, and what makes hold-to-repeat work |
+| release | **up only** |
+| codepoint → `Keys.map` | the US/ANSI virtual key code (`Cmd-C` → key 8 + `.maskCommand`) |
+| codepoint with no ANSI key | `keyboardSetUnicodeString`, same as before |
+| functional PUA codes | `27`/`13`/`9`/`127` → Esc/Enter/Tab/Backspace, `57376`/`57377` → F13/F14; an unmapped PUA code is dropped, never typed |
+| modifier keys themselves (57441–57454, 57358–57360) | dropped: every other report already carries their state, and forwarding a tap would only double it |
+| `Ctrl-\` (code 92, ctrl) | **quit**, on press and repeat only — the release must not end the session a second time |
+
+Everything keeps its legacy shape while the protocol is on: arrows stay `CSI 1;<mods>[ABCD]`, F1–F12
+stay `CSI <n>;<mods>~`, and only the `:event` sub-field is new on those (which is why
+`KeyReport.legacyFields` returns the old `[Int]` unchanged when no sub-field is present).
 
 ## 8. Replies
 
