@@ -134,6 +134,39 @@ referenced by construction, so the conversion writes in place.
 and 0.02 ms on a typed character. A faster base64 would be invisible; the numbers above say so, and
 that is the point of measuring it.
 
+## Capture scale: `--scale` (issue #60)
+
+`--scale 0.5` asks the capturer for half as many pixels in each direction (`SCStreamConfiguration.
+width/height` = the pane's own pixel size × the scale) and lets the terminal upscale the image back
+into the same cell box. Nothing else moves:
+
+- the **crop** (`sourceRect`) is unchanged — this is not zoom;
+- the **placement box** (`c=8,r=4` per tile, the same cells) is unchanged, so the picture still fills
+  the pane exactly: `--record` gives 1020×627 raw frames at scale 1 and 510×314 at 0.5, while the
+  escape stream carries `c=8,r=4` placements and 136×132 / 68×66 px images in the two runs;
+- the **pointer mapping** is unchanged, because SGR-Pixels coordinates are the *pane's* grid, not the
+  image's. Clicked at the same terminal pixel, TextEdit's caret lands at the same offset at both
+  scales (86 and 948 for two points), and a deliberately doubled pixel lands somewhere else;
+
+The cost is resolution: at 0.5 a 13-point glyph is described by half as many pixels per side, so text
+gets visibly soft — the terminal's upscale is not a substitute for real pixels. It is a trade, not a
+free win, and the reason it defaults to 1.
+
+Measured (macOS 26.6 VM, pane 60×19 cells of 17×33 px, the still desktop; `--bench` for the pinned
+813-tile photo layout):
+
+| | scale 1 | scale 0.5 | scale 0.25 |
+|---|---:|---:|---:|
+| capture pixels | 1020×627 | 510×314 | 255×157 |
+| `--bench` photo wire | 13.57 MB | 3.41 MB (**3.98×**) | 0.86 MB (**15.7×**) |
+| live bytes/s (desktop) | 3.08 MB/s | 1.02 MB/s | 0.23 MB/s |
+| CPU (`ps %cpu`) | 17.5 % | 8.4 % | 3.9 % |
+| `bad` frames | 0 | 0 | 0 |
+
+The live ratio is 3.2× rather than 3.98× because a still desktop's bytes are mostly per-frame framing
+and the tiles that change; the bench number is the clean one. An automatic "drop the scale before the
+frame rate" policy is deliberately *not* here: the flag and the numbers come first.
+
 ## Measuring a change
 
 ```sh

@@ -247,10 +247,10 @@ extension TileGrid {
     /// `TermGeometry` owns the tty and stays in this module; the arithmetic is `krdcore`'s
     /// (issue #21). Same numbers in, same grid out — call sites did not change.
     static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int,
-                     bpp: Int = 3) -> TileGrid {
+                     bpp: Int = 3, scale: Double = 1) -> TileGrid {
         let cell = geometry.cellSize
         return make(paneCols: geometry.cols, paneRows: geometry.rows,
                     cellW: cell.w, cellH: cell.h, aspect: aspect,
-                    tileCols: tileCols, tileRows: tileRows, bpp: bpp)
+                    tileCols: tileCols, tileRows: tileRows, bpp: bpp, scale: scale)
     }
 }

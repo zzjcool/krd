@@ -55,6 +55,8 @@ struct BenchConfig {
     var tiles: Int
     var rounds: Int
     var source: String
+    /// Capture scale (`--scale`): the picture is `px` pixels at this fraction of the pane's pixels.
+    var scale: String
     var machine: String
     var arch: String
     var cores: Int
@@ -74,6 +76,7 @@ struct BenchConfig {
             tiles: layout.count,
             rounds: rounds,
             source: "\(Int(source.width))x\(Int(source.height))",
+            scale: number(layout.scale),
             machine: sysctlString("hw.model"),
             arch: unameField(&uts.machine),
             cores: ProcessInfo.processInfo.activeProcessorCount,
@@ -88,7 +91,8 @@ struct BenchConfig {
         {"schema":1,"krd":"\(krdVersion)","build":"\(build)",\
         "machine":{"model":"\(machine)","arch":"\(arch)","cores":\(cores),"os":"\(os)"},\
         "config":{"pane":"\(pane)","cell":"\(cell)","tile":"\(tile)","format":"\(format)",\
-        "px":"\(px)","tiles":\(tiles),"rounds":\(rounds),"source":"\(source)"}}
+        "px":"\(px)","tiles":\(tiles),"rounds":\(rounds),"source":"\(source)",
+        "scale":\(scale)}}
         """
     }
 }

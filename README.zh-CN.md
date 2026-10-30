@@ -48,6 +48,7 @@ krd --window Safari          # 只镜像一个窗口（背板窗口会被拒绝�
 krd --zoom 2                 # 看一半的屏幕、按两倍密度显示（在采集端裁剪）
 krd --zoom 3 --zoom-at 200,300   # ……以某个全局屏幕点为焦点
 krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
+krd --scale 0.5              # 每边只采一半像素，交给终端放大：彩色重内容少 4 倍字节，文字明显变糊
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
 krd --no-quantise           # 保持严格无损（照片类画面字节数约 2.3 倍）
