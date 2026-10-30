@@ -456,10 +456,22 @@ final class Desk {
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
+        // `--wall` is in the list for its own reason: the pane *is* the wall, so a diagnostic must
+        // not reach it at all — `Log`'s fallback sink is stderr, i.e. the pane, and one line there
+        // scrolls the picture off its own grid (CONTRIBUTING.md rule 1). The reader's own
+        // `input:` lines are gated separately (`InputReader(forward:)`); this half catches the rest
+        // (a warning, the focus seam's line, the "no physical key for this character" notice).
         Log.configure(explicitPath: options.logPath,
-                      wantsLogging: options.debug || options.logPath != nil || options.statsJSON != nil)
+                      wantsLogging: options.debug || options.logPath != nil
+                        || options.statsJSON != nil || options.wall)
         if let where_ = Log.path {
-            FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
+            // Told to the log rather than to stderr in wall mode: this one line has a `\n` in it,
+            // and on the wall that newline on the last row scrolls everything.
+            if options.wall {
+                Log.write("krd: logging to \(where_)\n")
+            } else {
+                FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
+            }
         }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
         if let dir = options.replay, options.bench {
@@ -783,7 +795,19 @@ final class Desk {
         wallPane = pane
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
         // offsets still point past the end; clamping here is what keeps the shelf from going blank.
-        wallState?.clamp(displays: model.displays.count, windows: model.windows.count)
+        // The clamp takes the layout's *effective* page size: below 28 columns `WallLayout.make`
+        // shows fewer cards per page than `state.per` asks for, and clamping against the request
+        // would leave the last page unreachable (the bar jumps to the layout's `maxStart`, the clamp
+        // pulls it back). The layout is built from the state as it is now, then the state is
+        // clamped, then `drawWall()` builds it again — two pure calls on one number, no third
+        // definition of "how many cards fit".
+        if let state = wallState {
+            let layout = state.layout(cols: pane.cols, rows: pane.rows,
+                                      displays: model.displays.count,
+                                      windows: model.windows.count)
+            wallState?.clamp(displays: model.displays.count, windows: model.windows.count,
+                             per: layout.per)
+        }
         drawWall()
     }
 
@@ -1816,19 +1840,18 @@ final class Desk {
                 self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1,
                                                     sourceRect: .zero)
             },
-            // A wall never posts an event: there is no remote desktop behind it, and `--dry-run`
-            // already carries exactly this meaning ("parse input, never post a CGEvent"). This is
-            // not redundant with the key policy below, which only ever sees *control* bytes
-            // (`Input.swift:413`): a printable key arrives as `.text` and a kitty report as `.key`,
-            // and both post straight through `postKey`/`postUnicode` (`Input.swift:153,156`) — so a
-            // stray `q` on the wall was still posted as CGKeyCode 12. Measured in a pty session.
-            dryRun: options.dryRun || wallMode) { [weak self] in self?.shutdown() }
+            // Nothing is injected in wall mode either: there is no remote desktop behind a wall.
+            // That half is `forward:`, not `dryRun:` — `dryRun` still *logs* what it would have
+            // posted (`input: key code=12`), and that log goes to the pane, which is the wall.
+            // Measured in a pty session: one keypress scrolled the whole picture.
+            dryRun: options.dryRun, forward: !wallMode) { [weak self] in self?.shutdown() }
         // The wall has no keyboard vocabulary — every key belongs to a remote desktop that does not
         // exist in this mode (design §1/§5) — so nothing is delegated to the chrome's prefix state
-        // either. `0x1C` is the exception: `Input.swift` takes Ctrl-\ as "leave" after this closure
-        // is done, and that is the only key a wall still owes the user.
+        // either. `WallInput.consumes` is that policy, in `WallCanvas.swift`: it says no to every
+        // byte except `0x1C`, which `Input.swift` takes as "leave" after this closure is done and
+        // which is the only key a wall still owes the user.
         reader.onChromeKey = { [weak self] byte in
-            guard !wallMode else { return byte != 0x1C }
+            guard !wallMode else { return WallInput.consumes(byte) }
             return self?.chromeKey(byte) ?? false
         }
         reader.onChromeClick = { [weak self] row, col, wheel in
@@ -1963,7 +1986,7 @@ final class Desk {
         // nil = header, band header, blank row, the gap column, a dead end of the bar: those
         // cells belong to the wall too, so the click ends here.
         guard let action = layout.action(row: row, col: col) else { return }
-        state.apply(action, displays: displays, windows: windows)
+        state.apply(action, displays: displays, windows: windows, per: layout.per)
         wallState = state
         switch action {
         case .enterStage(let index): enterFocus(.display(index))

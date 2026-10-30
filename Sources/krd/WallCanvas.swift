@@ -78,6 +78,17 @@ struct WallModel: Equatable {
     var windows: [OrderedWindow] = []
 }
 
+/// The wall's whole keyboard policy, in one named place: it is a *policy* (`--wall` has no
+/// keyboard vocabulary), not an accident of where the reader happens to route bytes.
+enum WallInput {
+    /// Every key belongs to a remote that does not exist; `Ctrl-\` is the one the reader still owes
+    /// the user (it becomes "quit" after this closure returns false). `0x1C` is spelled out rather
+    /// than derived from `Keys` because it is a *control byte* here, not a key code: the terminal
+    /// sends it as `.control(0x1C)` and `InputReader` reads it as "leave" once the chrome says it
+    /// does not own it.
+    static func consumes(_ byte: UInt8) -> Bool { byte != 0x1C }
+}
+
 /// The wall's cursor: which display is on stage, which page of windows is in the shelf, and
 /// whether the user has picked one (the footer then shows the way back).
 ///
@@ -108,17 +119,29 @@ struct WallState: Equatable {
     /// Pull both offsets back into range after the world changed under the wall (a display
     /// unplugged, a window closed). Called before every draw the model refresh triggers, so a
     /// stale `cardStart` cannot leave the shelf empty while six windows exist.
-    mutating func clamp(displays: Int, windows: Int) {
+    ///
+    /// `per` is the **effective** page size — `WallLayout.per`, i.e. what the layout actually put on
+    /// one page — not the state's requested `per`. Below 28 columns the layout shrinks its page to
+    /// keep a card readable, and clamping against the request would then compute a wider page than
+    /// the one on screen: `maxStart` would be smaller here than in the layout, so the last window
+    /// (or the last two) could not be reached by any click — the bar's shaft cell jumps to the
+    /// layout's `maxStart`, this clamp drags it back, and nothing moves. `max(1, per)` also keeps a
+    /// hostile `per: 0` from producing a negative range.
+    mutating func clamp(displays: Int, windows: Int, per: Int) {
         stageStart = Self.clamp(stageStart, 0, max(0, displays - 1))
-        cardStart = Self.clamp(cardStart, 0, max(0, windows - perPage))
+        cardStart = Self.clamp(cardStart, 0, max(0, windows - max(1, per)))
     }
 
     /// The click policy. Every payload is clamped again here even though `WallLayout` already
     /// clamped it: the state outlives the layout, and a pane resize between the click and the
     /// application must not be able to point the focus outside the model.
-    mutating func apply(_ action: WallAction, displays: Int, windows: Int) {
+    ///
+    /// `per` is `WallLayout.per` (the effective page size), for the reason spelled out on `clamp`:
+    /// the last page is `windows - per`, and "per" here and "per" in the layout have to be the same
+    /// number or the two disagree about how many cards fit.
+    mutating func apply(_ action: WallAction, displays: Int, windows: Int, per: Int) {
         let lastDisplay = max(0, displays - 1)
-        let lastPage = max(0, windows - perPage)
+        let lastPage = max(0, windows - max(1, per))
         switch action {
         case .enterStage(let i):
             // Entering a display also brings it on stage: the footer's "back" then returns to a
@@ -140,10 +163,6 @@ struct WallState: Equatable {
             focus = nil
         }
     }
-
-    /// One per page even for a hostile `per: 0`, so the clamps never divide by zero or produce a
-    /// negative range.
-    private var perPage: Int { max(1, per) }
 
     private static func clamp(_ value: Int, _ lo: Int, _ hi: Int) -> Int {
         min(max(value, lo), max(lo, hi))

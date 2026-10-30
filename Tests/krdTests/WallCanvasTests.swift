@@ -539,59 +539,64 @@ final class WallCanvasTests: XCTestCase {
 
     // MARK: the click state machine
 
+    /// `per:` is required, and it is `WallLayout.per` — the *effective* page size, i.e. exactly the
+    /// number the layout fits. In these three transitions the request and the effective page happen
+    /// to agree (3 is the default `WallState.per`, and the `.cardStep(3)` payloads below are the
+    /// same number), so `per: 3` is both; `testEveryWindowIsReachableOnANarrowPane` is the case
+    /// where they differ.
     func testStateStepsClampAtBothEnds() {
         var state = fixtureState()
-        state.apply(.stageStep(-1), displays: 3, windows: 7)
+        state.apply(.stageStep(-1), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.stageStart, 0, "a step back from the first display stops at 0")
-        state.apply(.stageStep(1), displays: 3, windows: 7)
+        state.apply(.stageStep(1), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.stageStart, 1)
-        state.apply(.stageStep(5), displays: 3, windows: 7)
+        state.apply(.stageStep(5), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.stageStart, 2, "the last display is displayCount - 1")
 
         XCTAssertEqual(state.cardStart, 0)
-        state.apply(.cardStep(-3), displays: 3, windows: 7)
+        state.apply(.cardStep(-3), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.cardStart, 0, "a page back from the first page stops at 0")
-        state.apply(.cardStep(3), displays: 3, windows: 7)
+        state.apply(.cardStep(3), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.cardStart, 3)
-        state.apply(.cardStep(3), displays: 3, windows: 7)
+        state.apply(.cardStep(3), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.cardStart, 4, "one page past the end stops at windowCount - per")
-        state.apply(.cardStep(3), displays: 3, windows: 7)
+        state.apply(.cardStep(3), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.cardStart, 4, "and stays there")
         // Fewer windows than one page: there is nothing to scroll in either direction.
-        state.apply(.cardStep(-3), displays: 3, windows: 2)
+        state.apply(.cardStep(-3), displays: 3, windows: 2, per: 3)
         XCTAssertEqual(state.cardStart, 0)
-        state.apply(.cardStep(3), displays: 3, windows: 2)
+        state.apply(.cardStep(3), displays: 3, windows: 2, per: 3)
         XCTAssertEqual(state.cardStart, 0)
     }
 
     func testStateJumpsSetTheStart() {
         var state = fixtureState()
-        state.apply(.stageJump(2), displays: 3, windows: 7)
+        state.apply(.stageJump(2), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.stageStart, 2)
-        state.apply(.cardJump(4), displays: 3, windows: 7)
+        state.apply(.cardJump(4), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.cardStart, 4)
         // A jump carries a proportion computed from the bar, so it is clamped, never trusted.
-        state.apply(.stageJump(99), displays: 3, windows: 7)
+        state.apply(.stageJump(99), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.stageStart, 2)
-        state.apply(.cardJump(-5), displays: 3, windows: 7)
+        state.apply(.cardJump(-5), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.cardStart, 0)
     }
 
     func testStateEnterSetsFocusAndBackClearsIt() {
         var state = fixtureState()
-        state.apply(.enterStage(2), displays: 3, windows: 7)
+        state.apply(.enterStage(2), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.focus, WallState.Focus.display(2))
         XCTAssertEqual(state.stageStart, 2, "entering a display also brings it on stage")
-        state.apply(.enterCard(5), displays: 3, windows: 7)
+        state.apply(.enterCard(5), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.focus, WallState.Focus.window(5))
         XCTAssertEqual(state.cardStart, 0, "entering a card must not move the shelf")
-        state.apply(.back, displays: 3, windows: 7)
+        state.apply(.back, displays: 3, windows: 7, per: 3)
         XCTAssertNil(state.focus)
         XCTAssertEqual(state.cardStart, 0)
         // The payloads are indices into the whole list, and they are clamped to the model.
-        state.apply(.enterCard(99), displays: 3, windows: 7)
+        state.apply(.enterCard(99), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.focus, WallState.Focus.window(6))
-        state.apply(.enterStage(99), displays: 3, windows: 7)
+        state.apply(.enterStage(99), displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.focus, WallState.Focus.display(2))
         XCTAssertEqual(state.stageStart, 2)
     }
@@ -601,13 +606,74 @@ final class WallCanvasTests: XCTestCase {
         state.stageStart = 2
         state.cardStart = 4
         // A monitor unplugged and the windows closed while the wall was showing page two.
-        state.clamp(displays: 1, windows: 2)
+        state.clamp(displays: 1, windows: 2, per: 3)
         XCTAssertEqual(state.stageStart, 0)
         XCTAssertEqual(state.cardStart, 0)
         // The rack grew again: the clamp never invents an offset past the end.
-        state.clamp(displays: 3, windows: 7)
+        state.clamp(displays: 3, windows: 7, per: 3)
         XCTAssertEqual(state.stageStart, 0)
         XCTAssertEqual(state.cardStart, 0)
+    }
+
+    /// The wall has no keyboard vocabulary: every one of the 256 bytes belongs to a remote that does
+    /// not exist, except `Ctrl-\`, which the reader still turns into "quit". A consumed key must
+    /// never reach `postKey`/`postUnicode` — and on the wall it must not even be *logged* as injected,
+    /// because that log's sink is the pane the wall is drawn on (`InputReader(forward:)`).
+    ///
+    /// This pins the policy table; `WallProcessTests` pins the bytes that actually reach the tty.
+    func testTheWallConsumesEveryKeyExceptQuit() {
+        var passedBack: [UInt8] = []
+        for byte in UInt8.min...UInt8.max where !WallInput.consumes(byte) {
+            passedBack.append(byte)
+        }
+        XCTAssertEqual(passedBack, [0x1C], "Ctrl-\\ is the only byte the wall hands back to the reader")
+    }
+
+    /// The bug this test exists for: the shelf was clamped against the *requested* page size while
+    /// `WallLayout.make` shrinks its page to keep a card readable, so below 28 columns the two
+    /// disagreed about `maxStart`. 27x24/7 windows: the layout's last page starts at 5, the state
+    /// clamped to 4 — the bar's shaft cell computes `.cardJump(5)`, `apply` dragged it back to 4 and
+    /// nothing moved, so the last window (at 12–18 columns, the last two) could not be reached by
+    /// any click at all.
+    ///
+    /// One pass per pane width, starting from the landing page: step a whole page until the shelf
+    /// stops moving, and require the stop to *be* the layout's last page, with the last window on
+    /// it. Then the same place through a jump, which is what a click on the shaft actually sends.
+    func testEveryWindowIsReachableOnANarrowPane() {
+        let windows = 7, displays = 3, rows = 24
+        for cols in 12...60 {
+            var state = fixtureState()              // cardStart = 0: the landing page
+            let layout = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+            // `.cardStep(per)` is what the bar's `▼` sends (design §5: one page is one step).
+            for _ in 0..<64 {                        // the guard only keeps a broken clamp from spinning
+                let before = state.cardStart
+                state.apply(.cardStep(layout.per), displays: displays, windows: windows,
+                            per: layout.per)
+                if state.cardStart == before { break }
+            }
+            let lastPage = layout.bar.cards.maxStart
+            XCTAssertEqual(state.cardStart, lastPage,
+                           "\(cols)x\(rows): the shelf stops at \(state.cardStart), the layout's last "
+                           + "page is \(lastPage) (per \(layout.per) of \(windows))")
+            XCTAssertGreaterThan(state.cardStart + layout.per, windows - 1,
+                                 "\(cols)x\(rows): window \(windows) is not on the final page")
+            var jumped = fixtureState()
+            jumped.apply(.cardJump(lastPage), displays: displays, windows: windows, per: layout.per)
+            XCTAssertEqual(jumped.cardStart, state.cardStart,
+                           "\(cols)x\(rows): a jump to the layout's maxStart must land there")
+            // And through the real click route, shaft cell by shaft cell: what the layout's own hit
+            // table computes must be what the state accepts. This is the cell the review clicked.
+            let segment = layout.bar.cards
+            guard segment.scrollable, segment.rect.rows >= 3 else { continue }
+            for row in (segment.rect.row + 1)..<segment.rect.maxRow {
+                guard let action = layout.action(row: row, col: layout.barCol) else { continue }
+                var clicked = fixtureState()
+                clicked.apply(action, displays: displays, windows: windows, per: layout.per)
+                XCTAssertEqual(clicked.cardStart,
+                               segment.jumpTarget(shaftOffset: row - segment.rect.row - 1),
+                               "\(cols)x\(rows): shaft cell \(row) jumps where the state refuses to go")
+            }
+        }
     }
 
     // MARK: helpers
