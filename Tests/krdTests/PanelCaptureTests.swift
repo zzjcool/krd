@@ -115,4 +115,19 @@ final class PanelCaptureTests: XCTestCase {
             XCTAssertLessThanOrEqual(label.count, 9, "\(label) will not fit a narrow card")
         }
     }
+
+    /// A capture is never asked for more pixels than the source has: ScreenCaptureKit pads the rest
+    /// with black instead of upscaling, which is what put the desktop in the top-left corner of the
+    /// stage inside a black frame (and why a *larger* request made the desktop look *smaller*).
+    func testTheCaptureRequestIsCappedAtTheSourceSize() {
+        let display = CGSize(width: 1920, height: 1200)
+        XCTAssertEqual(PanelCapture.fitted((2431, 1518), within: display).w, 1920)
+        XCTAssertEqual(PanelCapture.fitted((2431, 1518), within: display).h,
+                       Int((1518.0 * 1920.0 / 2431.0).rounded()), "same aspect, capped width")
+        // Smaller than the source: untouched, the capture downscales as asked.
+        XCTAssertEqual(PanelCapture.fitted((918, 660), within: display).w, 918)
+        XCTAssertEqual(PanelCapture.fitted((918, 660), within: display).h, 660)
+        // A source with no size (a display reporting 0) cannot cap anything.
+        XCTAssertEqual(PanelCapture.fitted((100, 50), within: .zero).w, 100)
+    }
 }

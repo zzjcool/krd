@@ -84,8 +84,18 @@ enum WallPictures {
                 case let .window(id):
                     image = try await PanelCapture.window(id: id, width: width, height: height)
                 }
-                guard let raster = PanelRaster.rgb(image) else {
+                // Exactly the panel's pixels, whatever the capture could give: see `PanelRaster.rgb`.
+                guard let raster = PanelRaster.rgb(image,
+                                                   width: panel.fit.contentWidth,
+                                                   height: panel.fit.contentHeight) else {
                     throw PanelCaptureError.noPixelBuffer
+                }
+                if image.width != panel.fit.contentWidth || image.height != panel.fit.contentHeight {
+                    // Worth one line: this is the difference between "the desktop fills its box" and
+                    // "the desktop sits in the top-left corner of it" on a terminal that does not
+                    // scale a placement to its cells.
+                    Log.write("krd: wall slot \(panel.slot) capture \(image.width)x\(image.height) px, "
+                              + "scaled to \(panel.fit.contentWidth)x\(panel.fit.contentHeight) px\n")
                 }
                 let canvas = PanelImage.compose(
                     content: raster.pixels,

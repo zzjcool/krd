@@ -51,7 +51,12 @@ struct PanelCapture {
             guard let window = find(id, in: content.windows, id: \.windowID) else {
                 throw PanelCaptureError.windowGone
             }
-            return SCContentFilter(desktopIndependentWindow: window)
+            // A window's own pixels: its frame is in points, so the backing scale of the sharpest
+            // screen is the most it can have. Asking for more is what produces black padding.
+            let scale = NSScreen.screens.map(\.backingScaleFactor).max() ?? 2
+            let native = CGSize(width: window.frame.width * scale,
+                                height: window.frame.height * scale)
+            return (SCContentFilter(desktopIndependentWindow: window), native)
         }
     }
 
@@ -65,8 +70,26 @@ struct PanelCapture {
             guard let display = find(id, in: content.displays, id: \.displayID) else {
                 throw PanelCaptureError.failed("display \(id) is not in the shareable list")
             }
-            return SCContentFilter(display: display, excludingWindows: [])
+            let native = CGSize(width: display.width, height: display.height)
+            return (SCContentFilter(display: display, excludingWindows: []), native)
         }
+    }
+
+    /// The largest request the source can actually answer, at the caller's aspect.
+    ///
+    /// **ScreenCaptureKit does not upscale**: asked for more pixels than the source has, it draws the
+    /// source at its own size anchored top-left and pads the rest with black. A 1920x1200 display
+    /// asked for a 2431x1518 picture therefore arrives as a 1920-wide desktop in the corner of a
+    /// black canvas - which the reader sees as "the desktop fills only the top-left of the stage",
+    /// and which gets *worse* the larger the picture is asked for (a 2x request would make the
+    /// desktop occupy a quarter of the frame). So the request is capped here and the single upscale
+    /// to the panel's exact pixels happens in `PanelRaster.rgb(_:width:height:)`.
+    static func fitted(_ size: (w: Int, h: Int), within native: CGSize) -> (w: Int, h: Int) {
+        guard native.width >= 1, native.height >= 1, size.w > 0, size.h > 0 else { return size }
+        let scale = min(1, min(native.width / Double(size.w), native.height / Double(size.h)))
+        guard scale < 1 else { return size }
+        return (max(1, Int((Double(size.w) * scale).rounded())),
+                max(1, Int((Double(size.h) * scale).rounded())))
     }
 
     /// First item whose id matches, or `nil`.
@@ -83,21 +106,30 @@ struct PanelCapture {
     /// Enumerate, filter, shoot. Only the filter differs between a window and a display, so both
     /// callers share this rather than repeating the configuration and the error policy.
     private static func capture(width: Int, height: Int,
-                                filter: (SCShareableContent) throws -> SCContentFilter) async throws -> CGImage {
+                                filter: (SCShareableContent) throws
+                                    -> (SCContentFilter, CGSize)) async throws -> CGImage {
         do {
             // The same list the wall's cards come from, for the same reason: a window that is not
             // on screen is not a card, so it is not captured either.
             let content = try await SCShareableContent.excludingDesktopWindows(false,
                                                                               onScreenWindowsOnly: true)
+            let (filter, native) = try filter(content)
+            let asked = fitted((width, height), within: native)
+            if asked.w != width || asked.h != height {
+                // Worth a line, because the picture will now be upscaled by us instead: this is the
+                // path that used to arrive as a black canvas with the desktop in one corner.
+                Log.write("krd: capture \(width)x\(height) px asked, \(asked.w)x\(asked.h) px from a "
+                          + "\(Int(native.width))x\(Int(native.height)) px source\n")
+            }
             let configuration = SCStreamConfiguration()
-            configuration.width = width
-            configuration.height = height
+            configuration.width = asked.w
+            configuration.height = asked.h
             configuration.showsCursor = false
             // The scale is deliberately left alone: `pointPixelScale` would turn `width`/`height`
             // from the picture's size into a hint, and the measured fit (aspect kept, anchored
             // top-left, black padding) is exactly what the caller already compensated for.
 
-            let image = try await SCScreenshotManager.captureImage(contentFilter: filter(content),
+            let image = try await SCScreenshotManager.captureImage(contentFilter: filter,
                                                                    configuration: configuration)
             // The async import hands back a non-optional image, so the one unusable picture left
             // is an empty one; tiles and the encoder assume at least one pixel and would trap.
