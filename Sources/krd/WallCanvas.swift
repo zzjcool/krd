@@ -115,6 +115,14 @@ struct WallSlotPaints: Equatable {
     /// the answer (TROUBLESHOOTING 23b/23c). Empty means the caller did not say, and the mask falls
     /// back to the old wording.
     var maskReasons: [Int: String] = [:]
+    /// The cells each card's picture actually occupies, when it has one. A card's box is as wide as
+    /// the page shares out; the picture inside it keeps its own aspect and is centred, so it can be
+    /// much narrower than the box. Its caption goes under the *picture* - under the box's left edge
+    /// it would sit in the empty margin, reading as a label for nothing (design §6.6: one caption
+    /// row under each picture, text never under a placement).
+    var cardPictureCells: [Int: CellRect] = [:]
+
+    func pictureCells(_ slot: Int) -> CellRect? { cardPictureCells[slot] }
 
     func maskReason(_ slot: Int) -> String? { maskReasons[slot] }
 
@@ -438,7 +446,7 @@ final class WallCanvas {
         drawDivider(&grid, layout: layout)
         drawBand(&grid, model: model, layout: layout)
         drawCards(&grid, model: model, layout: layout, paints: paints)
-        drawCardCaptions(&grid, model: model, layout: layout)
+        drawCardCaptions(&grid, model: model, layout: layout, paints: paints)
         drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice,
                    demoNote: paints.demoNote)
         drawBar(&grid, layout: layout)
@@ -618,14 +626,24 @@ final class WallCanvas {
 
     /// `▣ Safari — Apple…` — the same width as its card, so a click on the caption enters the card
     /// right above it (design §1: "点图或点说明都进入").
-    private func drawCardCaptions(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
-        for (slot, rect) in layout.cardCaptions.enumerated() {
-            guard rect.rows == 1, !rect.isEmpty else { continue }
+    private func drawCardCaptions(_ grid: inout Grid, model: WallModel, layout: WallLayout,
+                                 paints: WallSlotPaints) {
+        for (slot, box) in layout.cardCaptions.enumerated() {
+            guard box.rows == 1, !box.isEmpty else { continue }
             let index = layout.cardStart + slot
             guard model.windows.indices.contains(index) else { continue }
             let window = model.windows[index]
             let title = wallTitle(window) ?? "window \(index + 1)"
             let text = "\(symbols.window) \(window.app) \(symbols.dash) \(title)"
+            // Under the picture when there is one, under the box otherwise (a mask fills its box,
+            // so there the two are the same rectangle). A picture narrower than its box would
+            // otherwise leave its caption out in the margin.
+            var rect = box
+            if let cells = paints.pictureCells(slot), cells.cols >= 8 {
+                let col = max(box.col, min(cells.col, box.maxCol))
+                rect = CellRect(col: col, row: box.row,
+                                cols: max(0, min(cells.cols, box.maxCol - col + 1)), rows: 1)
+            }
             grid.text(DisplayWidth.truncate(text, to: rect.cols), row: rect.row, col: rect.col,
                       .plain, limit: rect.cols)
         }

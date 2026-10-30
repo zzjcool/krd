@@ -494,19 +494,42 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertEqual(clamped.action(row: clamped.cards[2].row, col: clamped.cards[2].col), .enterCard(6))
     }
 
-    func testSingleCardUsesTheLeftSlotOnly() {
+    /// **A lone card takes the band, not one `per`-th of it.**
+    ///
+    /// This used to pin the opposite ("left-aligned, one card wide"), and that is what a reader sees
+    /// as "the picture is off to the left with a wall of black beside it" (§6.7: reach the width, and
+    /// when the picture cannot, centre it). `per` is a maximum, so a page with fewer cards spreads
+    /// over the same band: the card box is full width and the picture keeps its aspect inside it.
+    func testSingleCardTakesTheWholeBand() {
         let l = layout(137, 44, windows: 1, per: 3)
         XCTAssertEqual(l.cards.count, 1)
         XCTAssertEqual(l.cardCaptions.count, 1)
-        XCTAssertEqual(l.cards[0].col, 1, "the single card is left-aligned")
-        XCTAssertEqual(l.cards[0].cols, 43, "…and still one card wide")
+        XCTAssertEqual(l.cards[0].col, 1, "the band starts where it always did")
+        XCTAssertEqual(l.cards[0].cols, l.contentCols, "one card, the whole content width")
+        XCTAssertEqual(l.cardCaptions[0].cols, l.contentCols)
         XCTAssertEqual(l.action(row: l.cards[0].row, col: 1), .enterCard(0))
-        // The empty slots to the right are not hit-testable.
-        XCTAssertNil(l.action(row: l.cards[0].row, col: l.cards[0].maxCol + 2))
-        XCTAssertNil(l.action(row: l.cards[0].row, col: 100))
-        XCTAssertNil(l.slot(row: l.cards[0].row, col: 100))
-        XCTAssertNil(l.action(row: l.cardCaptions[0].row, col: 100))
+        XCTAssertEqual(l.action(row: l.cards[0].row, col: l.cards[0].maxCol - 1), .enterCard(0),
+                       "the whole card is the target, not only its first cells")
+        XCTAssertNil(l.slot(row: l.cards[0].row, col: l.barCol), "the bar is never a card")
         XCTAssertFalse(l.bar.cards.scrollable, "one window does not scroll")
+    }
+
+    /// Two cards on a page follow the same rule: they share the band evenly instead of leaving the
+    /// third slot empty. A full page is untouched (`per` cards == `per` widths).
+    func testAPartialPageSharesTheBandEvenly() {
+        let two = layout(137, 44, windows: 2, per: 3)
+        XCTAssertEqual(two.cards.count, 2)
+        XCTAssertEqual(two.cards[0].cols, two.cards[1].cols)
+        // Integer division leaves the remainder (here one column) rather than an empty slot.
+        XCTAssertEqual(two.cards[1].maxCol, two.contentCols, "the second card ends at the band's edge")
+        XCTAssertEqual(two.cards[1].maxCol - two.cards[1].cols + 1, two.cards[0].maxCol + 1 + two.cardGap,
+                       "one gap between them")
+        XCTAssertEqual(two.cards[0].cols, (two.contentCols - two.cardGap) / 2)
+
+        let full = layout(137, 44, windows: 7, per: 3)
+        XCTAssertEqual(full.cards.count, 3)
+        XCTAssertEqual(full.cards[0].cols, (full.contentCols - 2 * full.cardGap) / 3,
+                       "a full page keeps the per-shaped width")
     }
 
     func testStartsAreClamped() {

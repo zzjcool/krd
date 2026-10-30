@@ -1360,6 +1360,7 @@ final class Desk {
                 paints.maskReasons[panel.slot] = failure.maskLabel
             } else {
                 paints.mark(slot: panel.slot, .picture)
+                if panel.slot > 0 { paints.cardPictureCells[panel.slot] = panel.rect }
             }
         }
         if options.demo {

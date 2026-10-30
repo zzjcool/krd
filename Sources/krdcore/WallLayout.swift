@@ -335,10 +335,17 @@ public struct WallLayout: Equatable {
         var cards: [CellRect] = []
         var cardCaptions: [CellRect] = []
         if cardH > 0 {
+            // **The cards on a page share its width, not `per`'s.** With three windows to a page a
+            // lone window got one third of the band and the other two thirds stayed wall: a picture
+            // hugging the left edge with 80 columns of nothing beside it reads as "the card is
+            // misplaced", not as "this band has one card". `per` is an upper bound on how many fit,
+            // so a page of one is one full-width card - the picture inside it keeps its aspect and
+            // ends up centred, which is the same rule the stage follows (§6.7).
+            let pageWinW = max(1, cardWidth(content, pageCount, gap: gap))
             for i in 0..<pageCount {
-                let col = 1 + i * (effectiveWinW + gap)
-                cards.append(clip(col: col, row: cardsTop, width: effectiveWinW, height: cardH))
-                cardCaptions.append(clip(col: col, row: cardsTop + cardH, width: effectiveWinW, height: 1))
+                let col = 1 + i * (pageWinW + gap)
+                cards.append(clip(col: col, row: cardsTop, width: pageWinW, height: cardH))
+                cardCaptions.append(clip(col: col, row: cardsTop + cardH, width: pageWinW, height: 1))
             }
             row += cardH + 1
         }

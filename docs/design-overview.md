@@ -145,6 +145,14 @@ picture cannot use back to the cards, which widen into them (137×73: 42 + 24).
   card is a box, not a shape: the picture inside keeps its own aspect and is usually width-limited
   there. `idealCardH = winW / (1.62 × cellAspect)` is the height a *tall* band reaches, and by then the
   cards have widened (fewer per page) so their pictures grow with the box.
+- **A page's cards share the page's width, not `per`'s.** `per` is an upper bound on how many fit, so a page
+  with fewer cards (`pageCount < per`) gives each card `floor((content - (pageCount-1) × gap) / pageCount)`
+  cells instead of a `per`-sized slot. A lone window used to get one third of the band and the other two
+  thirds stayed wall: a picture hugging the left edge with 80 columns of nothing beside it, which reads as
+  "the card is in the wrong place", not as "this band has one card". The box is now the band, the picture
+  inside it keeps its own aspect and is centred (a lone 16:9 window in a 137×44 pane sits with equal margins
+  either side), and its caption follows the *picture* rather than the box - under the box's left edge it
+  would label empty wall.
 - Between two cards: `cardGap = max(1, content / 45)` cells - 3 at 137 columns, 1 on a 60-column pane. One
   cell was the first version and read as the cards touching; the gap scales with the width because air on a
   narrow pane is paid for with a card (`per` drops from 4 to 3 at 60 columns if the gap is 3). At 137 columns
