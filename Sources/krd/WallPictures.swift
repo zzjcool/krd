@@ -60,7 +60,13 @@ enum WallPictures {
                 }
                 pictures.append(Picture(panel: panel, pixels: canvas))
             } catch {
-                failures[panel.slot] = PanelCapture.classify(error)
+                let reason = PanelCapture.classify(error)
+                failures[panel.slot] = reason
+                // A mask is all the reader sees, and it is the same mask for every reason, so a
+                // report of "no pictures in the VM" could not be answered from the pane - the one
+                // thing that separates a permission answer from a transient stream fault is the
+                // classified reason plus the raw error (TROUBLESHOOTING 23b/23c).
+                Log.write("krd: wall slot \(panel.slot) has no picture: \(reason); \(error)\n")
             }
         }
         return (pictures, failures)

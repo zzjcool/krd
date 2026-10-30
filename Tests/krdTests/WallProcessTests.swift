@@ -227,6 +227,57 @@ final class WallProcessTests: XCTestCase {
         // leave, and the panels after it are the wall's (ids 5000+/9000+, never the mirror's).
     }
 
+    /// A mirror handed over from the wall must draw its top bar, and `--mock` is how that is tested
+    /// without a grant: the mock source replaces the pixels, nothing else.
+    ///
+    /// WHY this exists: `applyLayout` laid the chrome out only `if chromeEnabled` (the `--dev` layer)
+    /// instead of `if chromeAvailable` (either layer), so a handed-over mirror — which runs `--bar`
+    /// with no `--dev` — never got a `chromeGeometry`, `drawChrome` bailed on it, and the bar with
+    /// the `[ - ]` button was simply absent. Nothing failed: the picture was correct and the way back
+    /// was gone. The merge of #76 is where the gate flipped.
+    func testAMockMirrorDrawsItsBar() throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        // `--wall-at` is the whole switch: it is what a mirror handed over by the wall carries, and
+        // it is what turns the bar on by default (`barEnabled`).
+        child.arguments = ["--mock", "--wall-at", "0:0", "--pane", "60x24", "--cell", "8x20"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+
+        let bar = pump(master, into: &stream, timeoutMs: 5_000) { bytes in
+            String(decoding: bytes, as: UTF8.self).contains("[ - ]")
+        }
+        XCTAssertTrue(bar, "the mirror drew no bar; the pane has \(stream.count) B, tail: "
+                      + String(decoding: stream.suffix(400), as: UTF8.self).debugDescription)
+        // The button is the way back, and `Ctrl-\\` is the same path (`shutdown`): with `--wall-at`
+        // the process does not exit, it execs the wall, so the marker is the wall's own header and
+        // not the child's exit status.
+        let before = stream.count
+        writeAll(master, [0x1C])
+        let handedBack = pump(master, into: &stream, timeoutMs: 8_000) { bytes in
+            String(decoding: bytes[before...], as: UTF8.self).contains(" windows · ")
+        }
+        XCTAssertTrue(handedBack, "Ctrl-\\ did not hand the pane back to the wall; tail: "
+                      + String(decoding: stream.suffix(300), as: UTF8.self).debugDescription)
+    }
+
     // MARK: pty plumbing
 
     /// A pty with a real window size, already raw on our side: the child sets its own termios when

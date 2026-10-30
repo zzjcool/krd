@@ -1964,7 +1964,11 @@ final class Desk {
                                    bpp: writer.format.bytesPerPixel, scale: effectiveScale,
                                    source: Viewport.layoutSource(crop: crop, full: fullRect),
                                    area: area)
-        if chromeEnabled {
+        // `chromeAvailable`, not `chromeEnabled`: the bar alone is enough reason to lay the chrome
+        // out (a handed-over mirror runs `--bar` with no `--dev`), and gating on the `--dev` flag
+        // here left `chromeGeometry` nil, so `drawChrome` bailed and the bar never appeared. Caught
+        // by `testAMockMirrorDrawsItsBar`; the merge of #76 is where this gate regressed.
+        if chromeAvailable {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
                                            imageCols: layout.originCol - 1 + layout.paneCols,
