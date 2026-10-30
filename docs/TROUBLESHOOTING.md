@@ -330,6 +330,7 @@ the wall caps its request and upscales itself; two transports, two rules.
 | thin seams **every tile row** (10 rows → 9 lines), evenly spaced | frame shorter than the cell box: `grid wants` and `frame` disagree in the log |
 | seams only at the picture's right/bottom edge | the whole picture is short, not per tile: the placement is smaller than the box (§23e) |
 | one black band along one edge | aspect mismatch, which is the terminal's own cells - not a seam |
+| seams in **both** directions (14 vertical + 9 horizontal on a 118x38-cell page), picture "cut up" | this is `--scale < 1` on a terminal that draws one image pixel per device pixel: every tile shows at `scale` of its slot. The placeholder grid cannot stretch; the pixel placement path can. `--scale < 1` now picks it automatically (`ScaleTransportTests`); run `--no-placeholders` by hand if you have an older build |
 
 
 ### 23e. The picture fills part of its box / sits in the top-left corner

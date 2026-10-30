@@ -140,8 +140,12 @@ flags that make the difference become the next fix.
   unkillable (`Ss+`, `kill` ignored), and the *next* krd hangs at its last log line — usually right
   after `capture … asked`. Fix: `ssh krd-vm 'pkill -9 -x krd'` **and** `caffeinate -u -t 10` before
   starting krd; a blank wall with `placeholder cells: 0` and no `wall slot` line is this.
-- **Rex draws an image one image pixel per device pixel** and does not scale it into `c`/`r`. So the
-  picture's pixels must equal its cells' device pixels; `c`/`r` alone do not save a wrong size.
+- **Rex draws an image one image pixel per device pixel.** For *placeholders* (`U=1`) that means it
+  does not fit the image into the rectangle at all, so the picture's pixels must equal its cells'
+  device pixels — and `--scale < 1` there draws every tile at a fraction of its slot: 15x10 tiles →
+  14 vertical seams and 9 horizontal ones ("画面被割裂"). The **pixel** placement path (`a=p` with
+  `c`/`r`) *is* scaled by Rex, which is why `--scale` used to work and now picks that path itself
+  (`Desk.scaleNeedsPixelPlacements`).
 - **The pty's `ws_xpixel` is in the same unit as the terminal's `CSI 16t` answer**, which is not
   necessarily device pixels — Rex reports device px, older answers were points. `--cell` / `--dpr`
   override; the `--demo` footer prints which number the frame used.

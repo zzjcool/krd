@@ -217,3 +217,102 @@ final class MirrorBarDefaultTests: XCTestCase {
                        "--no-bar overrides the wall's default")
     }
 }
+
+/// One pane, two pages: the hand-over is a new process, so every flag that is not in its `argv` is a
+/// default again. `--scale` and `--quality` are exactly the flags a reader sets *because* the link is
+/// slow, and the page that streams at 20 fps (the display mirror) used to forget both of them.
+final class StickyArgumentTests: XCTestCase {
+    private func options(_ arguments: [String]) -> Options {
+        parseArguments(["/usr/local/bin/krd"] + arguments)
+    }
+
+    func testCheapSettingsSurviveBothDirections() {
+        let typed = options(["--scale", "0.8", "--quality", "70", "--fps", "10",
+                             "--cell", "17x33", "--dpr", "1", "--square", "--cursor"])
+        let sticky = Desk.stickyArguments(typed)
+        XCTAssertEqual(sticky, ["--cell", "17x33", "--scale", "0.8", "--quality", "70",
+                                "--fps", "10", "--dpr", "1", "--square", "--cursor"])
+
+        // The wall's way back and the mirror's way forward both carry it, and re-parsing has to give
+        // the same answer: a flag that means something else in the other mode is worse than none.
+        for arguments in [Desk.wallArguments(at: (1, 2), sticky: sticky),
+                          Desk.mirrorArguments(windowID: nil, cell: nil, at: (1, 2), sticky: sticky)] {
+            let again = options(arguments)
+            XCTAssertEqual(again.scale, 0.8, "\(arguments)")
+            XCTAssertTrue(again.scalePinned)
+            XCTAssertEqual(again.quality.value, 70)
+            XCTAssertTrue(again.qualityPinned)
+            XCTAssertEqual(again.fps, 10)
+            XCTAssertEqual(again.dpr, 1)
+            XCTAssertEqual(again.cell?.w, 17)
+            XCTAssertTrue(again.square)
+            XCTAssertTrue(again.drawsCursor)
+        }
+    }
+
+    func testTheDefaultsHandOverNothing() {
+        // A reader who typed nothing must not get a command line that pins the defaults: `--scale
+        // auto` and the adaptive quality governor have to stay free to react.
+        XCTAssertEqual(Desk.stickyArguments(Options()), [])
+        XCTAssertEqual(Desk.wallArguments(at: (0, 0)), ["--wall", "--wall-at", "0:0"])
+    }
+
+    func testForcedTransportAndQualityAutoAreCarried() {
+        let sticky = Desk.stickyArguments(options(["--no-placeholders", "--quality", "auto"]))
+        XCTAssertEqual(sticky, ["--quality", "auto", "--no-placeholders"])
+        let again = options(["krd"] + Desk.wallArguments(at: nil, sticky: sticky))
+        XCTAssertEqual(again.placeholders, false)
+        XCTAssertTrue(again.qualityAuto)
+    }
+
+    func testOnePageFlagsAreNotCarried() {
+        // `--zoom` and `--demo` mean nothing to the wall (or the opposite of something), so they stay
+        // where they were typed rather than following the reader around.
+        let sticky = Desk.stickyArguments(options(["--zoom", "2", "--demo", "--dev"]))
+        XCTAssertEqual(sticky, [])
+    }
+}
+
+extension StickyArgumentTests {
+    /// Diagnostics follow their file, never the picture: a mirror that inherits `--debug` but not
+    /// `--log` writes its `frame ... px` line *onto the reader's screen*, which is also the picture.
+    func testDebugIsCarriedOnlyWithALogFile() {
+        XCTAssertEqual(Desk.stickyArguments(options(["--debug"])), [])
+        XCTAssertEqual(Desk.stickyArguments(options(["--debug", "--log", "/tmp/krd.log"])),
+                       ["--log", "/tmp/krd.log", "--debug"])
+    }
+}
+
+/// A pinned `--scale` below 1 has to leave the placeholder transport behind, because a placeholder
+/// grid draws one image pixel per device pixel and cannot stretch a smaller frame into its cells.
+/// Measured on Rex at `--scale 0.8`: 15x10 tiles each at 80 % of its slot - 14 vertical seams and 9
+/// horizontal ones, which the reader described as "画面被割裂".
+final class ScaleTransportTests: XCTestCase {
+    func testScaleBelowOnePicksPixelPlacementsOnADeviceCellTerminal() {
+        XCTAssertTrue(Desk.scaleNeedsPixelPlacements(placeholdersForced: nil, pinnedScale: 0.8,
+                                                     deviceCell: true))
+    }
+
+    func testFullScaleKeepsPlaceholders() {
+        // The default. Placeholders are sharp and cheap on the image budget; nothing to give up.
+        XCTAssertFalse(Desk.scaleNeedsPixelPlacements(placeholdersForced: nil, pinnedScale: 1,
+                                                      deviceCell: true))
+        XCTAssertFalse(Desk.scaleNeedsPixelPlacements(placeholdersForced: nil, pinnedScale: nil,
+                                                      deviceCell: true))
+    }
+
+    func testATerminalThatStretchesKeepsPlaceholders() {
+        // A cell reported in points (kitty: 8x16 for a 16x33 device cell) means the terminal scales
+        // images itself, so `--scale` there is bandwidth only - the picture stays in its cells.
+        XCTAssertFalse(Desk.scaleNeedsPixelPlacements(placeholdersForced: nil, pinnedScale: 0.8,
+                                                      deviceCell: false))
+    }
+
+    func testForcingPlaceholdersWins() {
+        // An explicit --placeholders is an answer to this question; a scale cannot overrule it.
+        XCTAssertFalse(Desk.scaleNeedsPixelPlacements(placeholdersForced: true, pinnedScale: 0.8,
+                                                      deviceCell: true))
+        XCTAssertFalse(Desk.scaleNeedsPixelPlacements(placeholdersForced: false, pinnedScale: 0.8,
+                                                      deviceCell: true))
+    }
+}

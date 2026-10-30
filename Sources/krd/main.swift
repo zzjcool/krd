@@ -561,6 +561,8 @@ final class Desk {
     /// `options.scale` and never changes (issue #64).
     private var effectiveScale = 1.0
     private var governor = ScaleGovernor()
+    /// Whether the one line about a placeholder grid refusing to lose pixels has been written.
+    private var reportedScaleRefusal = false
     /// `--quality auto`: colour first, then frame rate. Resolution stays `ScaleGovernor`'s, and this
     /// governor has to say `handOver` before that one may act.
     private var qualityGovernor = QualityGovernor()
@@ -808,6 +810,15 @@ final class Desk {
             placeholderTiles = forced && !(options.bench || options.selftest)
         } else if !(options.bench || options.selftest) {
             placeholderTiles = TermGeometry.supportsPlaceholders() == true
+        }
+        if Self.scaleNeedsPixelPlacements(placeholdersForced: options.placeholders,
+                                          pinnedScale: options.scalePinned ? options.scale : nil,
+                                          deviceCell: Self.cellIsInDevicePixels(options)) {
+            placeholderTiles = false
+            Log.write("krd: --scale \(String(format: "%g", options.scale)) on a terminal that draws one image "
+                      + "pixel per device pixel:\n"
+                      + "         pixel placements, because a placeholder grid cannot stretch a smaller "
+                      + "frame into its cells\n")
         }
         if options.debug || options.placeholders != nil {
             Log.write("krd: tiles as \(placeholderTiles ? "unicode placeholders (U=1)" : "pixel-sized placements")\n")
@@ -1471,11 +1482,13 @@ final class Desk {
         case .display:
             // The stage is a whole display: the mirror shows the display the pointer is on, which is
             // the one the reader is looking at when they click it.
-            arguments = Self.mirrorArguments(windowID: nil, cell: options.cell, at: at)
+            arguments = Self.mirrorArguments(windowID: nil, cell: nil, at: at,
+                                             sticky: Self.stickyArguments(options))
         case .window(let index):
             guard wallModel.windows.indices.contains(index) else { return }
             arguments = Self.mirrorArguments(windowID: wallModel.windows[index].windowID,
-                                             cell: options.cell, at: at)
+                                             cell: nil, at: at,
+                                             sticky: Self.stickyArguments(options))
         }
         // A handed-over pane has no cursor: the wall that comes back starts on the plain grid, not
         // on a pick the reader made in a session that no longer exists.
@@ -1490,7 +1503,7 @@ final class Desk {
     /// would otherwise assume the built-in cell and draw a picture of the wrong size. `--wall-at` is
     /// where the wall was, i.e. where this process turns back into a wall.
     static func mirrorArguments(windowID: CGWindowID?, cell: (w: Double, h: Double)?,
-                               at: (stage: Int, card: Int)?) -> [String] {
+                               at: (stage: Int, card: Int)?, sticky: [String] = []) -> [String] {
         var arguments = windowID.map { ["--window", String($0)] } ?? ["--mirror"]
         if let cell {
             arguments += ["--cell", "\(Int(cell.w))x\(Int(cell.h))"]
@@ -1498,20 +1511,86 @@ final class Desk {
         if let at {
             arguments += ["--wall-at", "\(at.stage):\(at.card)"]
         }
-        return arguments
+        return arguments + sticky
     }
 
     /// The wall's command line, as a mirror spells it on its way back. Pure, and the exact inverse of
     /// the parser — `wallArguments` then `parseArguments` has to be a round trip, or the reader
     /// returns to a different shelf than the one they left.
     static func wallArguments(at: (stage: Int, card: Int)?,
-                              exit: Int32 = 0, said: String? = nil) -> [String] {
+                              exit: Int32 = 0, said: String? = nil,
+                              sticky: [String] = []) -> [String] {
         var arguments = ["--wall"]
         if let at {
             arguments += ["--wall-at", "\(at.stage):\(at.card)"]
         }
         if exit != 0 {
             arguments += ["--said", String(exit), said ?? ""]
+        }
+        return arguments + sticky
+    }
+
+    /// Whether a pinned `--scale` below 1 has to abandon placeholders.
+    ///
+    /// WHY: a placeholder grid draws one image pixel per device pixel, so it cannot stretch a
+    /// smaller frame into its cells - measured on Rex with `--scale 0.8`: 15x10 tiles each occupying
+    /// 80 % of its slot, i.e. 14 vertical seams and 9 horizontal ones. A *pixel* placement (`a=p`
+    /// with `c`/`r`) is scaled by that terminal, which is what `--scale` always assumed. Pure, so the
+    /// one decision is a test rather than a screenshot.
+    static func scaleNeedsPixelPlacements(placeholdersForced: Bool?, pinnedScale: Double?,
+                                          deviceCell: Bool) -> Bool {
+        guard placeholdersForced == nil, let pinnedScale, pinnedScale < 0.999, deviceCell else {
+            return false
+        }
+        return true
+    }
+
+    /// Whether the cell reached us in *device* pixels - the pty answered `ws_xpixel`, or the operator
+    /// said `--cell`. That is the terminal that draws an image one image pixel per device pixel.
+    static func cellIsInDevicePixels(_ options: Options) -> Bool {
+        if options.cell != nil { return true }
+        let pty = TermGeometry.read()
+        return pty.pixelWidth > 0 && pty.pixelHeight > 0
+    }
+
+    /// The flags that say *how the picture is drawn*, which both pages of one pane have to agree on.
+    ///
+    /// WHY this exists: a hand-over is a new process, so every flag not in its `argv` is a default
+    /// again - and only `--cell`, `--wall-at`, `--said` and `--window` were carried. A reader who
+    /// started `krd --scale 0.8 --quality 70` because the link was slow got the cheap wall and then
+    /// clicked into the display page, which is the page that *streams* at 20 fps and forgot both
+    /// settings. The flags here are the ones the two modes read the same way; anything that means
+    /// something only on one page (`--zoom`, `--dev`, `--demo`) stays where it was typed.
+    static func stickyArguments(_ options: Options) -> [String] {
+        var arguments: [String] = []
+        if let cell = options.cell {
+            arguments += ["--cell", "\(Int(cell.w))x\(Int(cell.h))"]
+        }
+        if options.scalePinned {
+            arguments += ["--scale", String(format: "%g", options.scale)]
+        }
+        if options.qualityAuto {
+            arguments += ["--quality", "auto"]
+        } else if options.qualityPinned {
+            arguments += ["--quality", String(options.quality.value)]
+        }
+        if options.fps != Options().fps {
+            arguments += ["--fps", String(options.fps)]
+        }
+        if let dpr = options.dpr {
+            arguments += ["--dpr", String(format: "%g", dpr)]
+        }
+        if let placeholders = options.placeholders {
+            arguments.append(placeholders ? "--placeholders" : "--no-placeholders")
+        }
+        if options.square { arguments.append("--square") }
+        if options.drawsCursor { arguments.append("--cursor") }
+        // Diagnostics follow their file, never the picture: without `--log` the hand-over leaves
+        // `--debug` behind, because the next process's stderr *is* the picture - the mirror's first
+        // `frame ... px` line landed across the reader's screen the moment it was carried blindly.
+        if let path = options.logPath {
+            arguments += ["--log", path]
+            if options.debug { arguments.append("--debug") }
         }
         return arguments
     }
@@ -2213,6 +2292,18 @@ final class Desk {
     /// is not torn down and the terminal never loses its picture (issue #64).
     private func applyScaleChange(_ change: ScaleGovernor.Change) {
         guard options.scaleAuto, let geometry, change.to != effectiveScale else { return }
+        // With placeholders the frame's pixels *are* the picture's cells (design §6.9), so fewer of
+        // them leave the cells short - and a terminal that draws 1:1 shows that as a seam at every
+        // tile row (TROUBLESHOOTING 23g). A placeholder transport spends frame rate and colour,
+        // never resolution.
+        guard !placeholderTiles else {
+            if !reportedScaleRefusal {
+                reportedScaleRefusal = true
+                Log.write("krd: --scale auto stays at 1 while tiles are placeholders - fewer pixels than "
+                          + "the cells would show as seams; --no-placeholders lets it step down\n")
+            }
+            return
+        }
         effectiveScale = change.to
         applyLayout(geometry: geometry)
         Log.write("krd: \(change.line)\n")
@@ -3075,7 +3166,8 @@ final class Desk {
         // the two modes — the alternative was a picture no delete could remove.
         if let at = options.wallAt {
             writer.endSession()
-            Self.execSelf(Self.wallArguments(at: at, exit: exitStatus, said: failureSaid))
+            Self.execSelf(Self.wallArguments(at: at, exit: exitStatus, said: failureSaid,
+                                             sticky: Self.stickyArguments(options)))
         }
         writer.endSession()
         exit(exitStatus)
@@ -3123,7 +3215,8 @@ Task {
         // A mirror that never started still owes the reader their wall back: same sentence, same
         // footer, instead of an exit that leaves them looking at a terminal that is no longer krd's.
         if let at = options.wallAt {
-            Desk.execSelf(Desk.wallArguments(at: at, exit: 1, said: "\(error)"))
+            Desk.execSelf(Desk.wallArguments(at: at, exit: 1, said: "\(error)",
+                                             sticky: Desk.stickyArguments(options)))
         }
         exit(1)
     }
