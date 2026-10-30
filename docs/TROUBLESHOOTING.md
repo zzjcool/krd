@@ -298,6 +298,18 @@ frame, and it handed the pane back with the reason in the wall's footer. The usu
 **Fix.** Nothing to do in krd: the reason is on the footer. `Ctrl-\` inside a working mirror brings
 the wall back on the page it was left on - that is the way out of a window mirror.
 
+### 23c. `-3805` on everything, once the wall has been used
+
+**Cause.** Only one live process of one executable may be a ScreenCaptureKit client: while an earlier
+krd is still running - a wall in another terminal tab, a mirror someone forgot about, a `krd` that
+outlived its terminal - every *new* krd gets `-3805` ("failed during stream due to application
+connection being interrupted") for every stream, and the wall's shots come back empty too. It is not
+a permission problem and not a bug in the target window: the *second* client is refused, whoever it
+is and whatever it captures. This is also why a click `exec`s instead of spawning a child (design
+§12 P3b).
+**Fix.** `pgrep -fl krd` and close the older one (or `pkill -f /path/to/krd` if its terminal is gone).
+One krd at a time per machine.
+
 ### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
 
 **Cause.** macOS grants Screen Recording per *responsible* application. When krd is started from a
