@@ -303,6 +303,35 @@ Reading the three cases:
 `--placeholders` / `--no-placeholders` switch transports, and `--dpr N` changes the quality factor, so
 one terminal can be compared against itself in four lines.
 
+### 23g. Evenly spaced black lines across the mirror page
+
+**Signature:** the display page shows the picture, in the right place, the right size — with a thin
+dark line every few rows. Count them: **nine** on a 118x38-cell page. That is not a rendering artefact
+and not the wallpaper; it is the seam between tile rows.
+
+The arithmetic (`--debug` prints the first line, the mirror prints the second):
+
+```
+krd: mirror grid 118x38 cells at 17x33 px, pane 118x73, src 1920x1200 px, fit 1.045, frame 1920x1200 px
+krd: frame 1920x1200 px, grid wants 1920x1200 px (118x38 cells of 17.0x33.0 px, 15x10 tiles)
+```
+
+A 118x38 cell box at 17x33 px is 2006x1254 px. When the frame is the *source's* pixels instead (1920x1200),
+each tile's pixel rect is a proportional slice of 1920x1200 while its cells are `8x4` of 17x33 = 136x132 px.
+A terminal that draws one image pixel per device pixel (Rex) cannot stretch the difference, so the bottom
+~12 px of every tile row shows the background: ten tile rows, nine seams.
+
+Fix: the frame **is** the cell box (`TileGrid.make`). The stream upscales to the request — measured
+1920x1200 -> 2006x1254, no dropped frames. A screenshot cannot (it pads with black, §23e), which is why
+the wall caps its request and upscales itself; two transports, two rules.
+
+| what you see | what it means |
+|---|---|
+| thin seams **every tile row** (10 rows → 9 lines), evenly spaced | frame shorter than the cell box: `grid wants` and `frame` disagree in the log |
+| seams only at the picture's right/bottom edge | the whole picture is short, not per tile: the placement is smaller than the box (§23e) |
+| one black band along one edge | aspect mismatch, which is the terminal's own cells - not a seam |
+
+
 ### 23e. The picture fills part of its box / sits in the top-left corner
 
 Two ways to place an image on a kitty terminal, and only one of them is right: **cells** (`U=1` unicode

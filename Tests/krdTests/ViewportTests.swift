@@ -228,13 +228,13 @@ final class ViewportOriginTests: XCTestCase {
 
 // MARK: - the pixel budget of a zoomed capture (issue #73)
 
-/// `--zoom` crops `sourceRect`, and the layout's pixel budget has to follow the crop. Handing the
-/// layout the full frame's size instead makes ScreenCaptureKit upscale the crop: at `--zoom 2` the
-/// stream asked for as many pixels as the *window* had (2x each dimension, 4x the bytes) out of a
-/// crop that only had half the points. Placement was unaffected, which is why only the `--debug`
-/// line gave it away (`-> 1024x678 px` for a `512x339 pt` crop).
+/// `--zoom` crops `sourceRect`, and that used to decide the pixel budget too. It no longer does: the
+/// frame is the picture's cell box at any zoom (the stream upscales to it), so what zoom changes is
+/// *which points* fill those pixels - half of them, i.e. twice the magnification - not how many.
+/// A crop still has to be reported as the source, otherwise a zoomed layout would claim the whole
+/// window's points and the pointer would map to the wrong place.
 final class ZoomLayoutSourceTests: XCTestCase {
-    func testZoomHalvesThePixelBudgetAndKeepsTheCells() throws {
+    func testZoomKeepsTheFrameAndDoublesItsMagnification() throws {
         let pane = TermGeometry(cols: 100, rows: 30, pixelWidth: 1700, pixelHeight: 990)
         let full = CGRect(x: 381, y: 277, width: 1024, height: 678)
         let crop = Viewport.crop(full: full, scale: 2, focus: CGPoint(x: 893, y: 616))
@@ -242,16 +242,18 @@ final class ZoomLayoutSourceTests: XCTestCase {
         let zoomed = TileGrid.make(geometry: pane, aspect: crop.width / crop.height,
                                    tileCols: 8, tileRows: 4, bpp: 3, scale: 1,
                                    source: Viewport.layoutSource(crop: crop, full: full))
-        XCTAssertEqual(zoomed.pixelW, Int(crop.width), "the capture is the crop, so is the pixel budget")
-        XCTAssertEqual(zoomed.pixelH, Int(crop.height))
+        XCTAssertEqual(zoomed.pixelW, zoomed.panePixelW, "the frame is the cell box at any zoom")
+        XCTAssertEqual(zoomed.pixelH, zoomed.panePixelH)
 
         let unzoomed = TileGrid.make(geometry: pane, aspect: full.width / full.height,
                                      tileCols: 8, tileRows: 4, bpp: 3, scale: 1,
                                      source: Viewport.layoutSource(crop: full, full: full))
-        XCTAssertEqual(unzoomed.pixelW, Int(full.width))
-        XCTAssertEqual(zoomed.pixelW * 2, unzoomed.pixelW, "zoom 2 halves each dimension, not the frames")
+        XCTAssertEqual(unzoomed.pixelW, unzoomed.panePixelW)
+        XCTAssertEqual(zoomed.pixelW, unzoomed.pixelW, "zoom does not spend more or fewer pixels")
         XCTAssertEqual(zoomed.paneCols, unzoomed.paneCols, "the picture still fills the pane")
         XCTAssertEqual(zoomed.paneRows, unzoomed.paneRows)
+        XCTAssertEqual(zoomed.sourceW * 2, unzoomed.sourceW, accuracy: 1,
+                       "zoom 2 shows half the points in the same cells: twice the magnification")
     }
 
     func testNoZoomIsUnchanged() {
@@ -268,6 +270,7 @@ final class ZoomLayoutSourceTests: XCTestCase {
         let layout = TileGrid.make(geometry: pane, aspect: crop.width / crop.height,
                                    tileCols: 8, tileRows: 4, bpp: 3, scale: 0.5,
                                    source: Viewport.layoutSource(crop: crop, full: full))
-        XCTAssertEqual(layout.pixelW, Int(crop.width / 2), "--scale 0.5 halves the crop, not the frame")
+        XCTAssertEqual(layout.pixelW, Int((Double(layout.panePixelW) * 0.5).rounded()),
+                       "--scale 0.5 halves the frame, not the cells")
     }
 }

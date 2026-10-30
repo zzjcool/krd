@@ -128,10 +128,18 @@ flags that make the difference become the next fix.
   `i=31;OK`. Matching the short form made accepting terminals look silent → the wall fell back to a
   path that draws the picture at half size.
 - **`q=2` hides errors.** A refused image looks exactly like a picture that never arrived.
-- **ScreenCaptureKit does not upscale**: ask for more pixels than the source has and it draws the
-  source at its own size anchored top-left and pads with black. Signature: *the larger the request,
-  the smaller the desktop*. `PanelCapture.fitted` caps it; `PanelRaster.rgb(_:width:height:)` does
-  the one upscale to the panel's exact pixels.
+- **Two transports, two rules on asking for more pixels than the source has.** A *screenshot*
+  (`SCScreenshotManager`, the wall) pads with black: the source sits at its own size in one corner
+  of a bigger canvas, signature *the larger the request, the smaller the desktop*. `PanelCapture.fitted`
+  caps it and `PanelRaster.rgb(_:width:height:)` does the one upscale. A *stream* (`SCStream`, the
+  mirror) upscales to the request — measured 1920x1200 → 2006x1254, no dropped frames. Carrying the
+  screenshot rule over to the stream is what left **nine black lines** across the display page:
+  the frame was 6 % smaller than its cell box, a 1:1 terminal cannot stretch it, so every tile row
+  showed a seam (TROUBLESHOOTING 23g).
+- **A slept display wedges ScreenCaptureKit.** The capture call never returns, the process goes
+  unkillable (`Ss+`, `kill` ignored), and the *next* krd hangs at its last log line — usually right
+  after `capture … asked`. Fix: `ssh krd-vm 'pkill -9 -x krd'` **and** `caffeinate -u -t 10` before
+  starting krd; a blank wall with `placeholder cells: 0` and no `wall slot` line is this.
 - **Rex draws an image one image pixel per device pixel** and does not scale it into `c`/`r`. So the
   picture's pixels must equal its cells' device pixels; `c`/`r` alone do not save a wrong size.
 - **The pty's `ws_xpixel` is in the same unit as the terminal's `CSI 16t` answer**, which is not

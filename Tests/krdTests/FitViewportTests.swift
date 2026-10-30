@@ -32,11 +32,13 @@ final class FitViewportTests: XCTestCase {
         }
     }
 
-    /// The old failure mode, kept as a test: mapping against the *frame* (1024 px) instead of the
-    /// placement (1190 px) shrinks every click towards the top-left, and the eye reads that as
-    /// "the click lands to the left of where I clicked".
+    /// The old failure mode, kept as a test: mapping against the *frame* instead of the placement
+    /// moves every click, and the eye reads that as "the click lands to the left of where I
+    /// clicked". Only `--scale` makes the two differ now - at full scale the frame *is* the
+    /// placement box - so the half-scale case is what keeps the mapping honest.
     func testMappingAgainstTheFrameInsteadOfThePlacementWouldDrift() {
-        let (correct, grid) = viewport(cols: 70, rows: 24)
+        let (correct, grid) = viewport(cols: 70, rows: 24, scale: 0.5)
+        XCTAssertEqual(grid.pixelW, 595, "the frame is half the placement at --scale 0.5")
         let frame = Viewport(pixelWidth: grid.pixelW, pixelHeight: grid.pixelH,
                              cols: grid.paneCols, rows: grid.paneRows, sourceRect: window)
         let px = 1000                                   // most of the way across the placement

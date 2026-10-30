@@ -3,11 +3,17 @@ import XCTest
 
 /// `fit` is where the picture goes on screen; `--scale` is how many pixels we spend on it (issue #71).
 ///
-/// Two rules that used to be one knot:
 ///  * the picture is placed as large as the pane allows (`fit = min(pane/src)`, which **may be > 1**
-///    when the source is smaller than the pane — the terminal upscales it for free);
-///  * the capture is the source at `min(fit, 1) x scale` — never more pixels than the source has
-///    (ScreenCaptureKit pads instead of upscaling, #69) and never more because the pane grew.
+///    when the source is smaller than the pane);
+///  * the **frame is that placement's cell box** (`cols x cellW` by `rows x cellH`), at `--scale`
+///    times that. The stream upscales to the request, so a display smaller than the pane is
+///    delivered at the pane's pixels: measured 1920x1200 -> 2006x1254 with no dropped frames.
+///    (The *screenshot* path cannot upscale - ScreenCaptureKit pads with black instead - which is
+///    why the wall caps its request and scales the pixels itself. Two transports, two rules.)
+///
+/// The frame used to stop at the source's own pixels. That left a terminal which draws one image
+/// pixel per device pixel (Rex) unable to fill its cells, and the shortfall showed up as a seam at
+/// every tile row: nine black lines across the display page (§TROUBLESHOOTING 23g).
 ///
 /// Everything the pointer depends on is the *placement*: its pixel rect is what the terminal draws
 /// into, so it is what SGR-Pixels coordinates are mapped against.
@@ -24,24 +30,28 @@ final class FitTests: XCTestCase {
 
     // MARK: the user's case: a window smaller than the pane fills the pane, for free
 
-    func testSmallWindowIsUpscaledToFillThePaneWithoutMorePixels() {
+    func testSmallWindowFillsThePaneAndTheStreamIsAskedForThatManyPixels() {
         for (cols, rows, fit) in [(70, 24, 1.162), (88, 30, 1.460), (120, 41, 1.992)] {
             let grid = grid(cols, rows, source: window)
             XCTAssertEqual(grid.fit, fit, accuracy: 0.002, "pane \(cols)x\(rows)")
-            XCTAssertEqual(grid.pixelW, 1024, "the capture stays at the window's own pixels")
-            XCTAssertEqual(grid.pixelH, 678)
+            XCTAssertEqual(grid.pixelW, grid.panePixelW, "the frame is the placement box")
+            XCTAssertEqual(grid.pixelH, grid.panePixelH)
+            XCTAssertGreaterThan(grid.pixelW, 1024, "so the stream upscales, it does not letterbox")
             XCTAssertEqual(grid.paneCols, cols, "and the picture fills the pane")
             XCTAssertEqual(grid.paneRows, rows, "pane \(cols)x\(rows): the aspect binds the other way")
-            XCTAssertGreaterThan(grid.panePixelW, 1024, "so the terminal draws it larger than it is")
         }
     }
 
-    func testPanePixelBoxIsThePlacementNotTheCapture() {
-        let grid = grid(70, 24, source: window)
-        XCTAssertEqual(grid.panePixelW, 70 * 17)
-        XCTAssertEqual(grid.panePixelH, 24 * 33)
-        XCTAssertEqual(grid.pixelW, 1024)
-        XCTAssertNotEqual(grid.pixelW, grid.panePixelW, "SGR pixels are the placement's, not the frame's")
+    func testTheFrameIsThePlacementBoxUnlessScaleTakesPixelsAway() {
+        let full = grid(70, 24, source: window)
+        XCTAssertEqual(full.panePixelW, 70 * 17)
+        XCTAssertEqual(full.panePixelH, 24 * 33)
+        XCTAssertEqual(full.pixelW, full.panePixelW)
+        // SGR-Pixels are the placement's: at --scale 0.5 the frame is half of it, and the pointer
+        // must still address the whole box.
+        let half = self.grid(70, 24, source: window, scale: 0.5)
+        XCTAssertEqual(half.panePixelW, 70 * 17)
+        XCTAssertEqual(half.pixelW, half.panePixelW / 2)
     }
 
     // MARK: --scale is bandwidth, not screen size
@@ -54,20 +64,25 @@ final class FitTests: XCTestCase {
             XCTAssertEqual(grid.paneRows, base.paneRows, "scale \(scale)")
             XCTAssertEqual(grid.panePixelW, base.panePixelW)
             XCTAssertEqual(grid.panePixelH, base.panePixelH)
-            XCTAssertEqual(grid.pixelW, Int((1024 * scale).rounded()))
-            XCTAssertEqual(grid.pixelH, Int((678 * scale).rounded()))
+            XCTAssertEqual(grid.pixelW, Int((Double(base.panePixelW) * scale).rounded()))
+            XCTAssertEqual(grid.pixelH, Int((Double(base.panePixelH) * scale).rounded()))
         }
     }
 
     /// The half of the invariant the user asked for: the picture is as big as the pane whether we
-    /// send 1024 px or 256 px, because the terminal does the enlarging.
-    func testAFullSizePictureNeverAsksForMoreThanTheSource() {
+    /// send 1190 px or 298 px, because the terminal does the enlarging.
+    ///
+    /// Note the *opposite* rule for the wall's screenshots (PanelCaptureTests): a screenshot request
+    /// above the source's pixels comes back padded with black, so it must be capped; a stream
+    /// request above them comes back upscaled, which is what the cells need.
+    func testTheStreamIsAskedForTheBoxEvenWhenTheSourceIsSmaller() {
         for source in [window, display] {
             for scale in [1.0, 0.5, 0.25] {
                 let grid = self.grid(70, 24, source: source, scale: scale)
-                XCTAssertLessThanOrEqual(Double(grid.pixelW), source.width + 1,
-                                         "\(source) at \(scale) asked for \(grid.pixelW) px")
-                XCTAssertLessThanOrEqual(Double(grid.pixelH), source.height + 1)
+                // The source's own pixel count does not enter: the cells do.
+                XCTAssertEqual(Double(grid.pixelW), Double(grid.panePixelW) * scale, accuracy: 1,
+                               "\(source) at \(scale) asked for \(grid.pixelW) px")
+                XCTAssertEqual(Double(grid.pixelH), Double(grid.panePixelH) * scale, accuracy: 1)
             }
         }
     }
@@ -79,7 +94,7 @@ final class FitTests: XCTestCase {
         let grid = grid(70, 24, source: display)
         XCTAssertLessThan(grid.fit, 1)
         XCTAssertEqual(grid.pixelW, 1190)
-        XCTAssertEqual(grid.pixelH, 744)
+        XCTAssertEqual(grid.pixelH, 759, "23 rows of 33 px, not the display's 1200 x 0.62")
         XCTAssertEqual(grid.paneCols, 70)
         XCTAssertEqual(grid.paneRows, 23)
     }
@@ -97,11 +112,12 @@ final class FitTests: XCTestCase {
         XCTAssertEqual(grid.fitNote, "", "nothing to explain: the frame is exactly the pane box")
     }
 
-    /// The display mirror must not start capturing more than the screen because the pane grew.
-    func testPaneBiggerThanTheDisplayStopsAtTheDisplay() {
+    /// A pane bigger than the display is captured at the pane's pixels: the cells need them, and the
+    /// stream upscales. This is the case that used to leave nine seams.
+    func testPaneBiggerThanTheDisplayIsCapturedAtThePaneBox() {
         let grid = grid(120, 45, source: display)
-        XCTAssertEqual(grid.pixelW, 1920)
-        XCTAssertEqual(grid.pixelH, 1200)
+        XCTAssertEqual(grid.pixelW, 120 * 17)
+        XCTAssertEqual(grid.pixelH, 39 * 33)
         XCTAssertGreaterThan(grid.fit, 1, "but it is drawn larger")
         XCTAssertEqual(grid.paneCols, 120)
         XCTAssertEqual(grid.paneRows, 39)
@@ -155,16 +171,15 @@ final class FitTests: XCTestCase {
 
     // MARK: --debug
 
-    func testFitNoteSaysWhichCaseYouAreIn() {
-        let upscaled = grid(70, 24, source: window)
-        XCTAssertTrue(upscaled.fitNote.contains("stretches x1."), upscaled.fitNote)
-        XCTAssertTrue(upscaled.fitNote.contains("1024x678 px in 70x24 cells"), upscaled.fitNote)
-        let downscaled = grid(70, 24, source: display)
-        XCTAssertTrue(downscaled.fitNote.contains("fitted to 0.620"), downscaled.fitNote)
+    func testFitNoteIsSilentUnlessScaleLeavesAStretch() {
+        // The frame is the placement box, so a picture bigger or smaller than the source has
+        // nothing for the terminal to stretch: neither case says anything.
+        XCTAssertEqual(grid(70, 24, source: window).fitNote, "")
+        XCTAssertEqual(grid(70, 24, source: display).fitNote, "")
         // At --scale 0.5 the screen size is the same and the stretch doubles: that is the number
         // that explains the softness, and it is why --scale is a bandwidth knob.
         let half = self.grid(70, 24, source: window, scale: 0.5)
         XCTAssertTrue(half.fitNote.contains("stretches x2."), half.fitNote)
-        XCTAssertTrue(half.fitNote.contains("512x339 px in 70x24 cells"), half.fitNote)
+        XCTAssertTrue(half.fitNote.contains("595x396 px in 70x24 cells"), half.fitNote)
     }
 }

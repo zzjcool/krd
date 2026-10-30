@@ -591,6 +591,8 @@ final class Desk {
     /// Last `callbacks` count and when it last moved: a stream that stops delivering frames
     /// without calling `didStopWithError` is the failure this catches (issue #44).
     private var frameWatchdog: DispatchSourceTimer?
+    /// The last frame size we logged, so a steady stream logs one line instead of sixty a second.
+    private var loggedFrameSize: (Int, Int)?
     /// Serialises in-place pans: `updateConfiguration` calls must not overlap, and a pan that
     /// arrives while one is in flight is folded into the next.
     private var panInFlight = false
@@ -2458,6 +2460,15 @@ final class Desk {
             lastDrawAt = started
         }
         framesHandled += 1
+        // One line per *change* of frame size, not per frame: whether the stream is delivering the
+        // pixels the grid slices. A frame smaller than `pixelW x pixelH` is the black-seam bug -
+        // tiles sliced proportionally out of a smaller frame, placed 1:1 on cells they cannot fill.
+        if let g = grid, width != loggedFrameSize?.0 || height != loggedFrameSize?.1 {
+            loggedFrameSize = (width, height)
+            Log.write("krd: frame \(width)x\(height) px, grid wants \(g.pixelW)x\(g.pixelH) px "
+                      + "(\(g.paneCols)x\(g.paneRows) cells of \(g.cellW)x\(g.cellH) px, "
+                      + "\(g.tilesX)x\(g.tilesY) tiles, \(g.count) total)\n")
+        }
         let emittedBefore = writer.framesEmitted
 
         // A window mirror whose very first frame is essentially all black is almost certainly a

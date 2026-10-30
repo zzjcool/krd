@@ -59,15 +59,13 @@ public struct TileGrid {
     public var panePixelW: Int { max(2, Int((Double(paneCols) * cellW).rounded())) }
     public var panePixelH: Int { max(2, Int((Double(paneRows) * cellH).rounded())) }
 
-    /// Why the frame is not the size of the pane box, in one clause for `--debug` (issue #69).
+    /// Why the terminal has anything to stretch, in one clause for `--debug`.
+    ///
+    /// The frame *is* the placement box at full scale now (the stream upscales, see `make`), so
+    /// `--scale` is the only thing that can leave the terminal a stretch to do - and that is
+    /// exactly the number that explains the softness, independent of how big the picture is on
+    /// screen.
     public var fitNote: String {
-        if fittedW == boxW && fittedH == boxH { return "" }        // the frame *is* the pane box
-        if fit < 0.999 {
-            return " (fitted to \(String(format: "%.3f", fit)) of the \(boxW)x\(boxH) px box)"
-        }
-        // How much the terminal has to stretch the frame to fill the placement: > 1 when the source is
-        // smaller than the pane or when --scale sent fewer pixels. This is the number that says why
-        // the picture is soft, and it is independent of how big the picture is on screen.
         let stretchX = Double(panePixelW) / Double(max(pixelW, 1))
         let stretchY = Double(panePixelH) / Double(max(pixelH, 1))
         guard stretchX > 1.02 || stretchY > 1.02 else { return "" }
@@ -137,8 +135,16 @@ public struct TileGrid {
             paneCols: cols, paneRows: rows,
             cellW: cellW, cellH: cellH,
             tileCols: tileCols, tileRows: tileRows,
-            pixelW: max(2, Int((known ? source.width * capture : Double(boxW) * captureScale).rounded())),
-            pixelH: max(2, Int((known ? source.height * capture : Double(boxH) * captureScale).rounded())),
+            // **Cells decide the frame's pixels**, from the *final* cell rect (the fit above may
+            // have shrunk `cols`/`rows`), the same rule the wall uses for its panels. A terminal
+            // that draws an image one image pixel per device pixel - Rex does - cannot stretch a
+            // frame that is a few percent narrower than its cells into them, and the proportional
+            // tile split then leaves that difference behind as a seam at every tile row: measured
+            // as nine black lines across a 117x38-cell display page (a 1920x1200 frame on a
+            // 1989x1254 cell box). `--scale` still takes pixels away on purpose, and a terminal
+            // that scales stretches the smaller frame back.
+            pixelW: max(2, Int((Double(cols) * cellW * captureScale).rounded())),
+            pixelH: max(2, Int((Double(rows) * cellH * captureScale).rounded())),
             bpp: bpp, scale: captureScale,
             fit: fit, sourceW: source.width, sourceH: source.height, boxW: boxW, boxH: boxH,
             boxCols: boxCols, boxRows: boxRows, fittedW: fittedW, fittedH: fittedH,
