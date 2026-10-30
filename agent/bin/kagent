@@ -145,6 +145,7 @@ def build_parser():
     p.add_argument("--menubar", action="store_true")
 
     add("screen", help="apps with windows, plus the focused element")
+    p = add("front", help="the app and window that will receive the next keystroke")
     p = add("windows", help="on-screen windows with CGWindowID and rect")
     p.add_argument("--ax", action="store_true", help="join the accessibility window list too")
 
@@ -360,14 +361,14 @@ def cmd_doctor(args, context):
         info = result.json()
         if not info.get("trusted"):
             return predicates.FAIL, "krd ax says Accessibility is not granted"
-        return predicates.PASS, "%s on-screen window(s), sample %s" % (
+        return predicates.PASS, "%s AX window(s) total, sample %s" % (
             info.get("onScreenWindows"), info.get("sample"))
 
     check("text (Accessibility)", accessibility)
 
     def windowlist():
         rows = perceive.windows(target)
-        return predicates.PASS, "%d window(s): %s" % (
+        return predicates.PASS, "%d composited window(s): %s" % (
             len(rows), ", ".join(sorted({w["app"] for w in rows}))[:120])
 
     check("windows", windowlist)
@@ -461,7 +462,8 @@ def cmd_see(args, context):
                                         meta["captured"]["width"], meta["captured"]["height"]),
         meta["bytes"] / 1024.0, meta["image_to_point"])
     if meta.get("unchanged"):
-        human = "unchanged since the last frame (%s)" % meta["path"]
+        human = ("same blocks as the previous frame in this run, so this is the same file: %s"
+                 % meta["path"])
     if args.marks:
         lines = [human, "%s — %d marks" % (meta.get("app"), len(meta.get("marks", [])))]
         for mark in meta.get("marks", []):
@@ -501,6 +503,18 @@ def cmd_screen(args, context):
         focus = info.get("focus") or {}
         print("focus: %s %s %s" % (focus.get("app"), focus.get("role"), focus.get("title") or ""))
     return EXIT_OK, info
+
+
+def cmd_front(args, context):
+    who = perceive.frontmost(context.target)
+    if not who.get("app"):
+        raise KagentError("could not read the frontmost app (the driver may be stale)",
+                          EXIT_UNKNOWN)
+    human = "%s%s%s" % (who["app"],
+                        " — " + who["window"] if who.get("window") else "",
+                        "  (window %d, pid %s)" % (who.get("window_id", 0), who.get("pid", 0)))
+    context.emit(who, human)
+    return EXIT_OK, who
 
 
 def cmd_windows(args, context):
@@ -576,16 +590,23 @@ def cmd_scroll(args, context):
 
 def cmd_type(args, context):
     text = " ".join(args.text)
+    # A synthetic keystroke goes to whatever is frontmost, which is not necessarily the app the last
+    # `text` dump was reading. Naming the receiver turns "the field never got my characters" into a
+    # line in the transcript instead of an unexplained failed assertion.
+    who = perceive.frontmost(context.target)
     act.type_text(context.target, text)
-    context.artifacts.record({"kind": "type", "text": text[:200]})
-    context.emit({"typed": text}, "typed %d character(s)" % len(text))
+    context.artifacts.record({"kind": "type", "text": text[:200], "into": who.get("app")})
+    context.emit({"typed": text, "into": who.get("app")},
+                 "typed %d character(s) into %s" % (len(text), who.get("app") or "?"))
     return EXIT_OK, {}
 
 
 def cmd_key(args, context):
+    who = perceive.frontmost(context.target)
     act.key(context.target, args.combo)
-    context.artifacts.record({"kind": "key", "combo": args.combo})
-    context.emit({"key": args.combo}, "pressed %s" % args.combo)
+    context.artifacts.record({"kind": "key", "combo": args.combo, "into": who.get("app")})
+    context.emit({"key": args.combo, "into": who.get("app")},
+                 "pressed %s into %s" % (args.combo, who.get("app") or "?"))
     return EXIT_OK, {}
 
 

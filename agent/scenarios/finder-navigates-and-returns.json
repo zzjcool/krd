@@ -1,0 +1,18 @@
+{
+  "name": "Finder navigates to the Desktop and comes back",
+  "about": "A second real desktop, so the scaffold is not proved only against the Apple menu. It navigates with a keyboard shortcut, asserts the window title changed to the folder asked for, goes back, and asserts the screen returned block for block. The sheet-based route (Cmd+Shift+G) is deliberately not used: a Go-to-Folder sheet that an earlier run left open swallows synthetic keys, and a scenario that depends on it fails for a reason that has nothing to do with the product.",
+  "steps": [
+    {"do": "doctor"},
+    {"do": "app focus Finder"},
+    {"do": "wait 'frontmost:Finder' --timeout 4",
+     "note": "keystrokes follow the frontmost app, not the app whose tree you just read"},
+    {"sleep": 0.6},
+    {"do": "see --as start"},
+    {"do": "key cmd+shift+d"},
+    {"do": "wait 'element:window:Desktop' --timeout 8",
+     "note": "the window title is the folder name, so this is the navigation itself, not a redraw"},
+    {"do": "text --app Finder -i --max 6"},
+    {"do": "key cmd+["},
+    {"do": "wait 'same:start' --timeout 8", "note": "back where it started, block for block"}
+  ]
+}

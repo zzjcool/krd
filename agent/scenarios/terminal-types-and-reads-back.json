@@ -1,0 +1,19 @@
+{
+  "name": "type into a real terminal and read its output back",
+  "about": "krd is a terminal application, so the most valuable second desktop on the VM is a real terminal: a place where a keycode matters, where typing is the only way in, and where the answer is text. This types a command with a unique marker, asserts the marker is in the window's value (a tree dump elides long values, so this searches server-side), then clears the line again. It deliberately does not open a window: a scenario should leave the desktop as it found it, and a cascade of new windows is how a later run ends up typing into the wrong one.",
+  "steps": [
+    {"do": "doctor"},
+    {"do": "app focus Terminal"},
+    {"do": "wait 'frontmost:Terminal' --timeout 4",
+     "note": "keystrokes follow the frontmost app, not the app whose tree you read -- one call buys a whole class of silent failure"},
+    {"sleep": 0.5},
+    {"do": "key cmd+a"},
+    {"do": "key delete", "note": "start from an empty prompt, so the marker can only come from this run"},
+    {"do": "type echo KAGENT-SELFTEST-OK"},
+    {"do": "key return"},
+    {"do": "wait 'text:KAGENT-SELFTEST-OK' --timeout 10",
+     "note": "the marker the shell echoed back is in the window value; `element:` cannot see it because a dump elides values"},
+    {"do": "key cmd+a"},
+    {"do": "key delete", "note": "leave the prompt as it was found"}
+  ]
+}

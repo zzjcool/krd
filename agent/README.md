@@ -77,6 +77,7 @@ Refs (`@e481`) are numbered per dump, so they cannot be cross-referenced between
 ### 3. Hands
 
 ```bash
+kagent front                         # which app and window will get the next keystroke
 kagent click 812 340                 # a real click, posted as a CGEvent
 kagent click --mark 4                # the element numbered 4 by `see --marks`
 kagent click --mark 4 --point        # ...by its centre instead of AXPress
@@ -89,6 +90,13 @@ kagent app focus Safari
 
 `click --mark` presses through Accessibility and **falls back to the centre point** when the node
 refuses (`AXTextField` does not implement `AXPress`). A refusal is an answer, not a failure.
+
+`type` sends each character as a keycode *and* a unicode string, because the two are not
+interchangeable: a text field takes the string, a terminal only takes the keycode. `key` and `type`
+print who received the events (`typed 14 character(s) into Terminal`), and `app focus` waits until
+the app really is frontmost — `open -a` returns before that is true, and a keystroke posted in that
+window goes to whatever was in front instead. A scenario that loses its characters that way fails on
+a later assertion, about something else.
 
 ### 4. Assertions
 
@@ -115,8 +123,13 @@ Every predicate answers three ways, and the exit code carries the difference:
 "Could not look" must never be reported as "is not there". That rule is the reason for exit 5.
 
 Predicate strings: `element:role:text`, `noelement:…`, `window:text`, `nowindow:…`,
-`pixel:x,y=#rrggbb`, `same:NAME`, `diff:NAME`, `changed`, `shell:cmd`, `file:path`, `app:name`.
-A bare word is `element:*:word`.
+`pixel:x,y=#rrggbb`, `same:NAME`, `diff:NAME`, `changed`, `text:WHAT-IT-SAYS`, `frontmost:App`,
+`shell:cmd`, `file:path`, `app:name`. A bare word is `element:*:word`.
+
+`text:` is the one that reads an app's *content*: a tree dump elides long values (`value="Last
+login: …"`), so a terminal's output, a log pane or a chat transcript cannot be asserted with
+`element:`. `text:` searches the whole value on the target, which is how "did krd log that line"
+gets answered without OCR. `frontmost:` is who will receive the next keystroke.
 
 `same:`/`diff:` compare a **32x24 block signature** with a 1% tolerance (`--tolerance`), not an exact
 hash: a blinking caret changes the hash of a screen a person would call identical, and a predicate

@@ -33,6 +33,8 @@ guard let first = argv.first, !first.hasPrefix("--") else {
           windows                   on-screen windows with their CGWindowID and rect
 
           probe <x> <y>             the colour at a screen point, as #rrggbb
+
+          frontmost                 the app and window that will receive the next keystroke
         """)
 }
 
@@ -45,6 +47,8 @@ case "windows", "win":
     runWindows(args)
 case "probe":
     runProbe(args)
+case "frontmost", "front":
+    runFrontmost(args)
 case "input":
     var inner = args
     guard let next = inner.positional.first else {

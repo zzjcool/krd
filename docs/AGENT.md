@@ -186,6 +186,20 @@ These are not style preferences; each one has already cost a run.
 | AX frames are in points, captures in pixels | a click off by the backing scale | `kagent see` prints `image_to_point`; use `click --image`, or `--mark` |
 | the harness answers like a terminal | a decoded stream shows a different transport than the real one | `--terminal rex` is the faithful default; `--terminal none` measures the fallback on purpose |
 | the menu bar clock | a `same:` assertion fails once a minute | crop the clock (`--rect 0,30,...`) or compare a named snapshot taken inside the same second |
+| `app focus` returns before the app is frontmost | typing "works" (exit 0) and the screen never changes | `app focus` now waits and `type`/`key` print the receiver; assert `frontmost:App` before typing |
+| a Finder sheet left open by an earlier run | synthetic keys vanish, a `wait` on a window title times out | `ssh krd-vm 'pkill -x Finder'`; scenarios should not depend on a modal sheet |
+| a terminal ignores `type` | characters never appear, no error | fixed: `type` posts a keycode as well as a unicode string — a terminal reads only the keycode |
+| `krd ax find` matcher | `element:` cannot see past a `value="…"` elision | use `text:<query>`, which searches the full value on the target |
+
+## Two scenarios that are known to pass
+
+```bash
+kagent run agent/scenarios/terminal-types-and-reads-back.json   # typing, a keycode, and reading text back
+kagent run agent/scenarios/finder-navigates-and-returns.json    # a real app, a state change, and a restore
+```
+
+They are the floor, not the ceiling: a bug hunt starts by copying the nearest one and changing what
+it asserts.
 
 ## Where the numbers live
 

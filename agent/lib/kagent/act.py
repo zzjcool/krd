@@ -14,6 +14,7 @@ centre point with `--point`.
 
 import json
 import shlex
+import time
 
 from .core import EXIT_UNKNOWN, KagentError
 from . import perceive
@@ -102,10 +103,22 @@ def quit_app(target, name):
     return target.run_sh(script).raise_on_error("quit %s" % name)
 
 
-def focus(target, spec):
-    """Bring an app forward, so the next `see` and the next keystroke agree on what is in front."""
-    app, _ = perceive.focused_app(target)
-    if app and app.lower() == str(spec).lower():
-        return {"app": app, "already": True}
+def focus(target, spec, attempts=3):
+    """Bring an app forward and *check* that it arrived.
+
+    `open -a` returns as soon as launch services accepts the request, which is not the same as the
+    app being frontmost: it can be starting, or it can refuse because it is mid-sheet. A scenario
+    that types right after this call then types into whatever else was in front, and the check that
+    fails is about the wrong thing.
+    """
+    before = perceive.frontmost(target)
+    if before.get("app", "").lower() == str(spec).lower():
+        return {"app": before["app"], "already": True, "frontmost": before}
     launch(target, spec)
-    return {"app": spec, "already": False}
+    for _ in range(attempts):
+        time.sleep(0.25)
+        now = perceive.frontmost(target)
+        if now.get("app", "").lower() == str(spec).lower():
+            return {"app": now["app"], "already": False, "frontmost": now}
+    return {"app": spec, "already": False, "frontmost": perceive.frontmost(target),
+            "arrived": False}

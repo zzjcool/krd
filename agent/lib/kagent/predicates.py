@@ -133,6 +133,41 @@ def evaluate(target, spec, app=None, artifacts=None, tolerance=0.01):
         return state, "%s since the last frame: %.2f%% of blocks changed (tolerance %.2f%%)" % (
             "not changed" if same else "changed", delta * 100, tolerance * 100)
 
+    if kind in ("text", "says", "notext"):
+        # What an app *says*, not what it is labelled: an AX dump elides long values (`value="Last
+        # login: …"`), so a terminal's output or a log pane cannot be asserted from the tree. `krd ax
+        # find` searches the whole value server-side, which is the only cheap honest answer to "did
+        # the log line appear" without OCR.
+        wanted = rest
+        if not wanted:
+            return UNKNOWN, "%s needs something to look for" % kind
+        try:
+            if not app:
+                app, _ = perceive.focused_app(target)
+            result = target.run([target.krd, "ax", "find", "--app", app, wanted], timeout=60)
+        except KagentError as error:
+            return UNKNOWN, "cannot search the accessibility tree: %s" % error
+        if result.rc != 0:
+            output = result.text + result.error_text
+            if "no node matches" in output:
+                state = FAIL if kind != "notext" else PASS
+                return state, "%s does not say %r" % (app, wanted)
+            return UNKNOWN, "ax find failed: %s" % output.strip().splitlines()[0][:200]
+        hits = [line for line in result.text.splitlines() if line.startswith("@e")]
+        first = hits[0].split()[0] if hits else ""
+        state = PASS if kind != "notext" else FAIL
+        return state, "%s says %r (%d node%s, %s)" % (
+            app, wanted, len(hits), "" if len(hits) == 1 else "s", first)
+
+    if kind == "frontmost":
+        who = perceive.frontmost(target)
+        app = (who.get("app") or "")
+        wanted = rest.lower()
+        hit = wanted in app.lower() or wanted in (who.get("window") or "").lower()
+        return (PASS if hit else FAIL), "%s%s is frontmost" % (
+            app or "nothing",
+            (" — " + who["window"]) if who.get("window") else "")
+
     if kind == "shell":
         result = target.run_sh(rest, timeout=120)
         return (PASS if result.rc == 0 else FAIL), "exit %d: %s" % (

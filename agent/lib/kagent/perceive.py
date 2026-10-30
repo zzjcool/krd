@@ -83,6 +83,22 @@ def tree(target, app=None, pid=None, window=None, depth=6, interactive=True, max
     return ax(target, argv).raise_on_error("ax tree").json()
 
 
+def frontmost(target):
+    """The app and window that will receive the next keystroke.
+
+    Distinct from `focused_app`: Accessibility reports which element has focus *inside* an app, and
+    keeps saying so while the app is behind another one. Synthetic keys go to the frontmost app, so
+    a scenario has to ask this question, not that one.
+    """
+    result = target.run([target.driver, "frontmost"], timeout=30)
+    if result.rc != 0 or not result.text.strip():
+        return {"app": "", "window": "", "pid": 0}
+    try:
+        return json.loads(result.text.strip().splitlines()[-1])
+    except ValueError:
+        return {"app": "", "window": "", "pid": 0}
+
+
 def focused_app(target):
     info = screen(target)
     focus = info.get("focus") or {}
@@ -208,7 +224,10 @@ def see(target, artifacts, window=None, rect=None, grid=None, marks=None, cursor
         except ValueError:
             old = {}
         if _same_signature(old.get("signature"), meta.get("signature")):
+            # `unchanged` means "nothing moved since the last capture in this run", which is why the
+            # old JPEG is handed back instead of a new one. It is not a statement about the screen.
             meta["unchanged"] = True
+            meta["same_as_previous_frame"] = True
             meta["previous_path"] = old.get("path")
             meta["unchanged_against"] = old.get("hash")
             meta["path"] = old.get("path")
