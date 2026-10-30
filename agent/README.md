@@ -231,6 +231,15 @@ Each is a shell script that fails with a sentence, and each was written against 
 for check in agent/checks/*.sh; do sh "$check" || echo "FAILED $check"; done
 ```
 
+`agent/hunts/` is the other half: reproductions of bugs that are **not fixed yet**. They are
+expected to fail, they spell out what is wrong and what "fixed" would mean, and the way they leave is
+by moving into `checks/` once the baseline arm of `kagent prove` fails and the working tree passes:
+
+```bash
+kagent prove --check agent/hunts/pixel-path-with-dpr-overflows-its-box.sh --baseline HEAD
+# not-fixed  (both arms fail) -- a finding, not a regression
+```
+
 ### 5½. A real terminal, driven
 
 `render` measures a pty it owns. `pane` drives a real one: it opens a pane in Rex, runs a command in

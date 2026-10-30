@@ -927,10 +927,15 @@ def cmd_render(args, context):
             multiple = (k >= 1 and float(k).is_integer()
                         and (native.w, native.h) == (box[0] * int(k), box[1] * int(k)))
             if p_.unicode_placeholder:
+                # The terminal fits the image into the rectangle of cells, so *any* size fills the
+                # box: a smaller image is soft, not misplaced, and the "half size in the corner" bug
+                # this rule was written for is a property of the pixel path, which has no fitting.
+                # A placeholder run is judged on its geometry elsewhere (wall-fits-any-pane.sh, and
+                # the content aspect against the source in wall-cards-keep-their-aspect.sh).
                 entry["fit"] = ("exact" if (native.w, native.h) == box
                                 else "%dx" % k if multiple
                                 else "upscaled" if upscaled else "fitted")
-                broken = upscaled
+                broken = False
             else:
                 entry["fit"] = "exact" if (native.w, native.h) == box else "scaled"
                 broken = (native.w, native.h) != box
