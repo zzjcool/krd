@@ -278,4 +278,70 @@ final class ClearDuringFrameTests: XCTestCase {
                       "the reap's delete must not appear inside the frame's block "
                       + "(docs/PROTOCOL.md §4, §2):\n" + timeline(bytes))
     }
+
+    // MARK: - the decision the fix makes: queue the clear, do not drop it
+
+    /// The first test says where the delete may not go; this one says it must still *go*, and that
+    /// the pane it erased is repainted in full. Both halves are the fix, and a fix that only passed
+    /// the first test would be the wrong one: dropping a mid-frame clear also keeps `a=d,d=a` out of
+    /// the block, and would leave the caller's stale placement under the next frame. `clear()`
+    /// returns nothing (unlike `writeControl`), so no caller could notice and retry.
+    ///
+    /// The second half is not cosmetic either: after a deferred delete the pane holds nothing, and
+    /// only *dirty* tiles are re-sent, so the frame after the clear has to place every tile.
+    func testTheDeferredClearStillGoesOutAfterTheCommitAndForcesAFullRepaint() throws {
+        let rec = Recorder()
+        let writer = rec.writer
+        try XCTSkipUnless(writer.syncLabel == "frame",
+                          "KRD_SYNC/KRD_NOSYNC disabled the block this test pins "
+                          + "(syncLabel = \(writer.syncLabel))")
+
+        let grid = makeGrid()
+        let px = frame(grid, phase: 2)
+
+        writer.beginSession()
+        writer.resize(tiles: grid.count)
+        writer.beginFrame()
+        XCTAssertTrue(emitTile(writer, grid: grid, pixels: px, index: 0))
+        writer.clear()                     // a resize, mid-frame: queued, not written
+        XCTAssertTrue(emitTile(writer, grid: grid, pixels: px, index: 1))
+        writer.endFrame()
+
+        let bytes = rec.bytes
+        let block = try frameBlock(in: bytes)
+        let deletes = occurrences(of: Self.deleteAll, in: bytes)
+        XCTAssertEqual(deletes.count, 1,
+                       "the clear must still be sent -- queued, not dropped:\n" + timeline(bytes))
+        if let delete = deletes.first {
+            XCTAssertGreaterThan(delete, block.close,
+                                 "the deferred clear must go out after the frame's commit, in a "
+                                 + "commit of its own (docs/PROTOCOL.md §4):\n" + timeline(bytes))
+        }
+        XCTAssertTrue(occurrences(of: Self.deleteAll, in: Array(bytes[block.open..<block.close]))
+                        .isEmpty,
+                      "and never inside the block (docs/PROTOCOL.md §2):\n" + timeline(bytes))
+
+        // The frame that follows must repaint all of it: the writer asks, `Desk.handleFrame` ORs
+        // `repaintNeeded` into its dirty decision (Sources/krd/main.swift).
+        XCTAssertTrue(writer.repaintNeeded,
+                      "after a clear the screen has lost placements, so the writer must ask for a "
+                      + "full repaint (the dirty pass would leave the rest of the pane blank)")
+        let before = rec.bytes.count
+        writer.beginFrame()
+        XCTAssertFalse(writer.repaintNeeded,
+                       "the request applies to the frame that just began, so it cannot leak into the "
+                       + "one after it")
+        for index in 0..<grid.count {
+            XCTAssertTrue(emitTile(writer, grid: grid, pixels: px, index: index))
+        }
+        writer.endFrame()
+
+        let next = Array(rec.bytes[before...])
+        for index in 0..<grid.count {
+            let placement = Array("i=\(100 + index),p=\(1000 + index)".utf8)
+            XCTAssertFalse(occurrences(of: placement, in: next).isEmpty,
+                           "tile \(index) must be placed again after the clear, not only the dirty "
+                           + "ones:\n" + timeline(rec.bytes))
+        }
+    }
 }
