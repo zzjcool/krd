@@ -211,3 +211,90 @@ final class MockDesktopTests: XCTestCase {
         XCTAssertGreaterThan(unique.count, 8, "a flat frame would not exercise dirty rects or zlib")
     }
 }
+
+/// `String.count` is grapheme clusters, not cells. A Chinese app name in a window title used to
+/// shift every column after it, which is why width lives in one place and is tested on its own.
+final class DisplayWidthTests: XCTestCase {
+    func testAsciiIsOneCell() {
+        XCTAssertEqual(DisplayWidth.of("krd --dev"), 9)
+        XCTAssertEqual(DisplayWidth.of("…"), 1)
+    }
+
+    func testCjkAndEmojiAreTwoCells() {
+        XCTAssertEqual(DisplayWidth.of("访达"), 4)
+        XCTAssertEqual(DisplayWidth.of("窗口 title"), 4 + 1 + 5)
+        XCTAssertEqual(DisplayWidth.of("❤️"), 2, "an emoji presentation selector makes it wide")
+        XCTAssertEqual(DisplayWidth.of("👨‍👩‍👧"), 2, "a ZWJ sequence is one 2-cell cluster")
+    }
+
+    func testCombiningMarksAddNothing() {
+        XCTAssertEqual(DisplayWidth.of("e\u{301}"), 1)
+        XCTAssertEqual(DisplayWidth.of("\u{301}"), 0)
+    }
+
+    func testTruncateNeverSplitsAGlyph() {
+        for cells in 1...10 {
+            let out = DisplayWidth.truncate("访问控制面板", to: cells)
+            XCTAssertLessThanOrEqual(DisplayWidth.of(out), cells, "\(cells) cells produced \(out)")
+        }
+        XCTAssertEqual(DisplayWidth.truncate("访问控制", to: 5), "访问…")
+        XCTAssertEqual(DisplayWidth.truncate("abc", to: 5), "abc", "no ellipsis when nothing is dropped")
+    }
+
+    func testPadIsExactlyTheRequestedWidth() {
+        for s in ["abc", "访达", "👨‍👩‍👧 x", ""] {
+            for cells in 0...12 {
+                XCTAssertEqual(DisplayWidth.of(DisplayWidth.pad(s, to: cells)), cells)
+            }
+        }
+    }
+
+    /// End to end: a pane whose target name is Chinese must not push the bar past the last column
+    /// or leave half a glyph at the edge.
+    func testWideTargetStaysInsideTheStatusLine() {
+        for cols in [20, 24, 30, 46, 80, 84, 120] {
+            var m = ChromeMetrics()
+            m.target = "访达 — 桌面"
+            m.fpsTarget = 20
+            m.fps = 19.4
+            m.e2eMs = 54
+            m.cellsW = cols
+            let geo = Chrome.layout(paneCols: cols, paneRows: 20, imageCols: cols, imageRows: 19, panel: nil)
+            let bytes = Chrome().draw(geometry: geo, metrics: m, state: ChromeState())
+            // Replay the escapes: every glyph must start and end inside the pane, and none may
+            // start in the last column unless it is one cell wide.
+            var col = 0
+            var i = 0
+            let text = Array(String(decoding: bytes, as: UTF8.self))
+            while i < text.count {
+                if text[i] == "\u{1B}" {
+                    var j = i + 1
+                    var digits = ""
+                    if j < text.count, text[j] == "[" {
+                        j += 1
+                        while j < text.count, text[j].isNumber || text[j] == ";" {
+                            digits.append(text[j])
+                            j += 1
+                        }
+                        if j < text.count, text[j] == "H" {
+                            let parts = digits.split(separator: ";").compactMap { Int($0) }
+                            if parts.count == 2 { col = parts[1] - 1 }
+                        }
+                        while j < text.count, !text[j].isLetter { j += 1 }
+                        i = j + 1
+                        continue
+                    }
+                    i += 1
+                    continue
+                }
+                let w = DisplayWidth.of(text[i])
+                if w > 0 {
+                    XCTAssertLessThanOrEqual(col + w, cols,
+                                             "a glyph overflows at cols=\(cols): \(text[i]) at \(col)")
+                    col += w
+                }
+                i += 1
+            }
+        }
+    }
+}

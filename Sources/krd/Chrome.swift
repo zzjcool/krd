@@ -122,6 +122,10 @@ final class Chrome {
         var ch: Character = " "
         var style: Style = .plain
         var hit: String = ""
+        /// The second column of a 2-cell glyph. It is part of the cell before it: never a run of
+        /// its own, never trimmed as a trailing blank, and never the target of a click.
+        var continuation = false
+        var wide = false
     }
 
     enum Style: UInt8 {
@@ -173,7 +177,7 @@ final class Chrome {
     func draw(geometry: ChromeGeometry, metrics m: ChromeMetrics, state: ChromeState) -> [UInt8] {
         resize(cols: geometry.cols, rows: geometry.rows)
         for y in geometry.chromeTop..<rows {
-            for x in 0..<cols { set(x, y, " ", .plain, "") }
+            for x in 0..<cols { set(x, y, " ", .plain) }
         }
         drawStatus(geometry: geometry, m: m, state: state)
         if let panel = state.panel { drawPanel(panel, geometry: geometry, m: m) }
@@ -208,16 +212,31 @@ final class Chrome {
         prev = nil
     }
 
-    private func set(_ x: Int, _ y: Int, _ ch: Character, _ style: Style, _ hit: String = "") {
+    private func set(_ x: Int, _ y: Int, _ ch: Character, _ style: Style, hit: String = "") {
         guard x >= 0, y >= 0, x < cols, y < rows else { return }
+        let width = DisplayWidth.of(ch)
+        if width == 2 {
+            // A wide glyph needs the cell after it; at the right edge it would be clipped by the
+            // terminal and drag the rest of the row left, so draw a blank there instead.
+            guard x + 1 < cols else {
+                cells[y * cols + x] = Cell(ch: " ", style: style, hit: hit)
+                return
+            }
+            cells[y * cols + x] = Cell(ch: ch, style: style, hit: hit, wide: true)
+            cells[y * cols + x + 1] = Cell(ch: " ", style: style, hit: hit, continuation: true)
+            return
+        }
         cells[y * cols + x] = Cell(ch: ch, style: style, hit: hit)
     }
 
     private func text(_ x: Int, _ y: Int, _ s: String, _ style: Style = .plain, hit: String = "") {
         var cx = x
         for ch in s {
-            set(cx, y, ch, style, hit)
-            cx += 1
+            let width = DisplayWidth.of(ch)
+            if width == 0 { continue }          // a lone combining mark has nothing to attach to
+            if cx + width > cols { break }
+            set(cx, y, ch, style, hit: hit)
+            cx += width
         }
     }
 
@@ -262,13 +281,13 @@ final class Chrome {
         var x = 0
         for (body0, style, hit) in segments(m, prefix: state.prefix) {
             var body = body0
-            if x + body.count > cols { body = String(body.prefix(max(0, cols - x))) }
+            if x + DisplayWidth.of(body) > cols { body = DisplayWidth.truncate(body, to: max(0, cols - x)) }
             guard !body.isEmpty else { break }
             text(x, y, body, style, hit: hit)
-            x += body.count
+            x += DisplayWidth.of(body)
         }
-        if let toast = state.toast, x + toast.count + 2 < cols {
-            text(cols - toast.count - 1, y, toast, .dim)
+        if let toast = state.toast, x + DisplayWidth.of(toast) + 2 < cols {
+            text(DisplayWidth.rightAlignedStart(toast, cells: cols - 1), y, toast, .dim)
         }
     }
 
@@ -283,10 +302,10 @@ final class Chrome {
         let inside = h - 2
         func line(_ i: Int, _ label: String, _ value: String, _ note: String = "", _ style: Style = .plain) {
             guard i < inside else { return }
-            text(2, y + 1 + i, label.padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
-            text(17, y + 1 + i, String(value.prefix(max(0, w - 20))), style)
+            text(2, y + 1 + i, DisplayWidth.pad(label, to: 14), .dim)
+            text(17, y + 1 + i, DisplayWidth.truncate(value, to: max(0, w - 20)), style)
             if !note.isEmpty {
-                text(38, y + 1 + i, String(note.prefix(max(0, w - 40))), .dim)
+                text(38, y + 1 + i, DisplayWidth.truncate(note, to: max(0, w - 40)), .dim)
             }
         }
         switch panel {
@@ -345,14 +364,15 @@ final class Chrome {
             }
             for (i, row) in m.devices.enumerated() where i < inside {
                 let active = row.hasPrefix("*")
-                text(2, y + 1 + i, String(row.dropFirst().prefix(max(0, w - 4))), active ? .accent : .plain)
+                text(2, y + 1 + i, DisplayWidth.truncate(String(row.dropFirst()), to: max(0, w - 4)),
+                     active ? .accent : .plain)
             }
         case .log:
             if m.logTail.isEmpty {
                 text(2, y + 1, "no log yet — pass --log <path> or --debug", .dim)
             }
             for (i, row) in m.logTail.enumerated() where i < inside {
-                text(2, y + 1 + i, String(row.prefix(max(8, w - 4))), .dim)
+                text(2, y + 1 + i, DisplayWidth.truncate(row, to: max(8, w - 4)), .dim)
             }
         case .help:
             let help: [(String, String)] = [
@@ -368,7 +388,7 @@ final class Chrome {
                 ("--no-chrome", "force it off (scripts, CI)"),
             ]
             for (i, item) in help.enumerated() where i < inside {
-                text(2, y + 1 + i, item.0.padding(toLength: 12, withPad: " ", startingAt: 0), .bright)
+                text(2, y + 1 + i, DisplayWidth.pad(item.0, to: 12), .bright)
                 text(15, y + 1 + i, item.1, .plain)
             }
         }
@@ -392,16 +412,24 @@ final class Chrome {
             var x = 0
             while x < cols {
                 let idx = y * cols + x
+                if cells[idx].continuation { x += 1; continue }
                 let changed = prev == nil || prev!.count != cells.count || prev![idx] != cells[idx]
                 if !changed { x += 1; continue }
-                var end = x
+                var end = x + 1
                 while end < cols {
                     let i2 = y * cols + end
+                    if cells[i2].continuation { end += 1; continue }
                     if prev != nil, prev!.count == cells.count, prev![i2] == cells[i2] { break }
                     end += 1
                 }
-                while end > x, cells[y * cols + end - 1].ch == " " { end -= 1 }
-                if y == rows - 1 { end = min(end, cols - 1) }   // never arm autowrap
+                while end > x, cells[y * cols + end - 1].ch == " ", !cells[y * cols + end - 1].continuation {
+                    end -= 1
+                }
+                if y == rows - 1 {
+                    end = min(end, cols - 1)    // never arm autowrap
+                    // …and never split a wide glyph across that edge either
+                    if end > x, end < cols, cells[y * cols + end].continuation { end -= 1 }
+                }
                 if end <= x { x = max(x + 1, end + 1); continue }
                 out.append(contentsOf: Array("\u{1B}[\(y + 1);\(x + 1)H".utf8))
                 for i in x..<end {
