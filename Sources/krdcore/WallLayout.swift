@@ -124,6 +124,10 @@ public struct WallLayout: Equatable {
     public let per: Int
     /// Cells between two neighbouring cards on this pane (`cardGap(content)`).
     public let cardGap: Int
+    /// The rows the card *section* owns, which is not `cards[0].rows`: a card is as tall as its
+    /// picture needs, and the rest of the band stays empty wall (§6.5's 7:3 split still holds, the
+    /// footer is still the last row).
+    public let cardBandRows: Int
     public let stageStart: Int
     public let cardStart: Int
     public let displayCount: Int
@@ -268,18 +272,10 @@ public struct WallLayout: Equatable {
                 let freed = stageH - needed
                 stageH = needed
                 cardH += freed
-                // A card as wide as the taller band is high, then as many of those as fit a page:
-                // `per` is a maximum, so a tall pane trades the third card for two larger ones
-                // instead of giving the third card 11 rows of empty band around its picture.
-                let idealWidth = max(minCardCols,
-                                     Int((Double(cardH) * cardAspect * cellAspect).rounded()))
-                let fitting = max(1, Int((Double(content + gap) / Double(idealWidth + gap)).rounded()))
-                let widest = max(1, min(effectivePer, fitting))
-                let widthForPage = max(minCardCols, cardWidth(content, widest, gap: gap))
-                if widthForPage > effectiveWinW {
-                    effectivePer = widest
-                    effectiveWinW = widthForPage
-                }
+                // `per` is the reader's number, and it stays: a tall band used to trade the third
+                // card for two larger ones ("窗口的预览可以再小一点…一排可以显示三个窗口"), which is
+                // the opposite of what a shelf of small previews wants. The band keeps its rows and
+                // the cards keep their slots; the band's spare height stays wall.
             }
         }
         let perPage = max(1, effectivePer)
@@ -335,18 +331,28 @@ public struct WallLayout: Equatable {
         var cards: [CellRect] = []
         var cardCaptions: [CellRect] = []
         if cardH > 0 {
-            // **The cards on a page share its width, not `per`'s.** With three windows to a page a
-            // lone window got one third of the band and the other two thirds stayed wall: a picture
-            // hugging the left edge with 80 columns of nothing beside it reads as "the card is
-            // misplaced", not as "this band has one card". `per` is an upper bound on how many fit,
-            // so a page of one is one full-width card - the picture inside it keeps its aspect and
-            // ends up centred, which is the same rule the stage follows (§6.7).
-            let pageWinW = max(1, cardWidth(content, pageCount, gap: gap))
+            // **A card is one slot of `per`, whatever the page holds.** A page of one used to blow
+            // its card up to the whole band - a 115x29 box around an 11-row picture - and the review
+            // asked for the opposite: small previews, three to a row ("窗口的预览可以再小一点…很小的
+            // 一个图片就可以了，一排可以显示三个窗口"). The row of cards is centred in the band, so a
+            // page of one sits in the middle instead of hugging the left edge (§6.7).
+            let slotW = max(1, cardWidth(content, perPage, gap: gap))
+            // A card is as tall as its picture needs, not as tall as the band: the caption belongs
+            // directly under the picture (§6.6), and 18 rows of empty band around an 11-row preview
+            // reads as a bug. `cardAspect * cellAspect` turns the slot's width into rows; the band
+            // caps it, `minCardRows` floors it.
+            let cardRows = max(minCardRows,
+                               min(cardH, Int((Double(slotW) / (cardAspect * cellAspect)).rounded())))
+            let rowW = pageCount * slotW + (pageCount - 1) * gap
+            let startCol = 1 + max(0, (content - rowW) / 2)
             for i in 0..<pageCount {
-                let col = 1 + i * (pageWinW + gap)
-                cards.append(clip(col: col, row: cardsTop, width: pageWinW, height: cardH))
-                cardCaptions.append(clip(col: col, row: cardsTop + cardH, width: pageWinW, height: 1))
+                let col = startCol + i * (slotW + gap)
+                cards.append(clip(col: col, row: cardsTop, width: slotW, height: cardRows))
+                cardCaptions.append(clip(col: col, row: cardsTop + cardRows, width: slotW, height: 1))
             }
+            // The band keeps its rows in the row accounting even when the cards are shorter than
+            // it: the footer is the pane's last row (§6.5), and a shelf of small previews must not
+            // pull it up into the middle of the wall. What the cards do not use stays empty wall.
             row += cardH + 1
         }
 
@@ -378,6 +384,7 @@ public struct WallLayout: Equatable {
             footerRow: footerRow,
             per: effectivePer,
             cardGap: gap,
+            cardBandRows: cardH,
             stageStart: firstStage,
             cardStart: firstCard,
             displayCount: displays,

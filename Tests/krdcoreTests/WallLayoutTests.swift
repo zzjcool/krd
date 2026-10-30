@@ -144,7 +144,8 @@ final class WallLayoutTests: XCTestCase {
                 let l = layout(pane.cols, pane.rows, windows: 14, per: per)
                 let label = "\(pane.cols)x\(pane.rows) per=\(per)"
                 let stageH = l.stage.rows
-                let cardH = l.cards[0].rows
+                let cardH = l.cardBandRows
+                let cardRows = l.cards[0].rows
                 XCTAssertEqual(l.headerRow, 1, "\(label): header")
                 XCTAssertEqual(l.stage.row, 2, "\(label): stage top")
                 let divider = l.dividerRow.isEmpty ? 0 : 1
@@ -152,8 +153,8 @@ final class WallLayoutTests: XCTestCase {
                 XCTAssertEqual(l.dividerRow.row, 3 + stageH, "\(label): divider")
                 XCTAssertEqual(l.bandRow, 3 + stageH + divider, "\(label): band header")
                 XCTAssertEqual(l.cards[0].row, 4 + stageH + divider, "\(label): cards")
-                XCTAssertEqual(l.cardCaptions[0].row, 4 + stageH + divider + cardH,
-                               "\(label): card captions")
+                XCTAssertEqual(l.cardCaptions[0].row, 4 + stageH + divider + cardRows,
+                               "\(label): a caption sits under its picture, not under the band")
                 XCTAssertEqual(l.footerRow, 6 + stageH + cardH + divider, "\(label): footer")
                 XCTAssertEqual(l.footerRow, pane.rows, "\(label): footer == last row")
                 XCTAssertEqual(l.bar.stage.rect, CellRect(col: pane.cols, row: 2, cols: 1, rows: stageH),
@@ -161,9 +162,11 @@ final class WallLayoutTests: XCTestCase {
                 XCTAssertEqual(l.bar.cards.rect,
                                CellRect(col: pane.cols, row: 4 + stageH + divider, cols: 1, rows: cardH),
                                "\(label): the card segment covers the cards")
+                let rowW = l.cards.count * l.cards[0].cols + (l.cards.count - 1) * l.cardGap
+                let startCol = 1 + max(0, (l.contentCols - rowW) / 2)
                 XCTAssertEqual(l.cards.map(\.col),
-                               (0..<l.cards.count).map { 1 + $0 * (l.cards[0].cols + l.cardGap) },
-                               "\(label): one gap between cards")
+                               (0..<l.cards.count).map { startCol + $0 * (l.cards[0].cols + l.cardGap) },
+                               "\(label): one gap between cards, the row centred in the band")
             }
         }
         // No card band: the two card rows vanish and the footer moves up by two.
@@ -202,7 +205,9 @@ final class WallLayoutTests: XCTestCase {
                         // +1 when the divider row exists: it is one of the fixed rows too, and a
                         // pane that leaves a row unused is a layout bug, not breathing room.
                         let divider = l.dividerRow.isEmpty ? 0 : 1
-                        XCTAssertEqual(l.stage.rows + (l.cards.isEmpty ? 5 : (l.cards[0].rows + 6)) + divider,
+                        // `cardBandRows`, not `cards[0].rows`: the section keeps its rows even when
+                        // its previews are shorter than the band.
+                        XCTAssertEqual(l.stage.rows + (l.cards.isEmpty ? 5 : (l.cardBandRows + 6)) + divider,
                                        pane.rows, "\(label): the budget is spent exactly")
                     }
                 }
@@ -384,7 +389,7 @@ final class WallLayoutTests: XCTestCase {
             XCTAssertNil(one.action(row: row, col: one.barCol), "dead bar row \(row) answered")
         }
         // …but the card itself still enters its window.
-        XCTAssertEqual(one.action(row: one.cards[0].row, col: 1), .enterCard(0))
+        XCTAssertEqual(one.action(row: one.cards[0].row, col: one.cards[0].col), .enterCard(0))
 
         // 7 rows: no card band at all, so the lower segment has no rows and no clicks.
         let tiny = layout(137, 7, windows: 14, per: 3)
@@ -500,36 +505,60 @@ final class WallLayoutTests: XCTestCase {
     /// as "the picture is off to the left with a wall of black beside it" (§6.7: reach the width, and
     /// when the picture cannot, centre it). `per` is a maximum, so a page with fewer cards spreads
     /// over the same band: the card box is full width and the picture keeps its aspect inside it.
-    func testSingleCardTakesTheWholeBand() {
+    /// A card is one slot of `per` whatever the page holds, and the row of cards is centred: a page
+    /// of one used to stretch its card across the whole band (a 115x29 box around an 11-row
+    /// picture). The review asked for the opposite - small previews, three to a row.
+    func testSingleCardIsOneSlotCentred() {
         let l = layout(137, 44, windows: 1, per: 3)
         XCTAssertEqual(l.cards.count, 1)
         XCTAssertEqual(l.cardCaptions.count, 1)
-        XCTAssertEqual(l.cards[0].col, 1, "the band starts where it always did")
-        XCTAssertEqual(l.cards[0].cols, l.contentCols, "one card, the whole content width")
-        XCTAssertEqual(l.cardCaptions[0].cols, l.contentCols)
-        XCTAssertEqual(l.action(row: l.cards[0].row, col: 1), .enterCard(0))
-        XCTAssertEqual(l.action(row: l.cards[0].row, col: l.cards[0].maxCol - 1), .enterCard(0),
+        XCTAssertEqual(l.cards[0].cols, (l.contentCols - 2 * l.cardGap) / 3, "one slot of three")
+        XCTAssertEqual(l.cardCaptions[0].cols, l.cards[0].cols)
+        XCTAssertEqual(l.cards[0].col - 1, l.contentCols - l.cards[0].maxCol,
+                       "centred in the band, not hugging the left edge")
+        XCTAssertEqual(l.action(row: l.cards[0].row, col: l.cards[0].col), .enterCard(0))
+        XCTAssertEqual(l.action(row: l.cards[0].row, col: l.cards[0].maxCol), .enterCard(0),
                        "the whole card is the target, not only its first cells")
         XCTAssertNil(l.slot(row: l.cards[0].row, col: l.barCol), "the bar is never a card")
         XCTAssertFalse(l.bar.cards.scrollable, "one window does not scroll")
     }
 
-    /// Two cards on a page follow the same rule: they share the band evenly instead of leaving the
-    /// third slot empty. A full page is untouched (`per` cards == `per` widths).
-    func testAPartialPageSharesTheBandEvenly() {
+    /// A partial page keeps its slots and centres the row: two cards occupy two of three slots, one
+    /// gap apart, with the spare slot split evenly between the two margins.
+    func testAPartialPageKeepsItsSlotsAndCentresTheRow() {
         let two = layout(137, 44, windows: 2, per: 3)
         XCTAssertEqual(two.cards.count, 2)
+        XCTAssertEqual(two.cards[0].cols, (two.contentCols - 2 * two.cardGap) / 3,
+                       "the slot width does not depend on how many cards the page holds")
         XCTAssertEqual(two.cards[0].cols, two.cards[1].cols)
-        // Integer division leaves the remainder (here one column) rather than an empty slot.
-        XCTAssertEqual(two.cards[1].maxCol, two.contentCols, "the second card ends at the band's edge")
-        XCTAssertEqual(two.cards[1].maxCol - two.cards[1].cols + 1, two.cards[0].maxCol + 1 + two.cardGap,
+        XCTAssertEqual(two.cards[1].col - two.cards[0].col, two.cards[0].cols + two.cardGap,
                        "one gap between them")
-        XCTAssertEqual(two.cards[0].cols, (two.contentCols - two.cardGap) / 2)
+        XCTAssertEqual(two.cards[0].col - 1, two.contentCols - two.cards[1].maxCol,
+                       "and one equal margin either side")
 
         let full = layout(137, 44, windows: 7, per: 3)
         XCTAssertEqual(full.cards.count, 3)
-        XCTAssertEqual(full.cards[0].cols, (full.contentCols - 2 * full.cardGap) / 3,
-                       "a full page keeps the per-shaped width")
+        XCTAssertEqual(full.cards[0].col, 1, "a full page fills the band")
+        XCTAssertEqual(full.cards[2].maxCol, full.contentCols)
+        XCTAssertEqual(full.cards[0].cols, (full.contentCols - 2 * full.cardGap) / 3)
+    }
+
+    /// The cards are as tall as their pictures need, not as tall as the band: `cardAspect` turns the
+    /// slot's width into rows, so a row of small previews does not carry 18 rows of empty band, and
+    /// the caption sits directly under the picture (§6.6).
+    func testACardIsAsTallAsItsPicture() {
+        let tall = layout(137, 60, windows: 3, per: 3)
+        let slotW = tall.cards[0].cols
+        let expected = Int((Double(slotW) / (WallLayout.cardAspect * WallLayout.cellAspect)).rounded())
+        XCTAssertEqual(tall.cards[0].rows, expected, "the slot's width decides the height")
+        XCTAssertLessThanOrEqual(tall.cards[0].rows, tall.cardBandRows, "the band caps it")
+        XCTAssertEqual(tall.cardCaptions[0].row, tall.cards[0].row + tall.cards[0].rows,
+                       "the caption belongs directly under the picture")
+        XCTAssertEqual(tall.footerRow, tall.rows, "the footer stays the pane's last row")
+
+        let short = layout(137, 22, windows: 3, per: 3)
+        XCTAssertLessThanOrEqual(short.cards[0].rows, short.cardBandRows)
+        XCTAssertGreaterThanOrEqual(short.cards[0].rows, WallLayout.minCardRows)
     }
 
     func testStartsAreClamped() {
@@ -746,24 +775,27 @@ final class WallStageAspectTests: XCTestCase {
                         stageAspect: stageAspect, cellAspect: 2.0)
     }
 
-    func testTheStageBandIsWhatThePictureNeedsAndTheCardsTakeTheRest() {
+    func testTheStageBandIsWhatThePictureNeedsAndTheCardsStayPreviews() {
         let budget = layout(stageAspect: nil)
         let fitted = layout(stageAspect: 1.6)
         // 135 content columns / (2.0 cell aspect * 1.6 picture aspect) = 42.2 -> 42 rows.
         XCTAssertEqual(fitted.stage.rows, 42)
         // 7:3 of the 67-row budget gives the stage 47, and the picture keeps only the 42 it needs.
         XCTAssertEqual(budget.stage.rows, 47)
-        // The 5 rows the stage does not need go to the cards...
-        XCTAssertEqual(fitted.cards[0].rows, budget.cards[0].rows + 5)
-        // ...and the cards widen to fill them, so their pictures grow rather than gain margin.
-        XCTAssertGreaterThan(fitted.cards[0].cols, budget.cards[0].cols)
-        XCTAssertLessThanOrEqual(fitted.per, budget.per)
+        // The 5 rows the stage does not need stay with the card *section* - a card is one slot of
+        // `per` wide and as tall as its picture, so the freed rows are not spent making previews
+        // bigger ("很小的一个图片就可以了，一排可以显示三个窗口").
+        XCTAssertEqual(fitted.cardBandRows, budget.cardBandRows + 5)
+        XCTAssertEqual(fitted.cards[0].cols, budget.cards[0].cols, "the slot does not widen")
+        XCTAssertEqual(fitted.cards[0].rows, budget.cards[0].rows, "and the preview does not grow")
+        XCTAssertEqual(fitted.per, budget.per)
         XCTAssertEqual(fitted.cards.count, fitted.per)
         // Nothing moved down: the footer is still the last row of the pane.
         XCTAssertEqual(fitted.footerRow, rows)
         XCTAssertEqual(budget.footerRow, rows)
-        // The caption still sits directly under the picture.
+        // Both captions still sit directly under their picture.
         XCTAssertEqual(fitted.stageCaption.row, fitted.stage.row + fitted.stage.rows)
+        XCTAssertEqual(fitted.cardCaptions[0].row, fitted.cards[0].row + fitted.cards[0].rows)
     }
 
     func testAShorterPaneKeepsTheRowsItHasWhenThePictureDoesNotNeedMore() {

@@ -496,7 +496,10 @@ final class WallCanvasTests: XCTestCase {
                                 .contains("1452"),
                                "60x\(rows): the size line does not fit and must not be squeezed in")
             } else {
-                XCTAssertTrue(smallLines[box.maxRow - 1].hasPrefix(symbols.boxBL),
+                // The card is a slot now, so its left column is not the pane's first: compare the
+                // border without the margin in front of it.
+                XCTAssertTrue(smallLines[box.maxRow - 1].trimmingCharacters(in: .whitespaces)
+                                .hasPrefix(symbols.boxBL),
                               "60x\(rows): the row under the app line is the card's bottom border")
             }
         }
