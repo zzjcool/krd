@@ -6,8 +6,8 @@ each move re-encodes the next frame for real, and the numbers under the bars are
 put on the wire a moment ago -- not an estimate.
 
     colour   --quality  100 (lossless rgb) · 80 (5-6-5) · 60 (8-bit grey) · 30 (4-bit grey) · 0 (1-bit)
-    space    --scale    1.0 · 0.5 · 0.33 · 0.25        (the terminal upscales to the same box)
-    time     --fps      30 · 15 · 10 · 5 · 2
+    space    --scale    1.0 · 0.5 · 0.33 · 0.25 · 0.1  (the terminal upscales to the same box)
+    time     --fps      30 · 25 · 20 · 15 · 10 · 5      (one step = 5 fps)
 
 Controls, because a slider you cannot reach is a table with extra steps:
 
@@ -36,8 +36,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CLIP = os.path.join(HERE, '..', 'docs', 'media', 'demo.mp4')
 
 QUALITY = [100, 80, 60, 30, 0]
-DOWNSCALE = [1, 2, 3, 4]                 # 1.0, 0.5, 0.33, 0.25
-FPS = [30, 15, 10, 5, 2]
+DOWNSCALE = [1, 2, 3, 4, 10]             # 1.0, 0.5, 0.33, 0.25, 0.1
+FPS = [30, 25, 20, 15, 10, 5]        # one step = 5 fps
 LABEL = {100: 'rgb + zlib (lossless)', 80: 'rgb 5-6-5 + zlib', 60: 'grey 8-bit png',
          30: 'grey 4-bit png', 0: 'black/white 1-bit'}
 
@@ -172,7 +172,8 @@ def table(clip, src_w, src_h):
             cells.append(f'{quality:3d}:{human(len(payload)):>8s} {base / len(payload):6.2f}x')
         print(f'  --scale {("%.2f" % (1 / factor)).rstrip("0").rstrip("."):>4s} '
               f'({w2}x{h2})  ' + '   '.join(cells))
-    print('\n  --fps 30/15/10/5/2 divide the same frame: 1.00x 2.00x 3.00x 6.00x 15.00x')
+    print('\n  --fps ' + '/'.join(str(f) for f in FPS) + ' divide the same frame: '
+          + ' '.join(f'{30 / f:.2f}x' for f in FPS))
     r2, w2, h2 = resample(rows, src_w, src_h, 2)
     combined = len(encode(r2, w2, h2, 60)[0])
     print(f'  combined 60 / 0.5 / 15  = {base / combined * 2:5.2f}x fewer bytes '
