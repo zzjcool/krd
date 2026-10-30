@@ -126,6 +126,20 @@ enum BenchContent: String, CaseIterable {
     case ui
     /// Smooth ramp: video pans and wallpapers; compresses well but costs zlib time.
     case gradient
+    /// A photograph, statistically: low-frequency structure plus a little grain. `noise` is the
+    /// worst case for compression and a poor model of the thing people actually mirror (issue #65).
+    case photoReal
+
+    /// Triangle wave in 0...255: the low-frequency structure a photograph has and hash noise does
+    /// not. Integer arithmetic on purpose -- `sin()` would make the bytes depend on the platform's
+    /// libm, and this case's whole value is that it is reproducible.
+    private static func wave(_ v: Int, period: Int, phase: Int) -> Int {
+        let p = ((v + phase) % period + period) % period
+        let half = max(period / 2, 1)
+        return (p < half ? p : period - p) * 255 / max(half - 1, 1)
+    }
+
+    private static func clamp8(_ v: Int) -> UInt8 { UInt8(min(255, max(0, v))) }
 
     /// `seed` shifts the pattern, so a "full repaint" round can differ from the previous one
     /// in every pixel without having to be rebuilt from a different generator.
@@ -148,6 +162,24 @@ enum BenchContent: String, CaseIterable {
             let border = (x + seed * 3) % 64 < 2 || (y + seed) % 48 < 2
             let base = UInt8(210 + block * 8)
             return border ? (90, 100, 120) : (base, base, UInt8(min(255, Int(base) + 6)))
+        case .photoReal:
+            // Luminance from two low-frequency waves (a photograph's structure), a gentle colour
+            // cast, and +-4 grain. Channels are *correlated* on purpose: that is what a real
+            // photograph has and hash noise does not, and it is what makes this case compress
+            // losslessly while `photo` cannot.
+            let lum = (Self.wave(x &* 2 &+ y, period: 2329, phase: seed &* 13) * 2
+                       + Self.wave(y &* 2 &+ x / 3, period: 1452, phase: seed &* 7)) / 3
+            let tint = (Self.wave(x &+ y &* 2, period: 1747, phase: seed &* 29) - 128) / 6
+            // Grain from an integer hash. Frozen constants, no RNG state, no clock: this is the
+            // whole determinism story for this case (two runs must be byte-identical).
+            var h = UInt32(truncatingIfNeeded: x &* 374_761_393)
+                ^ UInt32(truncatingIfNeeded: y &* 668_265_263)
+                ^ UInt32(truncatingIfNeeded: (seed &* 2_246_822_519) & 0x7fff_ffff)
+            h ^= h >> 15; h = h &* 2_246_822_519; h ^= h >> 13
+            let grain = Int(h % 21) - 10
+            return (Self.clamp8(lum + tint + grain),
+                    Self.clamp8(lum + grain),
+                    Self.clamp8(lum - tint + grain))
         case .gradient:
             let v = UInt8(truncatingIfNeeded: ((x + seed * 40) % 2329) * 255 / 2329)
             let w = UInt8(truncatingIfNeeded: ((y + seed * 20) % 1452) * 255 / 1452)
@@ -276,6 +308,8 @@ func benchCases(_ grid: TileGrid) -> [BenchCase] {
                   }),
         BenchCase(name: "photo", content: .noise, tiles: .exactlyAll,
                   patch: { px, grid, k in px = benchMakeFrame(grid, .noise, seed: k + 1) }),
+        BenchCase(name: "photoReal", content: .photoReal, tiles: .exactlyAll,
+                  patch: { px, grid, k in px = benchMakeFrame(grid, .photoReal, seed: k + 1) }),
         BenchCase(name: "gradient", content: .gradient, tiles: .exactlyAll,
                   patch: { px, grid, k in px = benchMakeFrame(grid, .gradient, seed: k + 1) }),
         BenchCase(name: "ui", content: .ui, tiles: .exactlyAll,

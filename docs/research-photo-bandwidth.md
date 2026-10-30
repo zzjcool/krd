@@ -279,9 +279,12 @@ pixels".** Not a video codec; not a protocol extension.
   a tile whose last compression bought nothing is sent raw, and a cheap neighbour-delta predictor
   rescues it the moment the content becomes compressible again). Measured on the `photo` case at the
   reference layout: encode p50 **9.27 → 3.18 ms** (−66 %), wire **4,757,652 → 4,755,012 B** (raw beat
-  the zlib-expanded payload). Text/UI/gradient bytes are unchanged. The remaining item from this
-  milestone — a second `photo` case with photographic statistics instead of hash noise — is still
-  open.
+  the zlib-expanded payload). Text/UI/gradient bytes are unchanged. The second half of this milestone
+  is shipped too: since #59 the encoder quantises to 5-6-5 first, and **#65 added the `photoReal`
+  case** that measures it on content with photographic statistics instead of hash noise. On the
+  pinned layout that case is **5,318,797 B payload / 7,124,315 B wire** losslessly at ratio 0.70, and
+  quantising takes it to 0.33 — a **2.14× gain against 1.29× on hash noise**, which is the number
+  that says whether the trick was worth it.
 - **M2 — content-adaptive 16-bit.** ✅ **shipped in #59**, with one correction to the plan above:
   **it does not need a 16-bit wire format.** Quantising to 5-6-5 and still sending 3 bytes per pixel
   is enough, because the low bits are what made the bytes incompressible — zlib then finds the
