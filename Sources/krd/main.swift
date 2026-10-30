@@ -993,6 +993,14 @@ final class Desk {
             // microseconds, and this runs before the first paint, where half a second is visible.
             if let measured = TermGeometry.query(timeoutMs: 150) {
                 TermGeometry.fallbackCell = measured.cellSize
+                // The one number every fit in the wall depends on, and the one a reader cannot see:
+                // "the picture does not reach the full width" is answered by this line plus their
+                // terminal's own cell (design §6.6).
+                Log.write("krd: wall cell \(Int(measured.cellSize.w))x\(Int(measured.cellSize.h)) px, "
+                          + "measured from the terminal (\(TermGeometry.lastAnswer.label))\n")
+            } else {
+                Log.write("krd: wall cell \(Int(TermGeometry.fallbackCell.w))x"
+                          + "\(Int(TermGeometry.fallbackCell.h)) px, assumed (the terminal did not answer)\n")
             }
         }
         // A size-zero viewport is what "there is no picture" means to the mouse path: no cell and
@@ -1070,7 +1078,9 @@ final class Desk {
         if let state = wallState {
             let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                       displays: model.displays.count,
-                                      windows: model.windows.count)
+                                      windows: model.windows.count,
+                                      stageAspect: stageAspect(model, state),
+                                      cellAspect: pane.cellH / pane.cellW)
             wallState?.clamp(displays: model.displays.count, windows: model.windows.count,
                              per: layout.per)
         }
@@ -1084,7 +1094,9 @@ final class Desk {
         guard let state = wallState, let pane = wallPane else { return }
         let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                   displays: wallModel.displays.count,
-                                  windows: wallModel.windows.count)
+                                  windows: wallModel.windows.count,
+                                  stageAspect: stageAspect(wallModel, state),
+                                  cellAspect: pane.cellH / pane.cellW)
         let model = wallModel
         let panels = wallPanels(layout: layout, model: model, pane: pane)
         guard !panels.isEmpty else {
@@ -1132,6 +1144,16 @@ final class Desk {
     ///
     /// Pure plumbing: the decisions (which display, which page, how big) were all made by
     /// `WallLayout` and `WallPanels`; this only supplies ids and aspects.
+    /// The on-stage display's width/height, or `nil` when the model has nothing to measure (a mock,
+    /// a display whose id nobody filled in). The layout uses it to give the stage band exactly the
+    /// rows its picture needs (design §6.6).
+    private func stageAspect(_ model: WallModel, _ state: WallState) -> Double? {
+        guard state.stageStart >= 0, state.stageStart < model.displays.count else { return nil }
+        let display = model.displays[state.stageStart]
+        guard display.width > 0, display.height > 0 else { return nil }
+        return Double(display.width) / Double(display.height)
+    }
+
     private func wallPanels(layout: WallLayout, model: WallModel,
                             pane: (cols: Int, rows: Int, cellW: Double, cellH: Double)) -> [WallPanel] {
         var stage: PanelSource?
@@ -2693,7 +2715,9 @@ final class Desk {
         let displays = wallModel.displays.count
         let windows = wallModel.windows.count
         let layout = state.layout(cols: pane.cols, rows: pane.rows,
-                                  displays: displays, windows: windows)
+                                  displays: displays, windows: windows,
+                                  stageAspect: stageAspect(wallModel, state),
+                                  cellAspect: pane.cellH / pane.cellW)
         // nil = header, the divider, the gap column, a dead end of the bar, a shelf with nothing to
         // scroll: those cells belong to the wall too, so the gesture ends here.
         let action = wheel == 0 ? layout.action(row: row, col: col)

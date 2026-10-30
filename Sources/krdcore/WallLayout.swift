@@ -192,8 +192,19 @@ public struct WallLayout: Equatable {
 
     // MARK: build
 
+    /// - Parameters:
+    ///   - stageAspect: the stage picture's own width/height, when the caller knows it. A tall pane's
+    ///     budget gives the stage more rows than a 16:10 picture can use, and the band used to keep
+    ///     them: the picture was fitted inside a band 11 rows taller than itself, which reads as "the
+    ///     display is smaller than its frame". With the aspect here the band is what the picture
+    ///     needs and the cards take the rest (widened, so their pictures grow too). `nil` keeps the
+    ///     old row split, which is what the fixed layout table in the tests pins.
+    ///   - cellAspect: `cellH / cellW`, i.e. how many cell-heights one column is worth. Measured from
+    ///     the terminal where it answers (`CSI 16t`); the constant 2.0 is the 8x16 cell.
     public static func make(paneCols: Int, paneRows: Int, displayCount: Int, windowCount: Int,
-                            per: Int, stageStart: Int, cardStart: Int) -> WallLayout {
+                            per: Int, stageStart: Int, cardStart: Int,
+                            stageAspect: Double? = nil,
+                            cellAspect: Double = WallLayout.cellAspect) -> WallLayout {
         let cols = max(1, paneCols)
         let rows = max(1, paneRows)
         let displays = max(0, displayCount)
@@ -210,7 +221,10 @@ public struct WallLayout: Equatable {
 
         // Height follows from the width, so a card keeps its shape at any pane size: 44 cells ->
         // 44 / (1.62 * 2) = 13.6 -> 14 rows, which is the height the mockup was measured with.
-        let idealCardH = max(minCardRows, Int((Double(winW) / (cardAspect * cellAspect)).rounded()))
+        func cardHeight(forWidth w: Int) -> Int {
+            max(minCardRows, Int((Double(w) / (cardAspect * cellAspect)).rounded()))
+        }
+        let idealCardH = cardHeight(forWidth: winW)
 
         // The fixed rows: header, stage caption, (divider), band header, blank, footer.
         //
@@ -235,7 +249,35 @@ public struct WallLayout: Equatable {
             cardH = 0
             stageH = max(0, budget)
         }
-        let perPage = max(1, perEff)
+        // The stage band is what its picture needs, not what the budget happens to leave over, and
+        // the rows it does not need go to the cards - which are widened so their pictures grow into
+        // them instead of gaining empty margin (`per` is an upper bound: a tall pane shows fewer,
+        // larger cards). Without this a 137x73 pane gave the stage 53 rows for a 42-row picture and
+        // the 11 rows showed up as wall between the caption and the divider.
+        var effectivePer = perEff
+        var effectiveWinW = winW
+        if let stageAspect, stageAspect > 0, stageAspect.isFinite, cardH > 0 {
+            let needed = max(minStageRows,
+                             Int((Double(content) / (cellAspect * stageAspect)).rounded()))
+            if needed < stageH {
+                let freed = stageH - needed
+                stageH = needed
+                cardH += freed
+                // A card as wide as the taller band is high, then as many of those as fit a page:
+                // `per` is a maximum, so a tall pane trades the third card for two larger ones
+                // instead of giving the third card 11 rows of empty band around its picture.
+                let idealWidth = max(minCardCols,
+                                     Int((Double(cardH) * cardAspect * cellAspect).rounded()))
+                let fitting = max(1, Int((Double(content + gap) / Double(idealWidth + gap)).rounded()))
+                let widest = max(1, min(effectivePer, fitting))
+                let widthForPage = max(minCardCols, cardWidth(content, widest, gap: gap))
+                if widthForPage > effectiveWinW {
+                    effectivePer = widest
+                    effectiveWinW = widthForPage
+                }
+            }
+        }
+        let perPage = max(1, effectivePer)
         let firstStage = Self.clamp(stageStart, 0, max(0, displays - 1))
         let firstCard = Self.clamp(cardStart, 0, max(0, windows - perPage))
         let pageCount = max(0, min(perPage, windows - firstCard))
@@ -289,9 +331,9 @@ public struct WallLayout: Equatable {
         var cardCaptions: [CellRect] = []
         if cardH > 0 {
             for i in 0..<pageCount {
-                let col = 1 + i * (winW + gap)
-                cards.append(clip(col: col, row: cardsTop, width: winW, height: cardH))
-                cardCaptions.append(clip(col: col, row: cardsTop + cardH, width: winW, height: 1))
+                let col = 1 + i * (effectiveWinW + gap)
+                cards.append(clip(col: col, row: cardsTop, width: effectiveWinW, height: cardH))
+                cardCaptions.append(clip(col: col, row: cardsTop + cardH, width: effectiveWinW, height: 1))
             }
             row += cardH + 1
         }
@@ -322,7 +364,7 @@ public struct WallLayout: Equatable {
             cards: cards,
             cardCaptions: cardCaptions,
             footerRow: footerRow,
-            per: perEff,
+            per: effectivePer,
             cardGap: gap,
             stageStart: firstStage,
             cardStart: firstCard,

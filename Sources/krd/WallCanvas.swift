@@ -186,9 +186,16 @@ struct WallState: Equatable {
 
     /// The geometry of the current pane. `WallLayout` does the clamping by itself, so passing in
     /// stale offsets cannot produce a rect pointing at a card that is not there.
-    func layout(cols: Int, rows: Int, displays: Int, windows: Int) -> WallLayout {
+    /// - Parameters:
+    ///   - stageAspect: the on-stage display's width/height, when the model has it; the layout then
+    ///     gives the stage the rows its picture needs and hands the rest to the cards (WallLayout).
+    ///   - cellAspect: `cellH / cellW` from the pane (measured from the terminal when it answers).
+    func layout(cols: Int, rows: Int, displays: Int, windows: Int,
+                stageAspect: Double? = nil,
+                cellAspect: Double = WallLayout.cellAspect) -> WallLayout {
         WallLayout.make(paneCols: cols, paneRows: rows, displayCount: displays, windowCount: windows,
-                        per: per, stageStart: stageStart, cardStart: cardStart)
+                        per: per, stageStart: stageStart, cardStart: cardStart,
+                        stageAspect: stageAspect, cellAspect: cellAspect)
     }
 
     /// Pull both offsets back into range after the world changed under the wall (a display

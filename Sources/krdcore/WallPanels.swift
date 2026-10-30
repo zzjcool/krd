@@ -120,7 +120,13 @@ public enum WallPanels {
         case let .display(displayID): id = .display(displayID)
         case let .window(windowID): id = .window(windowID)
         }
+        // The fit's offsets are the padding inside the band, and this panel has no band: the picture
+        // is cropped to `cellRect` and starts at 0,0. Reporting the band's padding here would tell
+        // `compose` to shift the picture inside a canvas exactly its own size (and the panel would
+        // clip its own left column), so the panel states the offsets it actually has.
+        let picture = PanelFit(contentWidth: fit.contentWidth, contentHeight: fit.contentHeight,
+                               originX: 0, originY: 0, cellRect: fit.cellRect)
         return WallPanel(slot: slot, source: id, rect: fit.cellRect,
-                         pixelWidth: fit.contentWidth, pixelHeight: fit.contentHeight, fit: fit)
+                         pixelWidth: fit.contentWidth, pixelHeight: fit.contentHeight, fit: picture)
     }
 }

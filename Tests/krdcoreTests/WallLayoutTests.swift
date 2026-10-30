@@ -703,3 +703,52 @@ final class WallWheelTests: XCTestCase {
         XCTAssertNil(layout.wheelAction(row: layout.dividerRow.row, col: 5, direction: 1))
     }
 }
+
+/// The stage band follows the picture it has to hold (design §6.6, the "picture smaller than its
+/// frame" report): a 16:10 display in a 137x73 pane needs 42 rows, not the 53 the row budget leaves
+/// over, and the rows it gives back make the cards bigger instead of showing as wall.
+final class WallStageAspectTests: XCTestCase {
+    private let cols = 137, rows = 73
+
+    private func layout(stageAspect: Double?, per: Int = 3) -> WallLayout {
+        WallLayout.make(paneCols: cols, paneRows: rows, displayCount: 1, windowCount: 3,
+                        per: per, stageStart: 0, cardStart: 0,
+                        stageAspect: stageAspect, cellAspect: 2.0)
+    }
+
+    func testTheStageBandIsWhatThePictureNeedsAndTheCardsTakeTheRest() {
+        let budget = layout(stageAspect: nil)
+        let fitted = layout(stageAspect: 1.6)
+        // 135 content columns / (2.0 cell aspect * 1.6 picture aspect) = 42.2 -> 42 rows.
+        XCTAssertEqual(fitted.stage.rows, 42)
+        XCTAssertEqual(budget.stage.rows, 53)
+        // The 11 rows the stage does not need go to the cards...
+        XCTAssertEqual(fitted.cards[0].rows, budget.cards[0].rows + 11)
+        // ...and the cards widen to fill them, so their pictures grow rather than gain margin.
+        XCTAssertGreaterThan(fitted.cards[0].cols, budget.cards[0].cols)
+        XCTAssertLessThanOrEqual(fitted.per, budget.per)
+        XCTAssertEqual(fitted.cards.count, fitted.per)
+        // Nothing moved down: the footer is still the last row of the pane.
+        XCTAssertEqual(fitted.footerRow, rows)
+        XCTAssertEqual(budget.footerRow, rows)
+        // The caption still sits directly under the picture.
+        XCTAssertEqual(fitted.stageCaption.row, fitted.stage.row + fitted.stage.rows)
+    }
+
+    func testAShorterPaneKeepsTheRowsItHasWhenThePictureDoesNotNeedMore() {
+        // 36 rows: the budget gives the stage 24 and a 16:10 picture needs 42 -> the aspect must
+        // never ask for more than the budget has; the layout shrinks, it does not overflow.
+        let tall = WallLayout.make(paneCols: cols, paneRows: 36, displayCount: 1, windowCount: 3,
+                                   per: 3, stageStart: 0, cardStart: 0,
+                                   stageAspect: 1.6, cellAspect: 2.0)
+        XCTAssertTrue(tall.stage.rows <= 24)
+        XCTAssertEqual(tall.stage.row + tall.stage.rows - 1, tall.stageCaption.row - 1)
+        XCTAssertEqual(tall.footerRow, 36)
+    }
+
+    func testAMockWithoutADisplaySizeKeepsTheBudgetsSplit() {
+        let noAspect = layout(stageAspect: nil)
+        XCTAssertEqual(noAspect.stage.rows, 53)
+        XCTAssertEqual(noAspect.per, 3)
+    }
+}

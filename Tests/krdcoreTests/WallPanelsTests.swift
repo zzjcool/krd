@@ -163,10 +163,16 @@ final class WallPanelRowHeightTests: XCTestCase {
                      "a card with no neighbour has nothing to line up with")
         let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
                                     stageSource: nil, cardSources: cards)
-        // Uncapped: exactly what one fit of that aspect gives, i.e. it uses as much of the rect as
-        // its shape allows.
-        XCTAssertEqual(panels[0].fit,
-                       PanelImage.fit(aspect: 1.62, in: layout.cards[0], cellW: 17, cellH: 33))
+        // Uncapped: exactly the rectangle one fit of that aspect gives, i.e. it uses as much of the
+        // band as its shape allows. Only the offsets differ: the panel *is* that rectangle, so its
+        // origin is 0,0 and the band's padding is not part of it (see WallPanels.make).
+        let fitted = PanelImage.fit(aspect: 1.62, in: layout.cards[0], cellW: 17, cellH: 33)
+        let panel = panels[0]
+        XCTAssertEqual(panel.rect, fitted.cellRect)
+        XCTAssertEqual(panel.pixelWidth, fitted.contentWidth)
+        XCTAssertEqual(panel.pixelHeight, fitted.contentHeight)
+        XCTAssertEqual(panel.fit.originX, 0)
+        XCTAssertEqual(panel.fit.originY, 0)
     }
 
     func testASlotWithNoSourceDoesNotDragTheRowDown() {
