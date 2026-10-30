@@ -475,7 +475,8 @@ final class Desk {
                 geometry.cols = pane.cols
                 geometry.rows = pane.rows
             }
-            geometrySource = (queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")) + " · mock"
+            geometrySource = (queried != nil ? TermGeometry.lastAnswer.label
+                                             : (options.cell != nil ? "--cell" : "TIOCGWINSZ")) + " · mock"
             // Nothing below this line is mocked: same tiles, same encoder, same placements, same
             // chrome. Only the pixel source is different, which is why this needs no permission.
             let size = options.mockSize ?? (w: 1920, h: 1200)
@@ -539,10 +540,22 @@ final class Desk {
         // Prefer the terminal's own answer: sshd ptys report no pixel size at all.
         let queried = TermGeometry.query()
         let geometry = queried ?? TermGeometry.read()
-        geometrySource = queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")
+        geometrySource = queried != nil
+            ? TermGeometry.lastAnswer.label
+            : (options.cell != nil ? "--cell" : "TIOCGWINSZ")
+        if options.debug {
+            // Which question the terminal answered, in the log: a picture sized from the window
+            // measurement (or from a constant) is otherwise indistinguishable from a measured one.
+            Log.write("krd: geometry source \(geometrySource)\n")
+        }
         if geometry.pixelWidth == 0 || geometry.pixelHeight == 0 {
+            // Spell out the consequence (issue #56): the picture is merely soft and the exit code is
+            // 0, so "assuming a cell size" on its own is a line nobody can act on.
+            let w = Int(TermGeometry.fallbackCell.w), h = Int(TermGeometry.fallbackCell.h)
             Log.write(
-                "krd: terminal reports no pixel size; assuming a \(Int(TermGeometry.fallbackCell.w))x\(Int(TermGeometry.fallbackCell.h)) px cell (override with --cell)\n")
+                "krd: terminal reports no pixel size; assuming a \(w)x\(h) px cell -> the image will be "
+                + "\(geometry.cols * w)x\(geometry.rows * h) for a \(geometry.cols)x\(geometry.rows) pane; "
+                + "pass --cell <w>x<h> if that is wrong\n")
         }
 
         let target = try await makeCaptureTarget(using: content)

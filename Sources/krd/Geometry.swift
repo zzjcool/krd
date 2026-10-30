@@ -110,7 +110,61 @@ struct Viewport {
     }
 }
 
+/// A pixel size a terminal reported: one cell (`CSI 16 t`) or the whole window (`CSI 14 t`).
+struct PixelSize: Equatable {
+    var w: Int
+    var h: Int
+}
+
 extension TermGeometry {
+    /// Which question the terminal actually answered. `windowOnly` is the case in issue #56: the
+    /// cell is derived from the window and the grid, and `--debug` says so.
+    enum Answer {
+        case cellAndWindow, cellOnly, windowOnly, none
+
+        /// What `--debug` prints for `geometrySource`.
+        var label: String {
+            switch self {
+            case .cellAndWindow: return "CSI 16t+14t"
+            case .cellOnly: return "CSI 16t"
+            case .windowOnly: return "CSI 14t (cell derived)"
+            case .none: return "-"
+            }
+        }
+    }
+
+    /// Which of the two answers `query()` last produced.
+    static var lastAnswer: Answer = .none
+
+    /// The two answers out of a raw response string. Half an answer is not an answer: a sequence
+    /// only counts once its terminating `t` has arrived, which is also what makes a truncated
+    /// `ESC[14;600;800` harmless.
+    static func answers(in text: String) -> (cell: PixelSize?, window: PixelSize?) {
+        let cell = parse(text, code: 6).map { PixelSize(w: $0.0, h: $0.1) }
+        let window = parse(text, code: 4).map { PixelSize(w: $0.0, h: $0.1) }
+        return (cell, window)
+    }
+
+    /// The geometry those answers imply, or nil when the terminal answered neither question.
+    ///
+    /// `CSI 16 t` wins when both arrived — it is the number the terminal computed itself. With only
+    /// `CSI 14 t` the cell is derived from the window and the grid (issue #56): strictly better
+    /// information than the 8x20 constant, and the same arithmetic `cellSize` already applies to
+    /// TIOCGWINSZ's pixel fields. A 137x44 pane that answers 2329x1452 comes out at exactly the
+    /// 17x33 cell it really is, instead of 8x20 and a 1096x880 picture.
+    static func fromAnswers(cols: Int, rows: Int, cell: PixelSize?, window: PixelSize?) -> TermGeometry? {
+        guard cols > 0, rows > 0 else { return nil }
+        if let cell {
+            return TermGeometry(cols: cols, rows: rows,
+                                pixelWidth: window?.w ?? cols * cell.w,
+                                pixelHeight: window?.h ?? rows * cell.h)
+        }
+        if let window {
+            return TermGeometry(cols: cols, rows: rows, pixelWidth: window.w, pixelHeight: window.h)
+        }
+        return nil
+    }
+
     /// Ask the terminal for its geometry instead of trusting TIOCGWINSZ.
     ///
     /// Needed because a pty created by sshd (or by some terminals) reports 0 for
@@ -150,8 +204,8 @@ extension TermGeometry {
 
         var response = ""
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
-        var cell: (Int, Int)? = nil
-        var window: (Int, Int)? = nil
+        var cell: PixelSize? = nil
+        var window: PixelSize? = nil
         var buffer = [UInt8](repeating: 0, count: 256)
         while Date() < deadline, cell == nil || window == nil {
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
@@ -160,18 +214,21 @@ extension TermGeometry {
             let n = Darwin.read(STDIN_FILENO, &buffer, buffer.count)
             if n > 0 {
                 response += String(decoding: buffer[0..<n], as: UTF8.self)
-                if let r = parse(response, code: 6), cell == nil { cell = r }
-                if let r = parse(response, code: 4), window == nil { window = r }
+                let answers = answers(in: response)
+                if let r = answers.cell, cell == nil { cell = r }
+                if let r = answers.window, window == nil { window = r }
             } else {
                 usleep(5_000)
             }
         }
 
-        guard let cellSize = cell else { return nil }
-        let pixelWidth = window.map { $0.0 } ?? cols * cellSize.0
-        let pixelHeight = window.map { $0.1 } ?? rows * cellSize.1
+        guard let geometry = fromAnswers(cols: cols, rows: rows, cell: cell, window: window) else {
+            lastAnswer = .none
+            return nil
+        }
+        lastAnswer = cell != nil ? (window != nil ? .cellAndWindow : .cellOnly) : .windowOnly
         lastGrid = (cols, rows)
-        return TermGeometry(cols: cols, rows: rows, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        return geometry
     }
 
     private static func parse(_ text: String, code: Int) -> (Int, Int)? {

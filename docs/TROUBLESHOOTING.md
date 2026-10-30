@@ -105,8 +105,13 @@ If that fixes it, the terminal's `?2026` handling is the bug — note it in the 
 **Cause.** `TIOCGWINSZ` returned `0` for `ws_xpixel`/`ws_ypixel` (typical for sshd-created ptys and
 for panes that have not been laid out yet), so the cell size had to be guessed.
 **Fix.** Three-level fallback: `CSI 16 t` + `CSI 14 t` query (250 ms) → `TIOCGWINSZ` on stdout,
-stdin, `/dev/tty` → `--cell <w>x<h>` (default `8x20`). If your terminal answers neither query,
-pass the real cell size explicitly, e.g. `--cell 17x33`.
+stdin, `/dev/tty` → `--cell <w>x<h>` (default `8x20`). A terminal that answers **only** `CSI 14 t`
+(window size) is enough: the cell is derived as window ÷ grid, so the picture still matches the pane
+exactly (issue #56 — before that, such a terminal was treated as answering nothing and an 80x24 pane
+came out at 640x480). `--debug` prints which question was answered:
+`krd: geometry source CSI 16t+14t`, `CSI 14t (cell derived)`, `--cell` or `TIOCGWINSZ`. If your terminal answers neither query, the log
+says the consequence (`the image will be WxH for a CxR pane`) and you pass the real cell size
+explicitly, e.g. `--cell 17x33`.
 
 ### 11. Startup hangs: no output at all, process sits there
 
