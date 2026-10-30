@@ -8,6 +8,19 @@ import krdcore
 /// that), so there is no dedupe, no cache and no stream to keep alive — measured at 92 ms for a
 /// whole wall's four panels (design §12, P0).
 enum WallPictures {
+    /// Device pixels per *reported* pixel for the captures below.
+    ///
+    /// The fit measures its box in the terminal's own units (`CSI 16t`), and a terminal may report
+    /// those in points while drawing an image one device pixel per image pixel: Rex answers 8x16 for
+    /// a cell that is 16.7x32.7 device pixels, so a picture sized to the box arrived at half its
+    /// width, anchored top-left, and the rest of the identical box showed the terminal's background.
+    /// Measured on the wall's own bytes: 1075x672 px in a 135x41 cell box (design §6.6).
+    static var pixelScale: Double = 1
+
+    /// The capture is asked for at `contentWidth x contentHeight` * `pixelScale`, never above
+    /// `maxSide` on either axis: ScreenCaptureKit clamps a bigger request silently, and an image that
+    /// no longer matches `s=`/`v=` would be worse than a soft one.
+    static let maxSide = 4096.0
     struct Picture {
         let panel: WallPanel
         /// The picture itself, **RGBA**, exactly `fit.contentWidth x fit.contentHeight`: no bars,
@@ -42,16 +55,22 @@ enum WallPictures {
                 // Asked in the *content's* aspect, so ScreenCaptureKit's own scaling produces the
                 // picture at exactly the size it will occupy and nothing is cropped (P0: SCK scales
                 // to fit, anchored top-left, and pads with black only when the aspects disagree).
+                // The picture is asked for in the pixels it will be drawn at, not in the box's
+                // reported pixels: see `pixelScale`. Both axes share one factor, so the aspect the
+                // fit chose is untouched.
+                var wantW = Double(panel.fit.contentWidth) * Self.pixelScale
+                var wantH = Double(panel.fit.contentHeight) * Self.pixelScale
+                let shrink = min(1, Self.maxSide / max(wantW, wantH))
+                wantW *= shrink
+                wantH *= shrink
+                let width = max(1, Int(wantW.rounded()))
+                let height = max(1, Int(wantH.rounded()))
                 let image: CGImage
                 switch panel.source {
                 case let .display(id):
-                    image = try await PanelCapture.display(id: id,
-                                                           width: panel.fit.contentWidth,
-                                                           height: panel.fit.contentHeight)
+                    image = try await PanelCapture.display(id: id, width: width, height: height)
                 case let .window(id):
-                    image = try await PanelCapture.window(id: id,
-                                                          width: panel.fit.contentWidth,
-                                                          height: panel.fit.contentHeight)
+                    image = try await PanelCapture.window(id: id, width: width, height: height)
                 }
                 guard let raster = PanelRaster.rgb(image) else {
                     throw PanelCaptureError.noPixelBuffer

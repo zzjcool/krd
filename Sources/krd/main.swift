@@ -64,6 +64,10 @@ struct Options {
     var tileRows = 4
     var pixelFormat: PixelFormat? = nil
     var cell: (w: Double, h: Double)? = nil
+    /// Device pixels per reported pixel for the *pictures* (see `runWall`): a terminal may report
+    /// its geometry in points and still draw images 1:1 in device pixels. 0 = decide from the
+    /// geometry source (2 when only ANSI answers were available, 1 when the pty reported pixels).
+    var dpr: Double? = nil
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
 
@@ -159,6 +163,8 @@ func usage() -> String {
       --cursor            draw the pointer into the picture (default: hidden — the pane already
                           follows the local pointer, and a drawn one dirties tiles as the mouse
                           moves; --no-cursor is still accepted and means the same as the default)
+      --dpr <n>           device pixels per reported pixel for pictures (default: 2 when the
+                          terminal only answers CSI 16t/14t, 1 when the pty reports pixels)
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
@@ -314,6 +320,11 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
             if let spec = args[safe: i + 1], case let parts = spec.split(separator: "x"), parts.count == 2,
                let w = Double(parts[0]), let h = Double(parts[1]), w > 0, h > 0 {
                 options.cell = (w, h)
+            }
+            i += 1
+        case "--dpr":
+            if let spec = args[safe: i + 1], let value = Double(spec), value > 0, value <= 4 {
+                options.dpr = value
             }
             i += 1
         case "--format":
@@ -1006,6 +1017,20 @@ final class Desk {
                           + "\(Int(TermGeometry.fallbackCell.h)) px, assumed (the terminal did not answer)\n")
             }
         }
+        // How many device pixels one *reported* pixel is worth for the pictures. A terminal may
+        // answer `CSI 16t`/`CSI 14t` in points - Rex answers 8x16 for a cell that is 16.7x32.7
+        // device pixels - and still draw an image at its own pixel size, one device pixel per image
+        // pixel (kitty's "the image will be scaled to fit" is descriptive prose, not a requirement,
+        // and Ghostty/Rex only ever shrink). The picture was therefore half the width of its box and
+        // anchored top-left, which reads as "桌面还是靠左" while the box itself was full width.
+        // The pty's own `ws_xpixel` is the only source that is in device pixels; when it is 0 the
+        // answers are points and the picture is asked for at 2x (design §6.6).
+        let paneNow = TermGeometry.read()
+        let dpr = options.dpr ?? (paneNow.pixelWidth > 0 ? 1.0 : 2.0)
+        WallPictures.pixelScale = dpr
+        Log.write("krd: wall pictures at \(dpr)x the reported pixels "
+                  + "(pty pixel size \(paneNow.pixelWidth)x\(paneNow.pixelHeight))\n")
+
         // A size-zero viewport is what "there is no picture" means to the mouse path: no cell and
         // no pixel is inside it (`Viewport.contains`), so every report lands in `chromeClick`,
         // which routes it to the wall. Set before input starts, and never overwritten — nothing in
