@@ -97,6 +97,60 @@ final class WallProcessTests: XCTestCase {
                       + "expected \(log)")
     }
 
+    /// A wall lands on a pane that may have been a mirror a moment ago: leaving a window mirror
+    /// `exec`s the wall in its place, and a kitty placement outlives the process that made it. The
+    /// terminal's `2J` clears characters only, so the wall has to drop the images itself - measured
+    /// before this test: after a return, the mirror's last picture covered the cards and the captions
+    /// drawn under it.
+    func testTheWallDropsWhateverImagesThePaneHeld() throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        child.arguments = ["--wall", "--pane", "60x24"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+        _ = pump(master, into: &stream, timeoutMs: 3_000) { bytes in
+            String(decoding: bytes, as: UTF8.self).contains(" windows")
+        }
+        writeAll(master, [0x1C])
+        let deadline = Date().addingTimeInterval(5)
+        while child.isRunning && Date() < deadline {
+            _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        }
+        if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+
+        // `a=d,d=a` is "drop every image this terminal holds"; kitty spells it as an APC.
+        let clear = Array("\u{1B}_Ga=d,d=a\u{1B}\\".utf8)
+        let session = Array("\u{1B}[?1049h".utf8)
+        guard let clearAt = stream.firstRange(of: clear) else {
+            XCTFail("the wall never deleted the pane's images (\(stream.count) B)")
+            return
+        }
+        guard let sessionAt = stream.firstRange(of: session) else {
+            XCTFail("the wall never entered the alternate screen")
+            return
+        }
+        XCTAssertLessThan(sessionAt.lowerBound, clearAt.lowerBound,
+                          "the images must be dropped *after* the session starts, or the terminal "
+                          + "may still be on the main screen when the delete arrives")
+    }
+
     // MARK: pty plumbing
 
     /// A pty with a real window size, already raw on our side: the child sets its own termios when

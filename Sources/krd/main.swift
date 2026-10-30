@@ -842,6 +842,11 @@ final class Desk {
         }
 
         writer.beginSession()
+        // The pane may hold pictures from a process that drew here before this one (a wall this
+        // mirror was entered from, a `krd` that was killed): a kitty placement outlives the process
+        // that made it, and a centred picture no longer covers the whole pane, so those leftovers
+        // would show around it. Same delete the wall does, for the same reason.
+        writer.clear()
         startChrome()
         installSignalCleanup()
         installResizeHandler()
@@ -944,6 +949,12 @@ final class Desk {
         viewport = Viewport(pixelWidth: 0, pixelHeight: 0, cols: 0, rows: 0, sourceRect: .zero)
         stateLock.unlock()
         writer.beginSession()
+        // Drop every image the terminal still holds, not just the text: the pane this wall lands on
+        // may be one a mirror was just exec'ed out of (the `[ - ]` button, `Ctrl-\`), and a kitty
+        // placement outlives the process that made it. `beginSession`'s `2J` clears characters and
+        // leaves images alone, so without this the mirror's last picture stays on top of the wall -
+        // measured: after a return, Safari's window covered the cards and the captions underneath.
+        writer.clear()
         installSignalCleanup()
         installResizeHandler()
         // The desk is built *before* input: `startInput()` decides the wall's key policy from
@@ -1241,6 +1252,8 @@ final class Desk {
     /// Take the pane back and put the wall on it again (only reached when `exec` failed).
     private func resumeWall() {
         writer.beginSession()
+        // Same reason as `runWall`: the images in this pane belong to whatever drew before it.
+        writer.clear()
         wallPaintedOnce = false
         refreshWall(force: true)
         startInput()

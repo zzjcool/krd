@@ -307,6 +307,18 @@ terminal, the grant belongs to that terminal (Terminal, WezTerm, iTerm, Ghostty)
 **Fix.** System Settings → Privacy & Security → Screen Recording → enable the terminal you run krd
 in, then restart that terminal. `krd --list` prints windows once the grant is there.
 
+### 23d. Back on the wall, a window's picture is still on top of it
+
+**Cause.** A kitty placement outlives the process that made it, and leaving the alternate screen is
+not part of this flow: the wall a mirror returns to runs in the *same* pane the mirror drew in, so
+every tile the mirror placed is still in the terminal's image store. The wall's session cleared the
+*characters* (`ESC[2J` in `beginSession`) and nothing else, so its header, cards and captions were
+painted underneath a stale mirror picture - which reads as "the resolution changed" or "the wall is
+not filling its pane", depending on what the mirror happened to be showing.
+**Fix.** Both sides now start by deleting every image in the pane (`ScreenWriter.clear()`, i.e.
+`ESC_Ga=d,d=a`): `runWall`, `resumeWall`, the live mirror session and the wall's hand-over; `WallProcessTests.testTheWallDropsWhateverImagesThePaneHeld`
+pins the wall's half.
+
 ### 23c. `-3805` on everything, once the wall has been used
 
 **Cause.** Only one live process of one executable may be a ScreenCaptureKit client: while an earlier
