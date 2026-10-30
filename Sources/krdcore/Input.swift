@@ -59,6 +59,16 @@ public final class InputParser {
 
     public var onEvent: ((Event) -> Void)?
 
+    /// An over-cap OSC is being swallowed up to its terminator: its bytes are a reply's payload,
+    /// never input. Kept across `feed`s because a reply arrives in reads, not in one piece. Only a
+    /// terminator (or `reset()`) ends it: a reply that never terminates leaves the parser
+    /// discarding, which is deliberate — the alternative is typing its payload.
+    private var discardingOSC = false
+    /// The last read ended in `ESC`, the first half of an `ST` (`ESC \`) terminator. Held outside
+    /// `buffer` on purpose: a lone `ESC` there is the Esc key to the read loop, and its `reset()`
+    /// would drop the discard state in the middle of the sequence.
+    private var discardSawESC = false
+
     public init() {}
 
     public func feed(_ bytes: [UInt8]) {
@@ -71,17 +81,33 @@ public final class InputParser {
         drain()
     }
 
-    /// Drop everything buffered, e.g. when the terminal is reset.
-    public func reset() { buffer.removeAll(keepingCapacity: true) }
+    /// Drop everything buffered (including a half-swallowed sequence), e.g. when the terminal is reset.
+    public func reset() {
+        buffer.removeAll(keepingCapacity: true)
+        discardingOSC = false
+        discardSawESC = false
+    }
 
     /// Upper bound for an OSC body, shared with `OSC52` so the parser and the clipboard code
     /// cannot disagree about when a sequence is "too big to be ours" (2 MB of payload, base64'd).
     public static let maxEncodedOSC = ((2 << 20) * 4) / 3 + 16
 
+    /// How long an OSC may grow before it is dropped: a maximal legal reply (`ESC ] 52;c;` +
+    /// base64 of 2 MB + `ST`) is `maxEncodedOSC - 5` bytes, so the extra 32 is headroom beyond a
+    /// legal reply, not a second payload budget.
+    private static let maxOSCSequence = maxEncodedOSC + 32
+
     private func emit(_ event: Event) { onEvent?(event) }
 
     private func drain() {
-        while let first = buffer.first {
+        while true {
+            if discardingOSC {
+                guard let used = discardOSC() else { return }
+                buffer.removeFirst(used)
+                discardingOSC = false
+                continue
+            }
+            guard let first = buffer.first else { return }
             if first == 0x1B {
                 guard let used = parseEscape() else { return }
                 buffer.removeFirst(used)
@@ -128,8 +154,12 @@ public final class InputParser {
             handleSS3(buffer[2])
             return 3
         case 0x5D:                                  // OSC: ESC ] ... BEL | ST
+            // The body is the payload (a clipboard reply is megabytes), so a terminator is only
+            // accepted inside the cap: an over-cap sequence is dropped whole and no part of it may
+            // reach an `Event` as input.
+            let scanTo = min(buffer.count, Self.maxOSCSequence)
             var i = 2
-            while i < buffer.count {
+            while i < scanTo {
                 if buffer[i] == 0x07 {
                     emit(.osc(String(bytes: buffer[2..<i], encoding: .utf8) ?? ""))
                     return i + 1
@@ -140,13 +170,15 @@ public final class InputParser {
                 }
                 i += 1
             }
-            // A clipboard reply is megabytes of base64 and arrives in one piece; anything longer
-            // than that without a terminator is not ours, so drop the head instead of buffering
-            // forever.
-            if buffer.count > Self.maxEncodedOSC + 32 {
-                buffer.removeFirst(2)
-                emit(.notice("osc dropped: no terminator"))
-                return 2
+            // A clipboard reply is megabytes of base64; anything longer than the cap without a
+            // terminator inside it is not ours. Dropping only `ESC ]` (what this used to do) fed
+            // the body to the ordinary loop, and the body is base64: it was typed into the
+            // mirrored desktop. Swallow it instead, up to its terminator.
+            if buffer.count > Self.maxOSCSequence {
+                emit(.notice("osc dropped: over cap"))
+                if let used = discardOSC() { return used }
+                discardingOSC = true
+                return nil
             }
             return nil
         default:
@@ -159,6 +191,36 @@ public final class InputParser {
             }
             return 2
         }
+    }
+
+    /// Swallow the body of an over-cap OSC. Returns how many buffered bytes to drop (through the
+    /// terminator); nil means this read held no terminator, and the buffer has been emptied so the
+    /// caller only has to keep `discardingOSC`. A trailing `ESC` (the first half of a split `ST`)
+    /// survives in `discardSawESC`. The buffer never grows with the reply, which is what keeps a
+    /// 100 MB answer from being held.
+    private func discardOSC() -> Int? {
+        if discardSawESC {
+            guard let first = buffer.first else { return nil }
+            discardSawESC = false
+            if first == 0x5C { return 1 }         // `ESC \` split across two reads
+        }
+        var i = 0
+        while i < buffer.count {
+            let b = buffer[i]
+            if b == 0x07 { return i + 1 }
+            if b == 0x1B {
+                guard i + 1 < buffer.count else {
+                    // The read ended on the first half of `ST`: hold it for the next read.
+                    discardSawESC = true
+                    buffer.removeAll(keepingCapacity: true)
+                    return nil
+                }
+                if buffer[i + 1] == 0x5C { return i + 2 }
+            }
+            i += 1
+        }
+        buffer.removeAll(keepingCapacity: true)
+        return nil
     }
 
     /// `CSI … u`: either the terminal's answer to the capability query, or a key report.
