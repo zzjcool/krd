@@ -271,7 +271,7 @@ instead of 0.67 (measured on a 1512x982 pt display, 1020x792 px pane — see the
 fullRect   = display bounds, or the window frame with --window
 focus      = --zoom-at x,y  |  the pointer if it is inside fullRect  |  the centre
 sourceRect = Viewport.crop(full: fullRect, scale: zoom, focus: focus)      // clamped to fullRect
-pixelW/H   = the pane's pixels, unchanged        // the *source* shrinks, the output does not
+pixelW/H   = the crop's points x min(fit, 1) x --scale   // the *source* shrinks, so the output does
 ```
 
 Three consequences worth knowing:
@@ -281,10 +281,13 @@ Three consequences worth knowing:
 2. **Interaction improves, and no input code changed.** `Viewport.point(forCell:)` and
    `point(forPixel:)` already normalise against `sourceRect`, so a click maps into the crop as soon
    as the crop is right: at `--zoom 2` a cell covers half the desktop points.
-3. **The output size stays the pane size.** "Zoom halves the capture dimensions" is about the
-   source rect in points; `pixelW`/`pixelH` are what the terminal can display and do not move. Above
-   ~2.7x on a Retina display the pane has more pixels than the crop has points, so the picture is
-   slightly upscaled — full density is reached at `displayPixels / panePixels`, not at infinity.
+3. **The output shrinks with the crop.** `pixelW`/`pixelH` are bounded by the *crop's* points, not by
+   the window's and not by the pane's cells: at `--zoom 2` a 1024x678 pt window captures 512x339 pt,
+   so the stream is 512x339 px and the terminal stretches that into the pane. Handing the layout the
+   full frame's size instead asks ScreenCaptureKit for 1024x678 px out of a 512x339 pt crop — a 2x
+   upscale at four times the bytes for no extra detail (fixed in #73, visible in `--debug` as
+   `source 512x339 pt -> 512x339 px`). What the terminal does with those pixels is still its own
+   choice, which is why the picture keeps filling the pane either way.
 
 `--zoom-follow` pans the crop when the pointer enters the outer 15 % band of the picture, and only
 far enough to put it back on that edge (pan, not chase). A pan calls `SCStream.updateConfiguration`

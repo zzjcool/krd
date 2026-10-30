@@ -1920,8 +1920,9 @@ final class Desk {
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
                                    bpp: writer.format.bytesPerPixel, scale: effectiveScale,
-                                   source: fullRect.size, area: area)
-        if chromeAvailable {
+                                   source: Viewport.layoutSource(crop: crop, full: fullRect),
+                                   area: area)
+        if chromeEnabled {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
                                            imageCols: layout.originCol - 1 + layout.paneCols,

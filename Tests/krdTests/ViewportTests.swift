@@ -225,3 +225,49 @@ final class ViewportOriginTests: XCTestCase {
         XCTAssertFalse(empty.contains(pixel: 0, 0))
     }
 }
+
+// MARK: - the pixel budget of a zoomed capture (issue #73)
+
+/// `--zoom` crops `sourceRect`, and the layout's pixel budget has to follow the crop. Handing the
+/// layout the full frame's size instead makes ScreenCaptureKit upscale the crop: at `--zoom 2` the
+/// stream asked for as many pixels as the *window* had (2x each dimension, 4x the bytes) out of a
+/// crop that only had half the points. Placement was unaffected, which is why only the `--debug`
+/// line gave it away (`-> 1024x678 px` for a `512x339 pt` crop).
+final class ZoomLayoutSourceTests: XCTestCase {
+    func testZoomHalvesThePixelBudgetAndKeepsTheCells() throws {
+        let pane = TermGeometry(cols: 100, rows: 30, pixelWidth: 1700, pixelHeight: 990)
+        let full = CGRect(x: 381, y: 277, width: 1024, height: 678)
+        let crop = Viewport.crop(full: full, scale: 2, focus: CGPoint(x: 893, y: 616))
+
+        let zoomed = TileGrid.make(geometry: pane, aspect: crop.width / crop.height,
+                                   tileCols: 8, tileRows: 4, bpp: 3, scale: 1,
+                                   source: Viewport.layoutSource(crop: crop, full: full))
+        XCTAssertEqual(zoomed.pixelW, Int(crop.width), "the capture is the crop, so is the pixel budget")
+        XCTAssertEqual(zoomed.pixelH, Int(crop.height))
+
+        let unzoomed = TileGrid.make(geometry: pane, aspect: full.width / full.height,
+                                     tileCols: 8, tileRows: 4, bpp: 3, scale: 1,
+                                     source: Viewport.layoutSource(crop: full, full: full))
+        XCTAssertEqual(unzoomed.pixelW, Int(full.width))
+        XCTAssertEqual(zoomed.pixelW * 2, unzoomed.pixelW, "zoom 2 halves each dimension, not the frames")
+        XCTAssertEqual(zoomed.paneCols, unzoomed.paneCols, "the picture still fills the pane")
+        XCTAssertEqual(zoomed.paneRows, unzoomed.paneRows)
+    }
+
+    func testNoZoomIsUnchanged() {
+        let full = CGRect(x: 0, y: 0, width: 1920, height: 1200)
+        XCTAssertEqual(Viewport.layoutSource(crop: full, full: full), full.size)
+        // A crop that is not a real rect falls back to the frame rather than asking for 0x0.
+        XCTAssertEqual(Viewport.layoutSource(crop: .zero, full: full), full.size)
+    }
+
+    func testScaleStillAppliesToTheCrop() throws {
+        let pane = TermGeometry(cols: 100, rows: 30, pixelWidth: 1700, pixelHeight: 990)
+        let full = CGRect(x: 0, y: 0, width: 1920, height: 1200)
+        let crop = Viewport.crop(full: full, scale: 2, focus: CGPoint(x: 960, y: 600))
+        let layout = TileGrid.make(geometry: pane, aspect: crop.width / crop.height,
+                                   tileCols: 8, tileRows: 4, bpp: 3, scale: 0.5,
+                                   source: Viewport.layoutSource(crop: crop, full: full))
+        XCTAssertEqual(layout.pixelW, Int(crop.width / 2), "--scale 0.5 halves the crop, not the frame")
+    }
+}

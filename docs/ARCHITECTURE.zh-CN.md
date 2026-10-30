@@ -244,7 +244,7 @@ pane 的实测值，见 `--debug` 那行）。
 fullRect   = 显示器 bounds，或 --window 的窗口 frame
 focus      = --zoom-at x,y  |  指针（若在 fullRect 内）  |  中心
 sourceRect = Viewport.crop(full: fullRect, scale: zoom, focus: focus)      // 始终 clamp 在 fullRect 内
-pixelW/H   = pane 的像素数，不变          // 变小的是**源**，不是输出
+pixelW/H   = 裁剪区的点 × min(fit, 1) × --scale   // 源变小，输出也跟着变小
 ```
 
 三个值得知道的后果：
@@ -253,7 +253,12 @@ pixelW/H   = pane 的像素数，不变          // 变小的是**源**，不是
    比「整屏塞进 pane」更少，没有任何 CPU 放大。
 2. **交互只会更准，而且输入代码一行没改。** `Viewport.point(forCell:)` / `point(forPixel:)` 本来就按
    `sourceRect` 归一化，裁剪区一变，点击就自动落在正确位置：`--zoom 2` 下一个格子覆盖的桌面点少一半。
-3. **输出尺寸仍是 pane 尺寸。** 「放大后采集尺寸减半」说的是以 pt 计的源矩形；`pixelW`/`pixelH` 是终端
+3. **输出随裁剪区一起变小。** `pixelW`/`pixelH` 的上界是**裁剪区**的点数，不是窗口的、也不是 pane
+   的格子：`--zoom 2` 下 1024x678 pt 的窗口只采 512x339 pt，于是流就是 512x339 px，由终端把它拉伸
+   到整个 pane。反过来把整帧尺寸喂给布局，就等于向 ScreenCaptureKit 要 1024x678 px 的 512x339 pt
+   裁剪区——2 倍上采样、4 倍字节，且没有任何额外细节（#73 修复，`--debug` 里表现为
+   `source 512x339 pt -> 512x339 px`）。终端如何使用这些像素仍是它自己的选择，所以两种情况下画面
+   都铺满 pane。 「放大后采集尺寸减半」说的是以 pt 计的源矩形；`pixelW`/`pixelH` 是终端
    能显示的像素数，不会跟着变。Retina 上超过约 2.7x 后，pane 的像素比裁剪区的点还多，画面会被轻微放大
    —— 真正的 1:1 密度在 `屏幕像素 / pane 像素` 处到达，不在无穷远。
 
