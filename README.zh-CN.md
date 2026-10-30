@@ -50,6 +50,7 @@ krd --zoom 3 --zoom-at 200,300   # ……以某个全局屏幕点为焦点
 krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
+krd --no-quantise           # 保持严格无损（照片类画面字节数约 2.3 倍）
 krd --cursor                 # 把目标端的指针画进画面（默认不画：画了之后鼠标每动一下都会弄脏瓦片）
 krd --dev                    # TUI 层：画面下面一条状态栏 + 面板
 krd --mock --dev             # 同上，但屏幕是模拟的：不需要任何权限
