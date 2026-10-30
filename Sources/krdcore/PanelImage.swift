@@ -72,99 +72,33 @@ public enum PanelImage {
         return PanelFit(contentWidth: w, contentHeight: h, originX: x, originY: y, cellRect: cellRect)
     }
 
-    /// The colour the bars take: the picture's most common colour **among the pixels along its own
-    /// edges**.
+    /// Paint `content` (RGB, `width` x `height`) onto a **transparent** panel-sized canvas.
     ///
-    /// Why the edges and not the whole picture: the bars sit immediately outside the picture, so a
-    /// colour taken from the edge is the only one that can blend into it. Sampling everything was
-    /// the first version and it looked like a bug — a desk with a big white window in the middle
-    /// made the two side bars pure white (254,254,254), because the white window outvoted the blue
-    /// wallpaper that the bars actually touch.
+    /// The bars are transparent, not tinted (design §6.6): the picture sits on cells the wall
+    /// cleared, so the terminal's own background shows through and a card reads as a window lying on
+    /// the wall rather than a window in a frame. The two earlier versions filled the bars with a
+    /// colour (black, then the picture's edge colour); both were guesses at a background the
+    /// terminal already has.
     ///
-    /// Still a mode, not an average: an average of a blue wallpaper and a white window is grey,
-    /// which matches neither. Each sample is quantised to 5 bits per channel, the fullest bucket
-    /// wins, and ties go to the bucket nearest the mean colour so that the same picture always gets
-    /// the same bars.
-    public static func backdropColor(rgb: [UInt8], width: Int, height: Int) -> PanelColor {
-        guard width > 0, height > 0, rgb.count >= width * height * 3 else { return .black }
-        // How deep the edge band goes: thin enough to stay "the border", thick enough to survive a
-        // 1-pixel hairline or a scrollbar.
-        let band = max(1, min(8, min(width, height) / 32))
-        var buckets: [UInt32: (count: Int, r: Int, g: Int, b: Int)] = [:]
-        var sumR = 0, sumG = 0, sumB = 0, samples = 0
-
-        func sample(_ x: Int, _ y: Int) {
-            let cx = max(0, min(width - 1, x)), cy = max(0, min(height - 1, y))
-            let o = (cy * width + cx) * 3
-            let r = Int(rgb[o]), g = Int(rgb[o + 1]), b = Int(rgb[o + 2])
-            sumR += r; sumG += g; sumB += b; samples += 1
-            let key = UInt32(r >> 3) << 10 | UInt32(g >> 3) << 5 | UInt32(b >> 3)
-            var bucket = buckets[key] ?? (0, 0, 0, 0)
-            bucket.count += 1
-            bucket.r += r; bucket.g += g; bucket.b += b
-            buckets[key] = bucket
-        }
-
-        // 32 points per edge, `band` rows deep: the corners are sampled twice, which is fine - they
-        // are corners, and weighting them a little is what keeps a rounded window looking right.
-        let steps = 32
-        for i in 0..<steps {
-            let x = i * width / steps
-            let y = i * height / steps
-            for depth in 0..<band {
-                sample(x, depth)                       // top
-                sample(x, height - 1 - depth)          // bottom
-                sample(depth, y)                       // left
-                sample(width - 1 - depth, y)           // right
-            }
-        }
-
-        guard samples > 0, !buckets.isEmpty else { return .black }
-        let mean = (Double(sumR) / Double(samples), Double(sumG) / Double(samples),
-                    Double(sumB) / Double(samples))
-        var best: (count: Int, r: Int, g: Int, b: Int)?
-        for key in buckets.keys.sorted() {
-            let bucket = buckets[key]!
-            guard let champion = best else { best = bucket; continue }
-            if bucket.count > champion.count {
-                best = bucket
-            } else if bucket.count == champion.count, distance(bucket, mean) < distance(champion, mean) {
-                best = bucket
-            }
-        }
-        guard let winner = best, winner.count > 0 else { return .black }
-        // The bucket's average, not its centre: a bucket spans 8 levels per channel.
-        return PanelColor(r: UInt8(winner.r / winner.count),
-                          g: UInt8(winner.g / winner.count),
-                          b: UInt8(winner.b / winner.count))
-    }
-
-    private static func distance(_ bucket: (count: Int, r: Int, g: Int, b: Int),
-                                 _ mean: (Double, Double, Double)) -> Double {
-        let n = Double(bucket.count)
-        let dr = Double(bucket.r) / n - mean.0
-        let dg = Double(bucket.g) / n - mean.1
-        let db = Double(bucket.b) / n - mean.2
-        return dr * dr + dg * dg + db * db
-    }
-
+    /// Output is RGBA (`f=32` on the wire): the content is opaque, everything outside it is
+    /// `0,0,0,0`.
+    ///
+    /// Clipped, never scaled: the capture is asked for exactly `fit`'s pixel size, and a scaler here
+    /// would be a second resampler that could disagree with the terminal's. A content that is a
+    /// pixel or two too big loses its edge instead of blurring.
     /// Paint `content` (RGB, `width` x `height`) onto a panel-sized canvas filled with `backdrop`.
     ///
     /// Clipped, never scaled: the capture is asked for exactly `fit`'s pixel size, and a scaler here
     /// would be a second resampler that could disagree with the terminal's. A content that is a
     /// pixel or two too big loses its edge instead of blurring.
     public static func compose(content: [UInt8], width: Int, height: Int,
-                               panelWidth: Int, panelHeight: Int, originX: Int, originY: Int,
-                               backdrop: PanelColor) -> [UInt8] {
+                               panelWidth: Int, panelHeight: Int,
+                               originX: Int, originY: Int) -> [UInt8] {
         guard panelWidth > 0, panelHeight > 0 else { return [] }
-        var canvas = [UInt8](repeating: 0, count: panelWidth * panelHeight * 3)
-        for i in stride(from: 0, to: canvas.count, by: 3) {
-            canvas[i] = backdrop.r
-            canvas[i + 1] = backdrop.g
-            canvas[i + 2] = backdrop.b
-        }
+        // Alpha 0 everywhere: the bars are the terminal's own background, not a colour of ours.
+        var canvas = [UInt8](repeating: 0, count: panelWidth * panelHeight * 4)
         guard width > 0, height > 0, content.count >= width * height * 3 else { return canvas }
-        let dstStride = panelWidth * 3
+        let dstStride = panelWidth * 4
         let srcStride = width * 3
         content.withUnsafeBufferPointer { src in
             canvas.withUnsafeMutableBufferPointer { dst in
@@ -174,10 +108,15 @@ public enum PanelImage {
                     let first = max(0, -originX)                    // clipped left edge
                     let last = min(width, panelWidth - originX)     // clipped right edge
                     guard last > first else { continue }
-                    // Row at a time: the bars are already painted, so only the picture is copied.
-                    memcpy(dst.baseAddress! + y * dstStride + (originX + first) * 3,
-                           src.baseAddress! + row * srcStride + first * 3,
-                           (last - first) * 3)
+                    let out = dst.baseAddress! + y * dstStride + (originX + first) * 4
+                    let input = src.baseAddress! + row * srcStride + first * 3
+                    // Row at a time, and the alpha with it: a cleared cell must stay cleared.
+                    for i in 0..<(last - first) {
+                        out[i * 4] = input[i * 3]
+                        out[i * 4 + 1] = input[i * 3 + 1]
+                        out[i * 4 + 2] = input[i * 3 + 2]
+                        out[i * 4 + 3] = 255
+                    }
                 }
             }
         }

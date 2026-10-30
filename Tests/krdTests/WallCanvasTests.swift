@@ -852,6 +852,14 @@ final class WallCanvasTests: XCTestCase {
         // suite does.
         let stageRows = pictured[(layout.stage.row - 1)..<layout.stage.maxRow]
         XCTAssertFalse(stageRows.joined().contains("Built-in"), "no text under a placement")
+        // ...and cleared, not merely skipped: the picture's bars are transparent, so anything an
+        // earlier frame drew in these cells would show through them.
+        for line in stageRows {
+            XCTAssertEqual(line.count, 137)
+            // Only the stage's own columns: the scroll bar shares these rows at column 137.
+            let inside = line.prefix(layout.stage.cols)
+            XCTAssertTrue(inside.allSatisfy { $0 == " " }, "a pictured slot must be blank: \(line)")
+        }
 
         // A mask in the stage: the rect is still a box, and it says why it is empty.
         var maskPaints = WallSlotPaints()

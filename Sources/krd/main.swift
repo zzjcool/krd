@@ -922,7 +922,9 @@ final class Desk {
                              cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
                              pixels: picture.pixels, width: picture.panel.pixelWidth,
                              height: picture.panel.pixelHeight, level: Self.wallPanelLevel,
-                             sync: writer.perTileSync)
+                             // RGBA: the bars are transparent so the wall's own background shows
+                             // through (design §6.6) - the mirror's tiles stay opaque RGB.
+                             format: .rgba, sync: writer.perTileSync)
         }
         writer.endFrame()
     }

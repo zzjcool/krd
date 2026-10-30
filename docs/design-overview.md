@@ -12,7 +12,7 @@ English | [简体中文](design-overview.zh-CN.md)
 ▪ krd    7 windows · 3 displays · most recently used first       ╷
 ┌────────────────────────────────────────────────────────┐   ▲
 │                                                        │   █
-│     main display: fitted, bars in its dominant colour   │   │
+│        main display: fitted, bars left transparent      │   │
 │                                                        │   │
 └────────────────────────────────────────────────────────┘   ▼
 🖥 Built-in — 1512×982 · main · 1/3                          ╵
@@ -133,31 +133,36 @@ Top to bottom: header 1 row → stage (`stageH + 1` caption) → card band heade
 
 ## 6.6 How a display and a window fit their cells
 
-**Fit, always: keep the aspect, never crop, never stretch.** The picture shrinks to the largest size that fits
-its cells, and the cells left over are painted in the **dominant colour of that picture** - so the bars are part
-of the picture, not a black hole.
+**Fit, always: keep the aspect, never crop, never stretch.** The picture shrinks to the largest size that fits its
+cells and **the cells left over stay transparent** (`f=32`, alpha 0), so the wall's own background shows through: a
+card reads as a window lying on the wall, not a window in a frame.
 
 | case | handling |
 |---|---|
-| landscape (16:10 / 1.54) | the height fills all 24 rows and the width is ~75 cells centred (137×44 at 17×33 cells); 30 cells of dominant colour on each side |
+| landscape (16:10 / 1.54) | the height fills all 24 rows and the width is ~75 cells centred (137×44 at 17×33 cells); 30 cells of transparency on each side |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
 | window card | the card rect **never changes** (44×14 cells at 137×44); the picture fits inside at the window's own aspect, the rest is dominant colour - a 980×620 window leaves almost none, a 760×900 one leaves bars |
 | the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |
 | capture | **only the one on stage**: three displays + three windows = 4 panels, the same cost as a single display |
 
-Why not cover: cover throws content away, and the display's own shape *is* information - no menu bar, no Dock, and
-the reader cannot tell which display they are looking at. Fitting costs only the bars, and once the bars carry the
-dominant colour they read as part of the picture.
+Why not cover: cover throws content away, and the display's own shape *is* information - no menu bar, no Dock, and the
+reader cannot tell which display they are looking at. Fitting costs only the bars, and transparent bars cost nothing in
+meaning: they are not decoration on the wall, they *are* the wall.
 
-How to find the dominant colour: **only the outermost ring of the picture** — 32 points along each edge, going
-`min(8, min(w,h)/32)` pixels deep — quantised to 5 bits per channel, histogram, fullest bucket wins, ties go to the
-bucket nearest the ring's mean. 128 samples, once per picture.
+Why not a colour: two versions tried. Black read as a frame around every picture; then "the picture's own edge colour",
+which was technically defensible but still a guess at a background the terminal already has - a light window got a light
+bar on a dark wall, a bright stripe. Transparency lets the wall answer that question itself, and it follows the
+terminal's theme for free.
 
-Why the ring and not the whole picture: the bars sit immediately outside the picture's edges, so only an edge colour
-can blend into them. The first version sampled everything, and a desk with a big white window in the middle turned both
-side bars pure white (254,254,254) — which looked like a bug, because what those bars actually touch is blue wallpaper.
-Still a mode, not an average: the average of blue wallpaper and a white window is grey, which matches neither.
+The cost: one alpha channel per panel, 1.18 MB → 1.28 MB for a whole wall (+8%, the cleared area compresses well), and
+the terminal has to blend `f=32` alpha (kitty, Ghostty and WezTerm do). A terminal that ignores alpha shows those cells
+black, i.e. the first version.
+
+Transparency has one thing that has to be right: **the cells under a picture must be cleared first**. Whatever is
+transparent shows what is underneath, so a placeholder box or an older picture left in those cells would show through
+the bars. `WallCanvas`'s `.picture` branch now writes spaces over the whole rect (spaces only, no visible glyph, so the
+"no text under a placement" rule still holds) before the picture is emitted.
 
 Why a window's aspect must not reshape its card: **the layout being fixed** is the whole value of this screen - if
 cards resized to their windows, the second click would miss.
@@ -291,7 +296,7 @@ Restart-path facts already hit once (do not relearn them):
   and its single-stream logic are untouched - P2 adds a parallel path, it does not rework the mirror.
 
 - **P1** `WindowOrder` + `WallLayout` + the text layer (text cards and empty frames first, opt-in `--start wall`).
-- **P2 done (2026-10-30)**: `PanelImage` (fit + dominant colour + composite, pure and tested),
+- **P2 done (2026-10-30)**: `PanelImage` (fit + transparent composite, pure and tested),
   `WallPanels` (the plan), `PanelCapture` (one-shot, typed failures), `WallPictures` (shoot → sample
   → compose), `Render.emitPanel` (the tile wire shape with caller-owned ids) and the canvas's three
   slot states (placeholder / picture / mask). Measured at 137×44: **4 pictures, 1.18 MB**, once; the

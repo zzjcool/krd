@@ -404,8 +404,11 @@ final class WallCanvas {
         guard !layout.stage.isEmpty else { return }
         switch paints.stage {
         case .picture:
-            // A picture fills the whole rect: text under a placement is not allowed to exist at
-            // all (Chrome.swift:11-14) - the caption row below already says which display this is.
+            // A picture fills the rect, and its bars are transparent, so the cells under it must be
+            // *cleared* rather than left alone: whatever the previous frame drew there (a
+            // placeholder box, an older picture's cells) would otherwise show through the bars.
+            // No text is drawn (Chrome.swift:11-14) - the caption row names the display.
+            clear(&grid, rect: layout.stage)
             return
         case .mask:
             drawMask(&grid, rect: layout.stage)
@@ -496,7 +499,8 @@ final class WallCanvas {
             guard !rect.isEmpty else { continue }
             switch paints.card(slot) {
             case .picture:
-                continue                    // the picture fills the card; nothing may sit under it
+                clear(&grid, rect: rect)    // transparent bars show what is under the picture
+                continue
             case .mask:
                 drawMask(&grid, rect: rect)
                 continue
@@ -638,6 +642,15 @@ final class WallCanvas {
     /// Deliberately not an error message and not a hatch: the wall is a picture of a desk, and "no
     /// picture here" is a state of the desk, not a problem to report. The caption row still names
     /// the window or display, so nothing is lost but the pixels.
+    /// Blank every cell of `rect`, which is what a transparent picture needs underneath it.
+    private func clear(_ grid: inout Grid, rect: CellRect) {
+        guard !rect.isEmpty else { return }
+        for row in rect.row...rect.maxRow {
+            grid.text(String(repeating: " ", count: rect.cols), row: row, col: rect.col,
+                      .plain, limit: rect.cols)
+        }
+    }
+
     private func drawMask(_ grid: inout Grid, rect: CellRect) {
         guard !rect.isEmpty else { return }
         guard rect.rows >= 3, rect.cols >= 2 else {

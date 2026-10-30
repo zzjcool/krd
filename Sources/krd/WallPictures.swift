@@ -10,11 +10,9 @@ import krdcore
 enum WallPictures {
     struct Picture {
         let panel: WallPanel
-        /// Exactly `panel.pixelWidth x panel.pixelHeight` RGB: the panel, bars included.
+        /// Exactly `panel.pixelWidth x panel.pixelHeight` **RGBA**: the picture, with the bars
+        /// left transparent so the wall's own background shows through (design §6.6).
         let pixels: [UInt8]
-        /// The colour the bars took: the picture's own edge colour, so they blend into it.
-        /// Kept for the report below; the mask never uses it.
-        let backdrop: PanelColor
     }
 
     /// Capture every panel, in order, one at a time.
@@ -45,19 +43,16 @@ enum WallPictures {
                 guard let raster = PanelRaster.rgb(image) else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                let backdrop = PanelImage.backdropColor(rgb: raster.pixels,
-                                                        width: raster.width, height: raster.height)
                 let canvas = PanelImage.compose(content: raster.pixels,
                                                 width: raster.width, height: raster.height,
                                                 panelWidth: panel.pixelWidth,
                                                 panelHeight: panel.pixelHeight,
                                                 originX: panel.fit.originX,
-                                                originY: panel.fit.originY,
-                                                backdrop: backdrop)
-                guard canvas.count == panel.pixelWidth * panel.pixelHeight * 3 else {
+                                                originY: panel.fit.originY)
+                guard canvas.count == panel.pixelWidth * panel.pixelHeight * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                pictures.append(Picture(panel: panel, pixels: canvas, backdrop: backdrop))
+                pictures.append(Picture(panel: panel, pixels: canvas))
             } catch {
                 failures[panel.slot] = PanelCapture.classify(error)
             }
