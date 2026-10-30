@@ -737,6 +737,7 @@ final class Desk {
                 + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells"
                 + (options.scaleAuto ? " (scale auto, \(ScaleGovernor.show(effectiveScale)))"
                    : options.scale < 1 ? " (scale \(ScaleGovernor.show(options.scale)))" : "")
+                + layout.fitNote
                 + ", \(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
             Log.write(message)
         }
@@ -1336,9 +1337,12 @@ final class Desk {
             let panelRows = chromeState.panel?.height ?? 0
             paneGeometry.rows = max(3, paneGeometry.rows - 1 - min(panelRows, paneGeometry.rows - 4))
         }
+        // The source's own size, so the grid never asks for a box bigger than the source
+        // (issue #69: ScreenCaptureKit pads that with black instead of upscaling).
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
-                                   bpp: writer.format.bytesPerPixel, scale: effectiveScale)
+                                   bpp: writer.format.bytesPerPixel, scale: effectiveScale,
+                                   source: fullRect.size)
         if chromeEnabled {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
@@ -1484,6 +1488,26 @@ final class Desk {
     /// while the app keeps running (pid alive, window gone — clicks would land on another window of
     /// that app or nowhere). Both downgrade to global injection, which the reader logs once.
     /// The window query is one entry, human-paced: a drag is tens of events per second, not thousands.
+    /// Which window the window server would deliver a click at `point` to: the first on-screen window
+    /// whose bounds contain it, since the list comes back front to back.
+    private func topmostWindow(at point: CGPoint) -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for entry in list {
+            // Only normal app windows: the Dock's own 1920x1200 window sits at layer 20 and would
+            // swallow every hit test otherwise.
+            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+                  let number = entry[kCGWindowNumber as String] as? Int,
+                  (entry[kCGWindowLayer as String] as? Int ?? 0) == 0,
+                  let x = bounds["X"] as? Double, let y = bounds["Y"] as? Double,
+                  let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double else { continue }
+            if CGRect(x: x, y: y, width: w, height: h).contains(point) {
+                return CGWindowID(number)
+            }
+        }
+        return nil
+    }
+
     private func aliveWindowPid() -> pid_t? {
         guard let target = windowTarget else { return nil }
         guard kill(target.pid, 0) == 0 else { return nil }
@@ -1850,6 +1874,8 @@ final class Desk {
         }
         if let target = windowTarget {
             reader.targetPid = { [weak self] in self?.aliveWindowPid() }
+            reader.targetWindow = { [weak self] in self?.windowTarget?.id }
+            reader.topmostWindow = { [weak self] point in self?.topmostWindow(at: point) }
             if options.debug {
                 Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
                           + "window \(target.id); a closed window falls back to global injection\n")

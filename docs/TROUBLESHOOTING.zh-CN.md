@@ -469,3 +469,25 @@ krd: capture stopped (SCStream 3805: Failed during stream due to application con
 那一帧」：平移或重启之后 3 秒没帧就重启采集流。更老的「多久完全没帧」规则要用
 `KRD_STREAM_WATCHDOG=<秒>` 显式打开（默认关闭，正因为静止桌面会误触发）。这件事的进展记在
 [TESTING §11](TESTING.zh-CN.md#11-浸泡测试全功能开-30-分钟)。
+
+### 48. `--window` 出现黑边，而且点击落点偏左
+
+这两半是同一个 bug（issue #69）：采集尺寸是从 pane 的盒子算的，而盒子比窗口大时 ScreenCaptureKit
+**不会放大**——它把窗口 1:1 画在左上角，剩下补黑（1024×678 的窗口放进 70×24 的 pane，实测 31.8% 是黑的）。
+指针映射又铺满整个补了黑的盒子，于是画面右边缘附近的点击会被送到左边约 143 pt 之外。
+
+现在帧尺寸 = 源按 `min(boxW/srcW, boxH/srcH, 1)` 缩放后的像素，落脚格子框是 `ceil`，锚在 pane 左上；
+没铺满的格子留给终端自己的背景，点在那些格子上会被**忽略**而不是猜一个点投出去。`--debug` 会说清是哪种情况：
+
+```
+krd: source 1024x678 pt -> 1024x678 px in 61x21 cells (the source is smaller than the pane box:
+     1024x678 px at 1:1, 27x9 cells left to the terminal)
+```
+
+如果修完之后你还看到黑边，那是窗口**自己的内容**就是黑的——用 `--record` 出帧再用看图软件确认，
+别靠对着屏幕拍照判断。
+
+`--window` 下的点击在 macOS 26 上还有第二个、互不相干的故障：`CGEvent.postToPid` 能送达键盘事件，
+却**静默丢掉鼠标事件**（Safari 和 TextEdit 都是如此），所以镜像窗口根本点不动。现在只要镜像窗口在指针处
+处于最上层，鼠标事件就走全局注入（`--debug` 里会写 `-> global tap (the mirrored window is on top)`），
+被遮挡的窗口才继续走 pid（issue #17 的情况）。

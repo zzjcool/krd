@@ -552,3 +552,30 @@ for: after a pan or a restart no frame for 3 s means a restart. For the older "n
 rule, set `KRD_STREAM_WATCHDOG=<seconds>` (it is off by default, precisely because a quiet desktop
 trips it). The state of that investigation is in
 [TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on).
+
+### 48. `--window` shows black bands, and clicks land to the left of where I click
+
+Both halves were one bug (issue #69): the capture size came from the pane's box, and when that box is
+larger than the window ScreenCaptureKit does **not** upscale — it draws the window 1:1 in the top-left
+and pads the rest with black (31.8 % of the frame in a 70×24 pane on a 1024×678 window). The pointer
+was mapped across the whole padded box, so a click near the right edge of the picture was sent ~143 pt
+to its left.
+
+The frame is now the source at `min(boxW/srcW, boxH/srcH, 1)` px, placed in `ceil` cells anchored at
+the pane's top-left; the cells it does not reach are the terminal's own background, and a click there
+is ignored instead of guessed. `--debug` says which case you are in:
+
+```
+krd: source 1024x678 pt -> 1024x678 px in 61x21 cells (the source is smaller than the pane box:
+     1024x678 px at 1:1, 27x9 cells left to the terminal)
+```
+
+A window you *do* see a black band in after this is a window whose own content is black — check with
+`--record` and an image viewer rather than by eye on a phone-photo of the screen.
+
+Clicks in `--window` mode also had a second, unrelated failure on macOS 26: `CGEvent.postToPid`
+delivers keyboard events but silently drops **mouse** events (Safari and TextEdit both ignore them), so
+a mirrored window could not be clicked at all. krd now posts mouse events through the global tap while
+the mirrored window is the one on top at the pointer (`--debug` says
+`-> global tap (the mirrored window is on top)`), and keeps the pid path for a window that is covered
+(issue #17).
