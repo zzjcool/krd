@@ -368,6 +368,16 @@ ScreenCaptureKit 帧，按 sample attachments 里的 status 区分（`idle` = �
 
 `--stats-json <path>` 每秒写一行 NDJSON，内容与面板同源（写入函数直接收 `ChromeMetrics`，两边没法走偏）。
 
+**往返延迟（`CSI 5n`）。** `write(2)` 阻塞只有在 sshd 的 userspace 缓冲填满之后才会发生，所以链路慢在
+画面堆积几秒之前是看不见的。探针每两秒写 4 个字节（`RTTProbe`），VT 终端回 `CSI 0n`，`InputParser` 发出
+`.statusReport`，`InputReader` 记录到达时刻——所以往返时间用的是输入线程的时钟，而不是 1 Hz 的 tick。应答
+本身就排在画面后面，这正是重点：它测到的数字包含用户能感受到的积压。
+
+两个信号都喂给质量 governor，但不能互相替代：`writeMs` 说明"我们的写现在被挡住了"（免费、每帧、偏晚），
+往返说明"远端落后多远"（每探测 4 字节、含排队、偏早）。降档任一成立即可，升档必须两者都安静。终端始终
+不回应答时，连续三次就自动关掉探针，governor 退回只看写延迟——数字保持 `—`，绝不显示 `0`。
+阈值是 `KRD_RTT_BUDGET_MS`（默认 250），`KRD_NO_RTT=1` 可完全关闭。
+
 **报告包。** `kill -USR2 <krd>` 会写 `$TMPDIR/krd-report.txt`：一句判定（告诉我们哪一半更大）、当前所有
 数字、每条序列最近 300 个采样（cap / pipe / zlib / write / input）、生效的 `KRD_*` 开关、几何信息，以及
 最近 200 行日志。它的意义是——**慢到没法在终端里读的会话，依然能从另一个终端诊断**：整个流程就是

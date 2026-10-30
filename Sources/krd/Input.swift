@@ -19,6 +19,10 @@ final class InputReader {
     private var inputSeries = Series()
     /// `parse → CGEvent.post` for the most recent event, and the p99 over the last 300.
     private(set) var lastInputMs = Double(0)
+    /// When the terminal's last `CSI 0n` arrived (seconds, `benchNowMs()` base), and how many there
+    /// have been. Read by the diagnostics tick, which owns the probe's send time.
+    private(set) var lastStatusReplyAt = Double(0)
+    private(set) var statusReplies = 0
     var inputP99Ms: Double { inputSeries.percentile(0.99) }
     /// A copy of the recent samples, for the `SIGUSR2` report bundle.
     var inputSamples: Series { inputSeries }
@@ -213,6 +217,11 @@ final class InputReader {
             postKey(code, cg(mods), phase: phase)
         case let .text(ch, mods):
             handleKey(ch, flags: cg(mods))
+        case .statusReport:
+            // The round-trip probe's answer (issue #52). Timestamped here, on the input thread, so
+            // the 1 Hz diagnostics tick can compute an accurate round trip from it.
+            lastStatusReplyAt = benchNowMs() / 1000
+            statusReplies += 1
         case let .control(byte):
             handleControl(byte)
         case let .mouse(report):

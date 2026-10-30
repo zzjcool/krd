@@ -703,6 +703,10 @@ final class Desk {
     private var writeSeries = Series()
     /// The one rate definition (`Rates`), sampled by the diagnostics timer and read by both
     /// renderers, so the panel and `--stats-json` cannot disagree about what `tiles/s` means.
+    /// The DSR round-trip probe (issue #52): 4 bytes every couple of seconds, answered by the
+    /// terminal over the same connection the picture goes down.
+    private var rttProbe = RTTProbe()
+    private var rttRepliesSeen = 0
     private var lastRates = Rates()
     private var rateCounters = Rates.Counters()
     private var rateSampleAt = Double(0)
@@ -2185,7 +2189,11 @@ final class Desk {
         guard options.scaleAuto || options.qualityAuto else { return }
         framesSinceTick += 1
         let target = options.qualityAuto ? effectiveFps : options.fps
-        let late = writeMs > 1000.0 / Double(max(target, 1))
+        // `writeMs` only fires once sshd has stopped reading, i.e. after seconds of picture have
+        // piled up in its userspace buffer. The round trip sees the same congestion earlier, because
+        // its own answer queues behind those bytes (issue #52).
+        let rttLate = rttProbe.lastMs > rttBudgetMs
+        let late = writeMs > 1000.0 / Double(max(target, 1)) || rttLate
         if late { lateSinceTick += 1 }
         let now = benchNowMs() / 1000.0
         // Colour and frame rate first: they are cheap to give up and cheap to take back, and they
@@ -2687,6 +2695,8 @@ final class Desk {
             verdict = "capture age not measured (mock/replay, or no frame yet) — \(Int(m.pipeMs)) ms is all we do with a frame"
         } else if m.capP99Ms > m.pipeP99Ms * 2 {
             verdict = "the *capture* is the delay: cap p99 \(Int(m.capP99Ms)) ms vs pipe p99 \(Int(m.pipeP99Ms)) ms"
+        } else if m.rttAvailable, m.rttP99Ms > rttBudgetMs, m.rttP99Ms > m.pipeP99Ms * 2 {
+            verdict = "the *link* is the delay: rtt p99 \(Int(m.rttP99Ms)) ms vs pipe p99 \(Int(m.pipeP99Ms)) ms — our writes are not what is slow"
         } else if m.pipeP99Ms > m.capP99Ms * 2 {
             verdict = "our *write* path is the delay: pipe p99 \(Int(m.pipeP99Ms)) ms vs cap p99 \(Int(m.capP99Ms)) ms"
         } else {
@@ -2705,11 +2715,12 @@ final class Desk {
         out += "pid \(getpid())  \(ISO8601DateFormatter().string(from: Date()))  host \(Host.current().localizedName ?? "-")\n"
         out += "\n== the question\n\(verdict)\n"
         out += "cap = ScreenCaptureKit callback − PTS; pipe = callback → last byte written; e2e = cap + pipe.\n"
+        out += "rtt = the terminal's own answer to CSI 5n, so it includes whatever is still queued for the picture.\n"
         out += "\n== now\n"
         out += "target \(m.target)\(m.title.isEmpty ? "" : " (\(m.title))")\n"
         out += "frame \(Series.show(m.e2eMs)) ms (cap \(m.capLabel) + pipe \(Series.show(m.pipeMs)))"
             + ", p99 cap \(m.capP99Label) pipe \(Series.show(m.pipeP99Ms))"
-            + ", input \(Series.show(m.inputMs)) ms\n"
+            + ", input \(Series.show(m.inputMs)) ms, rtt \(m.rttLabel) (p99 \(m.rttP99Label))\n"
         out += String(format: "geometry %dx%d px, %dx%d cells of %gx%g (%@), scale %.3g%@\n",
                       m.pxW, m.pxH, m.cellsW, m.cellsH, m.cellW, m.cellH, m.geometrySource,
                       m.scale, m.scaleAuto ? " auto" : "")
@@ -2729,6 +2740,7 @@ final class Desk {
         out += series("zlib", zlibSeries, decimals: 2)
         out += series("write", writeSeries, decimals: 2)
         out += series("input", inputSeriesSnapshot())
+        if m.rttAvailable { out += series("rtt", rttProbe.series) } else { out += "rtt: (not measured)\n" }
         out += "\n== last \(Log.recentLines.count) log lines\n"
         out += Log.recentLines.joined(separator: "\n") + "\n"
 
@@ -2745,6 +2757,49 @@ final class Desk {
     /// report wants it next to the others.
     private func inputSeriesSnapshot() -> Series { input?.inputSamples ?? Series() }
 
+    /// `KRD_RTT_BUDGET_MS`, default 250: a round trip longer than a quarter second is felt as lag
+    /// even when nothing is blocking yet.
+    private var rttBudgetMs: Double {
+        if let raw = ProcessInfo.processInfo.environment["KRD_RTT_BUDGET_MS"], let v = Double(raw) {
+            return v
+        }
+        return 250
+    }
+
+    /// Ask the terminal how far away it is, when the mirror is live and the answer can mean anything.
+    ///
+    /// Off for every path with a byte contract (`--selftest`, `--record`, `--replay`, `--bench`: a
+    /// probe is 4 bytes nobody asked for), for `--mock` (no terminal to answer), and for
+    /// `KRD_NO_RTT=1`. A terminal that does not implement DSR turns the probe off after a few misses.
+    private var rttEnabled: Bool {
+        if ProcessInfo.processInfo.environment["KRD_NO_RTT"] != nil { return false }
+        return !options.mock && !options.bench && !options.selftest
+            && options.record == nil && options.replay == nil
+    }
+
+    private func probeRoundTrip() {
+        guard rttEnabled else { return }
+        let now = benchNowMs() / 1000
+        // The answer, if one arrived since the last tick. Its timestamp is the input thread's, so
+        // the round trip is accurate even though this runs at 1 Hz.
+        if let input, input.statusReplies != rttRepliesSeen {
+            rttRepliesSeen = input.statusReplies
+            if let ms = rttProbe.reply(at: input.lastStatusReplyAt) {
+                Log.write(String(format: "krd: rtt %.1f ms (CSI 5n round trip)\n", ms))
+            }
+        }
+        if rttProbe.due(at: now), writer.writeControl("\u{1B}[5n") {
+            rttProbe.sent(at: now)
+        }
+        if rttProbe.expire(at: now) {
+            if rttProbe.unavailable {
+                Log.write("krd: no answer to CSI 5n after \(rttProbe.misses) tries — the terminal does not implement DSR, so the rtt measurements stop here (write latency still counts)\n")
+            } else {
+                Log.write("krd: probe unanswered (CSI 5n) — retrying\n")
+            }
+        }
+    }
+
     /// The one 1 Hz diagnostics tick: sample once, then feed every consumer from that snapshot --
     /// the panel, the `--debug` line and `--stats-json`.
     ///
@@ -2752,6 +2807,7 @@ final class Desk {
     /// timers sampling the same counters would each see half the interval and print half the rate.
     private func startDiagnostics() {
         let statsJSON = StatsJSONWriter(path: options.statsJSON)
+        probeRoundTrip()
         sampleRates()
         sampleChrome()
         if chromeAvailable { drawChrome() }
@@ -2759,6 +2815,7 @@ final class Desk {
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            self.probeRoundTrip()
             self.sampleRates()
             self.sampleChrome()
             if self.chromeAvailable { self.drawChrome() }
@@ -2782,12 +2839,13 @@ final class Desk {
                 format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  "
                     + "ms[cap=%.1f pipe=%.1f(p99 %.1f) zlib=%.0f write=%.0f max=%.0f over5=%d]  "
                     + "%dx%d px %dx%d cells  delivered=%d/s skipped=%d/s idle=%d/s bad=%d  "
-                    + "input=%.1f late=%d/%d\n",
+                    + "input=%.1f rtt=%.1f late=%d/%d\n",
                 m.tilesPerSec, m.dirty, m.kbPerFrame, m.mbps,
                 m.capMs, m.pipeMs, m.pipeP99Ms, m.zlibMs, m.writeMs, m.writeMaxMs, m.writeOver5,
                 m.pxW, m.pxH, m.cellsW, m.cellsH,
                 Int(m.captureFps.rounded()), Int(m.skippedPerSec.rounded()),
-                Int(m.idlePerSec.rounded()), m.bad, m.inputMs, late, seen)
+                Int(m.idlePerSec.rounded()), m.bad, m.inputMs,
+                m.rttAvailable ? m.rttMs : -1, late, seen)
             Log.write(line)
         }
         json?.write(m, late: late, frames: seen)
@@ -2910,6 +2968,9 @@ final class Desk {
         m.sync = writer.syncLabel
         m.quiet = writer.quietLabel
         m.inputActive = input != nil
+        m.rttMs = rttProbe.lastMs
+        m.rttP99Ms = rttProbe.p99Ms
+        m.rttAvailable = rttEnabled && rttProbe.isMeasuring
         m.inputMs = input?.lastInputMs ?? 0
         m.inputP99Ms = input?.inputP99Ms ?? 0
         m.dryRun = options.dryRun

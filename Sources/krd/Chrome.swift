@@ -75,6 +75,16 @@ extension ChromeMetrics {
     /// "very fast capture" instead of "we do not know".
     var capLabel: String { capMs < 0 ? "—" : Series.show(capMs) }
     var capP99Label: String { capMs < 0 ? "—" : Series.show(capP99Ms) }
+    /// `34`, or `—` for "we did not ask" and `—` for "we asked and it did not answer": the two are
+    /// different (one is a choice, one is a capability) and both are not a measurement.
+    var rttLabel: String {
+        guard rttAvailable else { return "—" }
+        return Series.show(rttMs)
+    }
+    var rttP99Label: String {
+        guard rttAvailable else { return "—" }
+        return Series.show(rttP99Ms)
+    }
 }
 
 /// One second of numbers: the same counters the `--debug` stats line prints, plus the rates it
@@ -111,6 +121,12 @@ struct ChromeMetrics {
     var pipeMs = 0.0
     /// `parse → CGEvent.post` for the last key or click: the only input number that says whether the
     /// typing lag is ours or the network's.
+    /// Round trip of the terminal's own DSR answer (`CSI 5n` → `CSI 0n`), in ms. `nan` until the
+    /// first answer; `rttAvailable` is false for a path that does not probe, or a terminal that
+    /// never answers.
+    var rttMs = Double.nan
+    var rttP99Ms = Double.nan
+    var rttAvailable = false
     var inputMs = 0.0
     var inputP99Ms = 0.0
     /// Bytes sitting in the pty's own output buffer (`TIOCOUTQ`), -1 = not available.
@@ -453,25 +469,30 @@ final class Chrome {
                 : String(format: "cap %.0f p99 %.0f", m.capMs, m.capP99Ms)
             line(2, "frame", "\(Int(m.e2eMs)) ms",
                  String(format: "%@ · pipe %.0f p99 %.0f", cap, m.pipeMs, m.pipeP99Ms))
-            line(3, "encoder", String(format: "zlib %.1f ms", m.zlibMs),
+            // The network's own share, which `pipe` cannot see: it is measured on the terminal's
+            // reply, so it includes whatever is still queued in front of the picture.
+            line(3, "rtt", "\(m.rttLabel) ms",
+                 m.rttAvailable ? "p99 \(m.rttP99Label) · CSI 5n round trip"
+                     : (m.inputActive ? "no answer (terminal has no DSR)" : "off"))
+            line(4, "encoder", String(format: "zlib %.1f ms", m.zlibMs),
                  String(format: "write %.1f max %.1f over5 %d · q%d %@",
                         m.writeMs, m.writeMaxMs, m.writeOver5, m.quality, m.qualityLabel))
-            line(4, "capture", String(format: "%.1f/s frames", m.captureFps),
+            line(5, "capture", String(format: "%.1f/s frames", m.captureFps),
                  String(format: "skipped %.0f/s · idle %.0f/s · bad %d · total %d/%d/%d",
                         m.skippedPerSec, m.idlePerSec, m.bad, m.delivered, m.skipped, m.idle))
-            line(5, "geometry", "\(m.pxW)×\(m.pxH) px",
+            line(6, "geometry", "\(m.pxW)×\(m.pxH) px",
                  "\(m.cellsW)×\(m.cellsH) cells · cell \(Int(m.cellW))×\(Int(m.cellH)) · \(m.geometrySource)"
                  + " · scale \(String(format: "%.2g", m.scale))×"
                  + (m.scaleAuto ? " (auto)" : ""),
                  m.scale < 0.999 && m.scaleAuto ? .warn : .plain)
-            line(6, "wire", m.format,
+            line(7, "wire", m.format,
                  "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells · "
                  + "quantised \(m.quantisedTiles) raw \(m.skippedTiles)")
             if m.queueBytes >= 0 {
-                line(7, "pty buffer", "\(m.queueBytes) B",
+                line(8, "pty buffer", "\(m.queueBytes) B",
                      String(format: "%.0f ms at this rate · sshd took %.1f MB/s", m.queueMs, m.drainMbps))
             } else {
-                line(7, "pty buffer", "—", "TIOCOUTQ unavailable on this tty")
+                line(8, "pty buffer", "—", "TIOCOUTQ unavailable on this tty")
             }
             if inside > 9 {
                 text(2, y + 9, "MB/s".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)

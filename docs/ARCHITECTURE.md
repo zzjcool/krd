@@ -405,9 +405,12 @@ second and how many frames exceeded 5 ms, and `late` counts frames the loop decl
 
 `cap` and `pipe` are the split that answers "was it the capture or the write":
 
-- `cap = ScreenCaptureKit callback − PTS`. It is measured at the top of the sample handler, in host
-  time (`CMSampleBufferGetPresentationTimeStamp` and `benchNowMs()` share a clock base). At 10 fps
-  this is ~50 ms on its own, which is why "the picture feels laggy" is usually not the encoder.
+- `cap = ScreenCaptureKit callback − PTS`: how old the frame's *content* already was when it reached
+  us, measured in host time (`CMSampleBufferGetPresentationTimeStamp` and `benchNowMs()` share a
+  clock base). Measured on real frames it is usually ~0–10 ms — the compositor is prompt — and it
+  grows only when ScreenCaptureKit coalesces updates. It is slightly *negative* for frames presented
+  ahead of the callback (−10…+10 ms at 20 fps), which clamps to 0: those are timely frames, not
+  unmeasured ones.
 - `pipe = callback → last byte written`: everything we do with the frame.
 - `e2e = cap + pipe` is the number the status bar prints as `frame`.
 
@@ -418,6 +421,20 @@ measured".
 `--stats-json <path>` writes the same numbers as one NDJSON object per second
 (`bench/soak-report.py` reads them); the writer takes the panel's `ChromeMetrics` struct, so the
 two cannot drift.
+
+**The round trip (`CSI 5n`).** `write(2)` blocking only fires after sshd's userspace buffer is full,
+so a slow link stays invisible until seconds of picture have piled up. The probe writes 4 bytes
+(`RTTProbe`, `Sources/krdcore/RTTProbe.swift`) every couple of seconds; a VT terminal answers
+`CSI 0n`, `InputParser` emits `.statusReport`, and `InputReader` timestamps the arrival — so the round
+trip is measured to the input thread's clock rather than to the 1 Hz tick. The answer queues behind
+the picture, which is the point: the number includes the backlog a person feels.
+
+Both signals feed the quality governor, and they are not interchangeable: `writeMs` says "our writes
+are blocking now" (free, per frame, late), the round trip says "the far end is this far behind"
+(4 bytes per probe, includes queueing, early). Downgrade needs either; upgrade needs both quiet. A
+terminal that never answers switches the probe off after three misses and the governor keeps working
+on write latency alone — the numbers stay `—`, never `0`. `KRD_RTT_BUDGET_MS` (default 250) is the
+threshold, `KRD_NO_RTT=1` disables the probe.
 
 **The report bundle.** `kill -USR2 <krd>` writes `$TMPDIR/krd-report.txt`: a one-line verdict naming
 the bigger half of the delay, the current numbers, the last 300 samples of every series (cap, pipe,

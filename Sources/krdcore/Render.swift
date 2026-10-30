@@ -729,6 +729,21 @@ public final class ScreenWriter {
         out.append(contentsOf: Array(text.utf8))
     }
 
+    /// Writes a control sequence **between** frames, and says whether it went out.
+    ///
+    /// `out` doubles as the frame batch buffer, so appending to it while a batch is open would either
+    /// land inside the synchronized block or be thrown away by the next `beginBatch`. The DSR probe
+    /// (issue #52) is the one caller: it retries on the next tick if the answer is `false`.
+    @discardableResult
+    public func writeControl(_ text: String) -> Bool {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard !batchOpen else { return false }
+        out.append(contentsOf: Array(text.utf8))
+        flushLocked()
+        return true
+    }
+
     /// KRD_DUMP=/path captures every byte we send, for offline protocol diffing.
     private static let dumpHandle: FileHandle? = {
         guard let path = ProcessInfo.processInfo.environment["KRD_DUMP"] else { return nil }

@@ -140,17 +140,6 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
-        // Measured at the top, before the copy: this is "how long did the frame sit around before we
-        // saw it", and everything after this line is `pipe`'s business. ScreenCaptureKit timestamps
-        // in host time, which is the same base as `benchNowMs()` (uptime, no sleep).
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let ptsSeconds = pts.isValid ? CMTimeGetSeconds(pts) : .nan
-        if ptsSeconds.isFinite, ptsSeconds > 0 {
-            let age = benchNowMs() - ptsSeconds * 1000
-            lastCapMs = age.isFinite && age >= 0 && age < 60_000 ? age : -1
-        } else {
-            lastCapMs = -1
-        }
         callbacks += 1
         // The frame's state lives in the buffer's *sample attachments*, not in `CMGetAttachment`:
         // that call has never returned anything here, so `?? 0` silently turned every frame into
@@ -175,6 +164,26 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
                 idleFrames += 1
             }
             return
+        }
+
+        // How long this frame's *content* had already been waiting when we got it: `callback − PTS`,
+        // measured on the frames that actually carry pixels. Idle frames are skipped on purpose --
+        // their timestamp refers to the last content change, so on a still screen it can be minutes
+        // old and would report a delay nobody is waiting for. ScreenCaptureKit timestamps in host
+        // time, the same base as `benchNowMs()` (uptime, no sleep).
+        //
+        // The difference is often slightly *negative*: a PTS is a presentation time, so the frame can
+        // be stamped a few ms ahead of the callback that hands it over (measured here: −10…+10 ms at
+        // 20 fps). Those are frames that are right on time, not frames with no timestamp, so they
+        // clamp to 0 -- treating them as unmeasured is what made the live panel say `cap —` (issue
+        // #52's follow-up).
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let ptsSeconds = pts.isValid ? CMTimeGetSeconds(pts) : .nan
+        if ptsSeconds.isFinite, ptsSeconds > 0 {
+            let age = benchNowMs() - ptsSeconds * 1000
+            lastCapMs = age.isFinite && abs(age) < 60_000 ? Swift.max(0, age) : -1
+        } else {
+            lastCapMs = -1
         }
 
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)

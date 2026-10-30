@@ -54,6 +54,12 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(object["skipped_per_s"] as? Double, 2)
         XCTAssertEqual(object["idle_per_s"] as? Double, 7)
         XCTAssertEqual(object["input_ms"] as? Double, 3.5)
+        m.rttAvailable = true
+        m.rttMs = 34
+        m.rttP99Ms = 120
+        let withRTT = try json(m)
+        XCTAssertEqual(withRTT["rtt_ms"] as? Double, 34)
+        XCTAssertEqual(withRTT["rtt_p99_ms"] as? Double, 120)
         XCTAssertEqual(object["input_p99_ms"] as? Double, 9)
         XCTAssertEqual(object["mbps"] as? Double, 0.5)
         XCTAssertEqual(object["late"] as? Int, 3)
@@ -99,6 +105,21 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertTrue(panel.contains("pipe 2 p99 2") || panel.contains("pipe 1 p99 2"), panel)
     }
 
+    func testThePanelTellsQuietFromUnaskedAboutTheRoundTrip() {
+        var m = ChromeMetrics()
+        m.fpsTarget = 10
+        m.inputActive = true
+        m.rttAvailable = true
+        m.rttMs = 34
+        m.rttP99Ms = 120
+        XCTAssertTrue(statsPanel(m).contains("34.0 ms"), "the round trip is a number")
+        XCTAssertTrue(statsPanel(m).contains("p99 120.0"))
+
+        m.rttAvailable = false              // asked, no answer
+        XCTAssertTrue(statsPanel(m).contains("no answer"), "a terminal without DSR says so")
+        XCTAssertFalse(statsPanel(m).contains("34.0 ms"))
+    }
+
     /// The mock and replay paths have no presentation timestamp. That has to reach the reader as
     /// "unmeasured", not as a very fast capture.
     func testAnUnmeasuredCaptureAgeIsMinusOneNotZero() throws {
@@ -114,6 +135,8 @@ final class DiagnosticsTests: XCTestCase {
         m.inputP99Ms = 0
         let object = try json(m)
         XCTAssertEqual(object["cap_ms"] as? Double, -1, "the reader has to be able to tell")
+        XCTAssertEqual(object["rtt_ms"] as? Double, -1, "no rtt is -1 in json, never `nan`")
+        XCTAssertEqual(object["rtt_p99_ms"] as? Double, -1)
         XCTAssertEqual(m.capLabel, "—", "and the panel/report must not print -1 as a duration")
         XCTAssertEqual(m.capP99Label, "—")
         m.capMs = 40

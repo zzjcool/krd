@@ -176,6 +176,12 @@ Both thresholds are asymmetric, for the reason #64's are: a downgrade needs a *m
 over 3 s, an upgrade needs near-silence over 10 s, and an upgrade that is undone within 20 s multiplies
 the next quiet window by 3. A link that cannot hold a rung therefore settles instead of oscillating.
 
+"Late" means either of two things, and the governor needs both: the frame's `write(2)` took longer
+than its own period (cheap, per frame, but only after sshd's buffer is full), or the terminal's answer
+to a 4-byte `CSI 5n` probe took longer than `KRD_RTT_BUDGET_MS` (250 ms by default — it queues behind
+the picture, so it sees the backlog earlier). A terminal without DSR turns the probe off and leaves
+the governor with write latency, which is what it had before.
+
 The frame-rate step is enforced in the frame loop rather than in ScreenCaptureKit: the capture keeps
 delivering at `--fps`, and the frames the loop declines cost no zlib, no bytes and no dirty-region
 pass. The panel's `fps` target follows the rung, so the plumbing stays visible.
