@@ -14,6 +14,7 @@ Output: one JSON object on stdout. Nothing is asserted here except with --assert
 budget verdicts belong to bench/bench.py, which knows the whole run.
 """
 import argparse
+import re
 import json
 import os
 import pty
@@ -24,6 +25,28 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# One kitty graphics escape: `ESC_G <key=value,...> ; <base64>` terminated by ST. `a=t` carries a
+# tile chunk's pixels and `a=p` a placement, so together they are "picture bytes"; the deletes and
+# mode switches krd writes at startup and teardown are not.
+IMAGE = re.compile(rb"\x1b_G[^\x1b]*\x1b\\")
+
+
+def payload_after_first_frame(data):
+    """Picture bytes written after the first frame's sync block.
+
+    The static-screen invariant is "after the picture is on screen, a still desktop costs
+    nothing". Measuring it from the first *read* made it a test of pty chunking instead: on a loaded
+    runner the startup escapes (delete images, mouse modes off, alt screen) arrive in a second
+    read, and the old code counted those 65 bytes as picture (seen on macos-15 in CI and locally on
+    macOS 27). Counting image escapes rather than read boundaries asks the actual question: a frame
+    is `ESC[?2026h`, tile escapes and placements, `ESC[?2026l`; the teardown that follows is mode
+    switches only, and the startup banner before it carries no pixels.
+    """
+    marker = data.find(b"\x1b[?2026l")
+    body = data if marker < 0 else data[marker + len(b"\x1b[?2026l"):]
+    return sum(len(hit) for hit in IMAGE.findall(body) if b"a=t" in hit or b"a=p" in hit)
+
 
 CHUNK = 16384
 
@@ -75,6 +98,7 @@ def main():
     os.close(slave)
 
     total = 0
+    collected = bytearray()
     first_frame_bytes = None
     marks = []          # (t, bytes_after) to compute the achieved rate over time
     drain = args.drain
@@ -96,6 +120,8 @@ def main():
             if not chunk:
                 break
             total += len(chunk)
+            if len(collected) < 64 << 20:
+                collected += chunk
             if first_frame_bytes is None:
                 first_frame_bytes = total
             marks.append((time.time(), total))
@@ -161,8 +187,9 @@ def main():
         result["compress_ms"] = {"p50": round(statistics.median(compress_ms), 2)}
         result["late"] = sum(1 for f in frames if f["pipe_ms"] > 50)
         result["tiles"] = sum(f["tiles"] for f in frames)
-        # bytes after the first frame: the static-screen invariant
-        result["bytes_after_first_frame"] = total - (first_frame_bytes or total)
+        # bytes after the first frame: the static-screen invariant, counted in payload (see
+        # payload_after_first_frame) rather than from a read boundary
+        result["bytes_after_first_frame"] = payload_after_first_frame(bytes(collected))
 
     text = json.dumps(result, indent=2)
     print(text)
