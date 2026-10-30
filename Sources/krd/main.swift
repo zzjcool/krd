@@ -84,6 +84,8 @@ struct Options {
     /// Draw a test pattern instead of the desk: no window server, no Screen Recording grant, and the
     /// picture's own border is the measurement (`DemoPicture`, TROUBLESHOOTING 23f).
     var demo = false
+    /// `--square`: no rounded corners on the wall's pictures (they are rounded by default).
+    var square = false
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
 
@@ -192,6 +194,7 @@ func usage() -> String {
       --dpr <n>           device pixels per reported cell, i.e. picture quality (default: 2 when
                           the terminal answered CSI 16t/14t in points, 1 when the pty reported pixels)
       --demo             draw a test pattern instead of the desk (no capture, no permission)
+      --square           square corners on the wall's pictures (default: rounded)
       --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
                           pixel-sized placement. Default: one probe at startup, then the answer
       --dry-run           parse input but only log it, never post CGEvent
@@ -376,6 +379,7 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
             }
             i += 1
         case "--demo": options.demo = true
+        case "--square": options.square = true
         case "--no-placeholders": options.placeholders = false
         case "--placeholders": options.placeholders = true
         case "--dpr":
@@ -1144,6 +1148,7 @@ final class Desk {
                                         dpr: options.dpr) { Log.write($0) }
         wallPane = pane
         WallPictures.demo = options.demo
+        WallPictures.square = options.square
         // Pictures: kitty unicode placeholders when the terminal accepts them, else pixel-sized
         // placements. One probe, one log line, and the answer is a reply rather than a hope - a
         // terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells.

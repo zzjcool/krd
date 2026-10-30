@@ -327,6 +327,12 @@ use whichever one the probe picked, so this section applies to either page.
    smaller than its box** - never of a wrong `c`/`r` (a placement with the wrong `c`/`r` on a terminal that scales
    fills the box it was given, just at an odd shape).
 
+   *If the desktop shrinks as the picture gets bigger*, the picture is not the problem: `SCStreamConfiguration`
+   does not upscale, it draws the source at its own size and pads the rest with black, so a request for more pixels
+   than the source has arrives as a desktop in the corner of a larger black canvas. krd logs both numbers -
+   `capture 2431x1518 px asked, 1920x1199 px from a 1920x1200 px source` - and caps the request at the source
+   (`PanelCapture.fitted`), upscaling to the panel's exact pixels itself.
+
 3. `--placeholders` / `--no-placeholders` force either path, which is how a terminal is compared against itself.
 
 ### 23. One frame, then the stream stops forever

@@ -222,8 +222,11 @@ final class PanelImageCornerTests: XCTestCase {
     }
 
     func testTheRadiusIsA24thOfTheShortSide() {
-        XCTAssertEqual(PanelImage.cornerRadius(width: 731, height: 416), 17)
-        XCTAssertEqual(PanelImage.cornerRadius(width: 1267, height: 792), 33)
+        // A fortieth of the short side: the same shape at two sizes, which is why a card and the
+        // stage read as the same kind of object (and why the VM's 660-px card gets ~16 px).
+        XCTAssertEqual(PanelImage.cornerRadius(width: 731, height: 416), 10)
+        XCTAssertEqual(PanelImage.cornerRadius(width: 1267, height: 792), 19)
+        XCTAssertEqual(PanelImage.cornerRadius(width: 2431, height: 1518), 37)
         XCTAssertEqual(PanelImage.cornerRadius(width: 10, height: 200), 0, "nothing to round")
     }
 }

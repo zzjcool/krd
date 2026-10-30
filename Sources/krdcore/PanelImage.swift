@@ -39,14 +39,16 @@ public struct PanelFit: Equatable {
 
 /// The picture maths shared by the text layer and the capture path (design §6.6).
 public enum PanelImage {
-    /// The corner radius for a picture of this size: one twenty-fourth of its short side.
+    /// The corner radius for a picture of this size: a fortieth of its short side.
     ///
-    /// Chosen to read as a rounded object at a glance without looking like a badge: at the VM's
-    /// 1024x768 display fitted into a 137-column stage that is ~33 px, and a 731x416 card picture
-    /// gets ~17 px - about what macOS gives a window. One rule for both, because a rounded card next
-    /// to a square stage would look like two different things glued together.
+    /// A *fraction*, not a constant, so a card and the stage read as the same kind of object: at 2x a
+    /// 660-pixel-tall card gets 16 px (about what macOS gives a window) and the 1518-pixel stage gets
+    /// 38 px, i.e. the same shape at two sizes. One twenty-fourth was the first rule and it read as a
+    /// badge on the stage - four big bites taken out of the corners. The rounding is inside the
+    /// picture now that the picture *is* its cells: the corner shows the wall the picture lies on,
+    /// which is what a rounded window looks like, and `--square` turns it off.
     public static func cornerRadius(width: Int, height: Int) -> Int {
-        max(0, min(width, height) / 24)
+        max(0, min(width, height) / 40)
     }
 
     /// Fit `aspect` (width / height) inside `rect`, never cropping and never stretching.

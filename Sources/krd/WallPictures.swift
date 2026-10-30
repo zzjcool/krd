@@ -45,6 +45,9 @@ enum WallPictures {
     /// panel that fails is simply absent — the caller paints its mask.
     /// Draw the test pattern instead of the desk (`--demo`). Set once before the first paint.
     static var demo = false
+    /// Square corners (`--square`). Rounded is the default: a picture is the size of its cells, so a
+    /// cut corner shows the wall underneath, not a frame around a smaller picture (§6.6).
+    static var square = false
 
     static func capture(_ panels: [WallPanel]) async -> (pictures: [Picture],
                                                           failures: [Int: PanelCaptureError]) {
@@ -105,12 +108,16 @@ enum WallPictures {
                     panelHeight: raster.height,
                     originX: 0,
                     originY: 0,
-                    // No rounded corners ("把圆角边框去掉吧，我记得加之前是正常的"). A cut corner is a
-                    // *hole* in the picture: the terminal puts its own background there (Rex: black),
-                    // so a rounded picture reads as a frame around a smaller picture instead of as
-                    // the desktop itself. It is also the only alpha in the wall's images, and alpha
-                    // is the property a terminal is most likely to handle differently from RGB.
-                    cornerRadius: 0)
+                    // Rounded corners, back by request - and the reason they were removed was the
+                    // *other* bug. A cut corner is a hole, and the terminal puts its own background
+                    // in it, so a rounded picture with a black canvas behind it read as "a frame
+                    // around a smaller picture". The canvas was the bug: ScreenCaptureKit pads with
+                    // black instead of upscaling (`PanelCapture.fitted`), so the picture's own pixels
+                    // held a desktop in one corner. With the picture equal to its cells, the corner
+                    // hole is inside the picture and shows the wall it lies on, which is what a
+                    // rounded window looks like.
+                    cornerRadius: square ? 0
+                        : PanelImage.cornerRadius(width: raster.width, height: raster.height))
                 guard canvas.count == raster.width * raster.height * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }
