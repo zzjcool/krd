@@ -482,35 +482,17 @@ public final class ScreenWriter {
 
         if sync { append("\u{1B}[?2026h") }
         // 1. Transmit only - a placeholder image must not carry a placement of its own.
-        let chars = Array(Data(payload).base64EncodedString().utf8)
-        let compression = ",o=z"
-        let control = "Gf=\(panelFormat.protocolChannels),s=\(width),v=\(height),a=t"
-            + "\(compression),q=\(quiet),i=\(id)"
-        var i = 0
-        var first = true
-        while i < chars.count {
-            let end = min(i + 4096, chars.count)
-            let more = end == chars.count ? 0 : 1
-            append("\u{1B}_")
-            append(first ? "\(control),m=\(more);" : "Gm=\(more);")
-            out.append(contentsOf: chars[i..<end])
-            append("\u{1B}\\")
-            i = end
-            first = false
-        }
+        appendTransmit(id: id, payload: payload, width: width, height: height,
+                       compressed: true, channels: panelFormat.protocolChannels)
         // 2. The virtual placement: the cell rectangle the picture should fill.
         append("\u{1B}_Gi=\(id),p=\(placementID),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)\u{1B}\\")
-
-        // 3. The placeholder cells. The row diacritic on the first cell of a row is enough - the
-        // protocol lets a cell inherit "row of the left cell, column + 1" - so each row costs one
-        // diacritic. The image id travels in the foreground colour.
+        // 3. The placeholder cells, clipped so this never writes the final cell of the final row (a
+        //    pending wrap there scrolls the grid and takes every placement on it one row up).
         let r = (id >> 16) & 0xFF, g = (id >> 8) & 0xFF, b = id & 0xFF
         let colour = "\u{1B}[38;2;\(r);\(g);\(b)m"
         for line in 0..<rows {
             let paneRow = row + line
             guard paneRow <= paneRows else { break }
-            // Never write the final cell of the final row: a pending wrap there scrolls the grid and
-            // takes every placement on it one row up (WallLayout.clip enforces the same rule).
             var cells = cols
             if paneRow == paneRows { cells = min(cells, paneCols - col) }
             if cells <= 0 { break }
@@ -526,6 +508,91 @@ public final class ScreenWriter {
         }
         if sync { append("\u{1B}[?2026l") }
         return payload.count
+    }
+
+    /// One **tile** as a unicode placeholder - the mirror's transport, the same shape as the wall's
+    /// panel (design §6.9).
+    ///
+    /// Why the mirror gets it too: a `c`/`r` placement asks the terminal to scale an image into a cell
+    /// rectangle, and a terminal is free to draw one image pixel per device pixel instead (Rex does).
+    /// A tile captured at the pane's *reported* pixels then lands at half size on a pane whose cell it
+    /// reports in points, and `--scale` / `--quality` move the picture instead of only its sharpness.
+    /// A placeholder cell has no size of its own - the terminal fits the image into the cells - so the
+    /// picture is the cells and the pixel count is quality, which is what those two levers were always
+    /// meant to be.
+    ///
+    /// The cost is `cols * rows` invisible characters per dirty tile (at 8x4 cells: 32 cells, ~128 B)
+    /// plus one diacritic per row decoded as "the row of the image". Next to the tile's payload that is
+    /// a rounding error - and only dirty tiles are rewritten.
+    public func emitTileAsPlaceholder(_ tile: CompressedTile, sync: Bool = true) {
+        let rect = tile.rect
+        guard rect.cols > 0, rect.rows > 0, rect.w > 0, rect.h > 0 else { return }
+        let iid = 100 + tile.index
+        let pid = 1000 + tile.index
+        lastFrameBytes += tile.payload.count
+        totalBytes += tile.payload.count
+        framesEmitted += 1
+        lastCompressedTiles += 1
+
+        if sync { append("\u{1B}[?2026h") }
+        // 1. Transmit only: a placeholder image must not carry a placement of its own.
+        appendTransmit(id: iid, payload: tile.payload, width: rect.w, height: rect.h,
+                       compressed: tile.isCompressed)
+        // 2. The virtual placement on this tile's cells.
+        append("\u{1B}_Gi=\(iid),p=\(pid),a=p,U=1,q=\(quiet),c=\(rect.cols),r=\(rect.rows)\u{1B}\\")
+        // 3. The invisible grid. The image id travels in the foreground colour and one diacritic per
+        //    row is enough (a cell inherits "left cell, column + 1").
+        appendPlaceholderGrid(id: iid, row: rect.row, col: rect.col,
+                              cols: rect.cols, rows: rect.rows)
+        if sync { append("\u{1B}[?2026l") }
+    }
+
+    /// The transmit half of the kitty protocol, in 4096-character chunks, in the writer's format.
+    ///
+    /// Shared by the tile, panel and placeholder emitters: any difference between them shows up as
+    /// "the wall works and the mirror does not", which is the hardest kind of bug to read.
+    func appendTransmit(id iid: Int, payload: [UInt8], width: Int, height: Int,
+                        compressed: Bool, channels: Int? = nil) {
+        let chars = Array(Data(payload).base64EncodedString().utf8)
+        let compression = compressed ? ",o=z" : ""
+        let control = "Gf=\(channels ?? format.protocolChannels),s=\(width),v=\(height),a=t"
+            + "\(compression),q=\(quiet),i=\(iid)"
+        var i = 0
+        var first = true
+        while i < chars.count {
+            let end = min(i + 4096, chars.count)
+            let more = end == chars.count ? 0 : 1
+            append("\u{1B}_")
+            append(first ? "\(control),m=\(more);" : "Gm=\(more);")
+            out.append(contentsOf: chars[i..<end])
+            append("\u{1B}\\")
+            i = end
+            first = false
+        }
+    }
+
+    /// The invisible placeholder cells of one image: `cols * rows` `U+10EEEE` characters, a row
+    /// diacritic on the first cell of each row, the image id in the foreground colour.
+    ///
+    /// Ends with a cursor move into the grid's own first cell. Writing the final cell of the final row
+    /// arms the terminal's pending wrap, and the *next* printable byte would then scroll the whole grid
+    /// - which drags every placement on it up one row. The wall avoids that cell entirely (its pictures
+    /// are never at the pane's last cell); a mirror's tiles are, so the wrap is cancelled here instead.
+    func appendPlaceholderGrid(id iid: Int, row: Int, col: Int, cols: Int, rows: Int) {
+        let r = (iid >> 16) & 0xFF, g = (iid >> 8) & 0xFF, b = iid & 0xFF
+        let colour = "\u{1B}[38;2;\(r);\(g);\(b)m"
+        for line in 0..<rows {
+            append("\u{1B}[\(row + line);\(col)H")
+            append(colour)
+            for cell in 0..<cols {
+                append("\u{10EEEE}")
+                if cell == 0, let mark = Self.placeholderDiacritic(line) {
+                    append(String(mark))
+                }
+            }
+            append("\u{1B}[39m")
+        }
+        append("\u{1B}[\(row);\(col)H")
     }
 
     /// The diacritic for a row number, or `nil` when the table runs out (a pane taller than 256

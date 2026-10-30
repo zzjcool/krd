@@ -658,6 +658,10 @@ final class Desk {
     /// from another thread would be a race on a multi-word value. This one is written once, before
     /// `startInput()` starts the reader, and never again.
     private var wallMode = false
+    /// Draw the mirror's tiles as unicode placeholders (design §6.9): the terminal fits each tile into
+    /// its cells, so a tile's pixel count is sharpness and `--scale`/`--quality` stop moving the
+    /// picture. Decided once, from `--placeholders` or from one probe of the terminal.
+    private var placeholderTiles = false
     private var wallCanvas: WallCanvas?
     private var wallModel = WallModel()
     private var wallTimer: DispatchSourceTimer?
@@ -788,6 +792,19 @@ final class Desk {
             options.scaleAuto = false
             options.scale = 1
             Log.write("krd: \(why)\n")
+        }
+
+        // Tiles as unicode placeholders: the terminal fits each tile into its cells, so a tile's
+        // pixel count is sharpness and `--scale`/`--quality` stop being able to *move* the picture
+        // (design §6.9). `--bench` and `--selftest` are byte contracts and must not see a probe's
+        // escape, so they keep the pixel-sized path; nothing else needs to.
+        if let forced = options.placeholders {
+            placeholderTiles = forced && !(options.bench || options.selftest)
+        } else if !(options.bench || options.selftest) {
+            placeholderTiles = TermGeometry.supportsPlaceholders() == true
+        }
+        if options.debug || options.placeholders != nil {
+            Log.write("krd: tiles as \(placeholderTiles ? "unicode placeholders (U=1)" : "pixel-sized placements")\n")
         }
         // One place decides the starting scale, for every path below -- live, --mock, --bench.
         // (It used to be set inside the live capture setup only, so `--mock --scale 0.5` quietly
@@ -2491,9 +2508,22 @@ final class Desk {
         }
 
         if options.fullFrame {
-            writer.emitFullFrame(rgba: pixels, width: width, height: height,
-                                 row: grid.originRow, col: grid.originCol,
-                                 cols: grid.paneCols, rows: grid.paneRows)
+            if placeholderTiles {
+                // One picture for the whole pane: the same transport, one image id (2), placed on the
+                // picture's cells. `--full-frame` exists for benchmarking and for terminals that
+                // dislike many small images, so it has to be able to say the same thing.
+                writer.emitPanelAsPlaceholder(id: 2, placementID: 2,
+                                              row: grid.originRow, col: grid.originCol,
+                                              cols: grid.paneCols, rows: grid.paneRows,
+                                              pixels: pixels, width: width, height: height,
+                                              level: writer.level(for: 0),
+                                              paneCols: TermGeometry.lastGrid.cols,
+                                              paneRows: TermGeometry.lastGrid.rows)
+            } else {
+                writer.emitFullFrame(rgba: pixels, width: width, height: height,
+                                     row: grid.originRow, col: grid.originCol,
+                                     cols: grid.paneCols, rows: grid.paneRows)
+            }
             writer.endFrame()
             return
         }
@@ -2517,7 +2547,11 @@ final class Desk {
 
         // Assembly stays serial: the escapes must reach the pty in a deterministic order.
         for case let tile? in packed {
-            writer.emit(tile, sync: writer.perTileSync)
+            if placeholderTiles {
+                writer.emitTileAsPlaceholder(tile, sync: writer.perTileSync)
+            } else {
+                writer.emit(tile, sync: writer.perTileSync)
+            }
             writer.observe(index: tile.index, ratio: tile.ratio, quantisedIn: tile.isQuantised)
         }
         writer.endFrame()

@@ -94,4 +94,55 @@ final class PlaceholderTests: XCTestCase {
         }
         XCTAssertNil(ScreenWriter.placeholderDiacritic(256), "past the table there is no row mark")
     }
+
+    /// The mirror's transport: a tile becomes a virtual placement on the tile's own cells plus a grid
+    /// over them. Same shape as a panel, because a tile *is* a small panel.
+    func testATileBecomesAVirtualPlacementOnItsCells() {
+        let writer = ScreenWriter()
+        var bytes: [UInt8] = []
+        writer.beginSession()
+        // From here on the bytes are this tile's: `beginFrame` flushes the session's own escapes.
+        writer.beginFrame()
+        writer.sink = { bytes.append(contentsOf: $0) }
+        // A 2x2-cell tile at column 3, row 2, 16x32 px (so the pixel size cannot be mistaken for a
+        // cell count).
+        let rect: TileRect = (x: 0, y: 0, w: 16, h: 32, col: 3, row: 2, cols: 2, rows: 2)
+        let tile = CompressedTile(index: 7, rect: rect,
+                                  payload: [UInt8](repeating: 0x11, count: 16 * 32 * 3),
+                                  ratio: 1, isCompressed: false)
+        writer.emitTileAsPlaceholder(tile, sync: true)
+        writer.endFrame()
+        let out = String(decoding: bytes, as: UTF8.self)
+
+        XCTAssertTrue(out.contains("s=16,v=32,a=t"), "the transmit carries the tile's pixels")
+        XCTAssertTrue(out.contains("i=107,p=1007,a=p,U=1,q=2,c=2,r=2"),
+                      "the virtual placement is the tile's cells, with the tile's ids")
+        // The image id is the cell's foreground colour (107 = 0x00006B).
+        XCTAssertTrue(out.contains("\u{1B}[38;2;0;0;107m"))
+        XCTAssertEqual(out.unicodeScalars.filter { $0 == "\u{10EEEE}" }.count, 2 * 2)
+        XCTAssertTrue(out.contains("\u{10EEEE}\u{0305}"), "row 0 diacritic")
+        XCTAssertTrue(out.contains("\u{10EEEE}\u{030D}"), "row 1 diacritic")
+        // The grid ends with a move into its own first cell: writing the pane's final cell arms a
+        // pending wrap, and the next printable byte would scroll the whole grid (a mirror's tiles do
+        // reach the final cell, unlike the wall's pictures).
+        XCTAssertTrue(out.contains("\u{1B}[39m\u{1B}[2;3H"), "the grid must end with a cursor move")
+        XCTAssertTrue(out.contains("\u{1B}[2;3H\u{1B}[?2026l"), "and the tile closes its sync block")
+    }
+
+    /// A tile with no cells is not a tile: the emitter says nothing rather than a bare placement that
+    /// would draw the image at the cursor with no placeholder to size it.
+    func testATileWithoutCellsEmitsNothing() {
+        let writer = ScreenWriter()
+        var bytes: [UInt8] = []
+        writer.beginSession()
+        writer.beginFrame()
+        writer.sink = { bytes.append(contentsOf: $0) }
+        let rect: TileRect = (x: 0, y: 0, w: 16, h: 32, col: 1, row: 1, cols: 0, rows: 2)
+        writer.emitTileAsPlaceholder(CompressedTile(index: 0, rect: rect, payload: [1, 2, 3],
+                                                    ratio: 1, isCompressed: false))
+        writer.endFrame()
+        // The frame's own sync pair is all that may reach the pty: no transmit, no placement, no grid.
+        XCTAssertEqual(String(decoding: bytes, as: UTF8.self),
+                       "\u{1B}[?2026h\u{1B}[?2026l", "no cells, no escape")
+    }
 }

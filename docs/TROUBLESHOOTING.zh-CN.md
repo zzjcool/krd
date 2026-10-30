@@ -274,7 +274,7 @@ demo 137x44 · cell 8x16 · 2x · pic 86x27c 1376x864px · a=p · measured from 
 ### 23e. 图只占了盒子的一部分 / 贴在左上角
 
 在 kitty 终端上放一张图有两条路，只有一条是对的：**格子**（`U=1` unicode placeholder，默认）和 **像素**
-（`--no-placeholders`）。
+（`--no-placeholders`）。落地屏和镜像都用探测选出来的那一条，所以这一节对两个页面都适用。
 
 1. 用 `--debug` 跑，读 krd 启动时打的两行日志：
 

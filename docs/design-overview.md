@@ -271,6 +271,7 @@ own, so nothing has to be estimated.
 | the pixel path | `--no-placeholders`. There the image *must* be asked for in device pixels, so `PaneGeometry.dpr` is 2 when the terminal answered in points |
 | the probe | once at startup: a 1×1 image transmitted with `q=2` (silent) and placed as a placeholder with `q=0`. `OK` → placeholders, `E…` or no answer → the pixel path. One log line says which, because a terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells |
 | one snapshot | `PaneGeometry` - grid, cell, dpr, source - is measured once at start and once per resize. The layout, every capture size and the mouse mapping all read *it*; nothing else may measure the terminal |
+| the mirror too | the mirror's tiles travel the same way (`emitTileAsPlaceholder`): one transmit, one virtual placement on the tile's cells, one grid over them - so the interactive page and the preview are one channel, and `--scale` / `--quality` become what they always claimed to be, *sharpness*, instead of knobs that move the picture. Measured on the VM at 100x30, 2.6 s of the same stream: 113 tiles as placeholders = 704 KB against 96 tiles as placements = 612 KB - the grid costs ~2-4 % and only for the tiles that were dirty. `--bench` and `--selftest` keep the placement path, because their numbers are byte contracts |
 
 `--demo` draws a test pattern instead of the desk (`DemoPicture`): no window server, no grant, a fixed
 model, and the footer prints the measurement. It exists because every bug above was invisible in code and

@@ -306,7 +306,8 @@ one terminal can be compared against itself in four lines.
 ### 23e. The picture fills part of its box / sits in the top-left corner
 
 Two ways to place an image on a kitty terminal, and only one of them is right: **cells** (`U=1` unicode
-placeholders, the default) and **pixels** (`--no-placeholders`).
+placeholders, the default) and **pixels** (`--no-placeholders`). Both the landing screen and the mirror
+use whichever one the probe picked, so this section applies to either page.
 
 1. Run with `--debug` and read the two lines krd logs at startup:
 
