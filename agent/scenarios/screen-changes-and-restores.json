@@ -1,0 +1,46 @@
+{
+  "name": "a click changes the screen and Escape puts it back, pixel for pixel",
+  "why": [
+    "The smoke test for the whole scaffold, written so that it fails when any link lies. If the click",
+    "never reached the window server the second frame equals the first; if the merge of overlays or",
+    "the escape decode were wrong the two hashes would not come back equal; if Accessibility were",
+    "blind the menu assertion still passes, which is exactly why the picture is the assertion here.",
+    "The capture is cropped to y>=30 so the menu-bar clock cannot make an unchanged screen look",
+    "changed \u2014 a flaky smoke test is worse than none."
+  ],
+  "notes": [
+    "Finder is raised first: opening the Apple menu also raises the frontmost app's window, and that",
+    "legitimate raise would make a correct close look like a changed screen."
+  ],
+  "steps": [
+    {
+      "do": "key escape"
+    },
+    {
+      "do": "app focus Finder"
+    },
+    {
+      "sleep": 0.8
+    },
+    {
+      "do": "see --rect 0,30,1920,1170 --as closed"
+    },
+    {
+      "do": "click 12 10"
+    },
+    {
+      "expect": "diff:closed",
+      "timeout": 5
+    },
+    {
+      "do": "key escape"
+    },
+    {
+      "expect": "same:closed",
+      "timeout": 5
+    },
+    {
+      "do": "see --rect 0,30,1920,1170"
+    }
+  ]
+}

@@ -24,3 +24,4 @@ docs/media/raw/
 /bench/ab-report.md
 /bench/history/*+dirty*.json
 __pycache__/
+artifacts/

@@ -1,0 +1,1029 @@
+#!/usr/bin/env python3
+"""kagent — the scaffold that lets an agent work on krd without a screen.
+
+The problem this solves, stated once: this project's bugs live in what a *terminal* does with a
+picture, and the machine that has the terminal is the one whose screen is locked. Every capability
+below is therefore routed to a place where a measurement is still possible:
+
+  eye   ~/.kagent/bin/kagent-driver shot     on the tart VM  -> a JPEG plus the numbers that turn a
+                                                               point in it back into a screen point
+  hand  ~/.kagent/bin/kagent-driver input    on the tart VM  -> real CGEvents, exit 3 if macOS
+                                                               refused to show them
+  text  krd ax ...                           on the tart VM  -> roles, names, frames, and refs that
+                                                               survive across invocations
+  pixel krd under a pty + agent/lib/vt.py                    -> the escape stream decoded back into
+                                                               the picture the terminal would draw
+  proof kagent run <scenario>                                -> steps, expectations, and one report
+
+Exit codes are shared with the tools underneath: 0 ok · 1 the expectation failed · 2 usage ·
+3 the system refused (TCC) · 4 the environment is missing · 5 unknown (could not look).
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "agent" / "lib"))
+
+from kagent import act, core, panes, perceive, predicates, render, scenario  # noqa: E402
+from kagent.core import EXIT_ENVIRONMENT, EXIT_FAIL, EXIT_OK, EXIT_UNKNOWN, EXIT_USAGE, KagentError  # noqa: E402
+
+
+def _shquote(value):
+    import shlex
+    return shlex.quote(str(value))
+
+
+class Context:
+    def __init__(self, target_name, artifacts_name, as_json, quiet=False):
+        self.target = core.Target(target_name)
+        self.artifacts = core.Artifacts(artifacts_name)
+        self.json = as_json
+        self.quiet = quiet
+
+    # -- output ------------------------------------------------------------
+
+    def emit(self, payload, human=None):
+        if self.json:
+            core.jprint(payload)
+        elif human is not None:
+            print(human)
+        elif isinstance(payload, str):
+            print(payload)
+        else:
+            core.jprint(payload)
+        return payload
+
+    def note(self, text):
+        if not self.quiet:
+            sys.stderr.write(text + "\n")
+
+
+ctx = None
+
+
+def main(argv=None):
+    global ctx
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    ctx = Context(args.target, args.run, args.json, args.quiet)
+    try:
+        code, payload = run_command(args, ctx)
+    except KagentError as error:
+        if args.json:
+            core.jprint({"error": str(error), "code": error.code})
+        else:
+            sys.stderr.write("kagent: %s\n" % error)
+        return error.code
+    if payload is not None and not isinstance(payload, int):
+        pass
+    return code
+
+
+def build_parser():
+    # Two copies of the same flags, on purpose. The top-level parser needs real defaults; every
+    # subparser needs the same flags accepted *after* the verb, with `SUPPRESS` defaults so an absent
+    # flag cannot clobber a value given before the verb. One shared parent parser would not work:
+    # `set_defaults` rewrites the action object, and `parents=` shares action objects by reference,
+    # so the subparser ends up carrying `--target vm` and silently overrides `--target host`.
+    parser = argparse.ArgumentParser(
+        prog="kagent",
+        description="Agent-facing eyes, hands and assertions for krd (see agent/README.md).",
+        epilog="Every command appends to artifacts/<run>/transcript.jsonl.")
+    parser.add_argument("--target", default=os.environ.get("KAGENT_TARGET", "vm"),
+                        choices=["vm", "host"], help="where the Mac under test lives (default vm)")
+    parser.add_argument("--run", default=None,
+                        help="artifact directory name (default: $KAGENT_RUN or 'latest')")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--quiet", action="store_true", help="no progress notes on stderr")
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--target", default=argparse.SUPPRESS, choices=["vm", "host"],
+                        help="where the Mac under test lives (default vm)")
+    common.add_argument("--run", default=argparse.SUPPRESS,
+                        help="artifact directory name (default: $KAGENT_RUN or 'latest')")
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+    common.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS,
+                        help="no progress notes on stderr")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add(name, **kwargs):
+        return sub.add_parser(name, parents=[common], **kwargs)
+
+    p = add("doctor", help="measure every capability; nothing is assumed")
+    p.add_argument("--fix", action="store_true", help="build/install the driver on the target")
+    p.add_argument("--live", action="store_true", help="also run the scaffold's own tests")
+
+    p = add("see", help="capture the target's screen as a JPEG + coordinate contract")
+    p.add_argument("--marks", action="store_true", help="number the clickable elements (AX tree)")
+    p.add_argument("--app", default=None, help="app whose elements get marked (default: focused)")
+    p.add_argument("--grid", type=int, default=None, help="grid every N screen points")
+    p.add_argument("--window", default=None, help="CGWindowID, or an app/title substring")
+    p.add_argument("--rect", default=None, help="x,y,w,h in screen points")
+    p.add_argument("--cursor", action="store_true", help="draw the pointer")
+    p.add_argument("--max-width", type=int, default=1200, dest="max_width")
+    p.add_argument("--quality", type=float, default=0.72)
+    # An unchanged frame is reported as `unchanged: true` without a new file, always: on a 20 fps
+    # desktop it is the difference between a 40-call loop costing 4 MB and costing 60 KB. There is
+    # no switch to turn that off, because the switch would only ever be used by accident.
+    p.add_argument("--as", default=None, dest="as_name",
+                   help="name this frame so `same:NAME` / `diff:NAME` can compare against it")
+
+    p = add("text", help="the accessibility tree as lines (cheap; assertable)")
+    p.add_argument("--app", default=None)
+    p.add_argument("--pid", type=int, default=None)
+    p.add_argument("--window", type=int, default=None)
+    p.add_argument("-d", "--depth", type=int, default=6)
+    p.add_argument("-i", "--interactive", action="store_true")
+    p.add_argument("--max", type=int, default=250, dest="maximum")
+    p.add_argument("--menubar", action="store_true")
+
+    add("screen", help="apps with windows, plus the focused element")
+    p = add("windows", help="on-screen windows with CGWindowID and rect")
+    p.add_argument("--ax", action="store_true", help="join the accessibility window list too")
+
+    p = add("click", help="click a point, a mark number, or an accessibility ref")
+    p.add_argument("x", nargs="?", type=float)
+    p.add_argument("y", nargs="?", type=float)
+    p.add_argument("--mark", type=int, default=None, help="number drawn by `see --marks`")
+    p.add_argument("--ref", default=None, help="an @eN handle from `kagent text`")
+    p.add_argument("--point", action="store_true", help="for --mark: click the centre, not AXPress")
+    p.add_argument("--button", default="left", choices=["left", "right", "middle"])
+    p.add_argument("--count", type=int, default=1)
+    p.add_argument("--image", action="store_true",
+                   help="x y are coordinates read off the last frame, not screen points")
+
+    p = add("move", help="move the pointer")
+    p.add_argument("x", type=float)
+    p.add_argument("y", type=float)
+
+    p = add("drag", help="press, glide, release")
+    p.add_argument("x1", type=float)
+    p.add_argument("y1", type=float)
+    p.add_argument("x2", type=float)
+    p.add_argument("y2", type=float)
+    p.add_argument("--steps", type=int, default=24)
+    p.add_argument("--button", default="left")
+
+    p = add("scroll", help="scroll the wheel at a point")
+    p.add_argument("x", nargs="?", type=float)
+    p.add_argument("y", nargs="?", type=float)
+    p.add_argument("--dy", type=int, default=0)
+    p.add_argument("--dx", type=int, default=0)
+
+    p = add("type", help="type text as unicode events")
+    p.add_argument("text", nargs="+")
+
+    p = add("key", help="press a key combo, e.g. cmd+shift+a")
+    p.add_argument("combo")
+
+    p = add("press", help="AXPress a ref (no mouse)")
+    p.add_argument("ref")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+
+    p = add("set", help="write AXValue of a ref (a text field, a slider)")
+    p.add_argument("ref")
+    p.add_argument("--text", required=True)
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+
+    p = add("app", help="list, focus, launch or quit applications")
+    p.add_argument("action", choices=["ls", "focus", "launch", "quit"])
+    p.add_argument("name", nargs="?")
+
+    p = add("wait", help="poll predicates until they hold (exit 0/1/5)")
+    add_predicate_args(p)
+    p.add_argument("--timeout", type=float, default=10.0)
+    p.add_argument("--interval", type=float, default=0.4)
+    p.add_argument("--stable", type=int, default=1)
+    p.add_argument("--gone", action="store_true", help="invert: wait until nothing matches")
+    p.add_argument("--tolerance", type=float, default=0.01,
+                   help="for same:/diff:: the fraction of 32x24 blocks allowed to change")
+
+    p = add("verify", help="one sample of the same predicates")
+    add_predicate_args(p)
+
+    p = add("run", help="execute a scenario file")
+    p.add_argument("file")
+    p.add_argument("--keep-going", action="store_true", dest="keep_going")
+    p.add_argument("--artifacts", default=None, help="artifact directory name")
+    p.add_argument("--verbose", action="store_true")
+
+    p = add("vt", help="decode a kitty-graphics escape stream back into pixels")
+    vt_sub = p.add_subparsers(dest="vt_command", required=True)
+    q = vt_sub.add_parser("render", help="write the frames as PNG")
+    q.add_argument("stream")
+    q.add_argument("--png", default=None, help="output prefix (a frame index is appended)")
+    q.add_argument("--pane", default=None, help="cols x rows (default 146x73)")
+    q.add_argument("--cell", default="17x33", help="cell size in pixels")
+    q.add_argument("--probe", action="append", default=[], metavar="X,Y[,RRGGBB]")
+    q = vt_sub.add_parser("runs", help="placeholder cell rectangles per row")
+    q.add_argument("stream")
+    q.add_argument("--pane", default=None)
+
+    p = add("render", help="run a command on a pty and decode what it drew")
+    p.add_argument("--pane", default="146x73", help="cols x rows")
+    p.add_argument("--cell", default="17x33", help="cell size in pixels")
+    p.add_argument("--seconds", type=float, default=12.0)
+    p.add_argument("--png", default=None, help="PNG prefix (a frame index is appended)")
+    p.add_argument("--keep-stream", action="store_true", dest="keep_stream")
+    p.add_argument("--terminal", default="rex", choices=["rex", "none"],
+                   help="answer kitty/DSR probes like the terminal krd targets (default rex)")
+    p.add_argument("--strict-fit", action="store_true", dest="strict_fit",
+                   help="fail when a picture's pixels are not exactly its cell box "
+                        "(the 1:1-terminal seam bug)")
+    p.add_argument("cmdline", nargs=argparse.REMAINDER, metavar="-- COMMAND")
+
+    p = add("pane", help="run something in a Rex pane and read its text buffer")
+    pane_sub = p.add_subparsers(dest="pane_command", required=True)
+    q = pane_sub.add_parser("run", help="open a pane and run a command in it")
+    q.add_argument("name")
+    q.add_argument("--pane", default=None, help="cols x rows for the pty (e.g. 146x46)")
+    q.add_argument("--cwd", default=None)
+    q.add_argument("cmdline", nargs=argparse.REMAINDER, metavar="-- COMMAND")
+    q = pane_sub.add_parser("read", help="the pane's text buffer (text, vt, or placeholder rects)")
+    q.add_argument("name")
+    q.add_argument("--vt", action="store_true", help="keep the escape sequences")
+    q.add_argument("--runs", action="store_true", help="report the placeholder rectangles")
+    q.add_argument("--pane", default="146x46")
+    q = pane_sub.add_parser("send", help="type into the pane")
+    q.add_argument("name")
+    q.add_argument("text")
+    q.add_argument("--enter", action="store_true")
+    q = pane_sub.add_parser("key", help="press one key, e.g. ctrl-\\")
+    q.add_argument("name")
+    q.add_argument("combo")
+    q = pane_sub.add_parser("close", help="close the pane")
+    q.add_argument("name")
+    pane_sub.add_parser("ls", help="panes this run created")
+
+    p = add("prove", help="three arms: the check fails before the change and passes after it")
+    p.add_argument("--check", required=True,
+                   help="a script that exits 0 when the behaviour is present (it gets $KRD)")
+    p.add_argument("--baseline", default="HEAD",
+                   help="git ref of the code *before* the change (default HEAD)")
+    p.add_argument("--skip-baseline-build", action="store_true", dest="skip_baseline_build")
+    p.add_argument("--name", default=None, help="artifact directory name")
+
+    p = add("trace", help="the run's transcript")
+    p.add_argument("-n", type=int, default=20)
+
+    p = add("selftest", help="the scaffold's own tests (no permissions, no network)")
+    p.add_argument("--live", action="store_true", help="also exercise the target")
+
+    return parser
+
+
+def add_predicate_args(parser):
+    parser.add_argument("spec", nargs="+",
+                        help="element:role:text | window:text | pixel:x,y=#rgb | changed:HASH "
+                             "| same:NAME | diff:NAME | shell:cmd | file:path")
+    parser.add_argument("--app", default=None, help="app whose tree the element predicates read")
+
+
+def run_command(args, context):
+    command = args.command
+    handler = globals().get("cmd_" + command)
+    if handler is None:
+        raise KagentError("no handler for %s" % command, EXIT_USAGE)
+    return handler(args, context)
+
+
+# ---------------------------------------------------------------- discovery
+
+
+def cmd_doctor(args, context):
+    checks = []
+
+    def check(name, fn, fix=None):
+        started = time.time()
+        try:
+            state, detail = fn()
+        except KagentError as error:
+            state, detail = predicates.FAIL, str(error)
+        except Exception as error:  # doctor must report, not crash: that is its whole job
+            state, detail = predicates.FAIL, "%s: %s" % (type(error).__name__, error)
+        checks.append({"check": name, "state": state, "detail": detail,
+                       "ms": int((time.time() - started) * 1000), "fix": fix})
+
+    target = context.target
+
+    def reachable():
+        result = target.run(["echo", "kagent-ok"], timeout=20)
+        if result.rc != 0 or "kagent-ok" not in result.text:
+            raise KagentError("%s is not reachable over ssh (%s)"
+                              % (target.name, result.error_text.strip()[:300]))
+        who = target.run_sh("sw_vers -productVersion 2>/dev/null; uname -m").text.strip().replace("\n", " ")
+        return predicates.PASS, "%s: %s" % (target.name, who)
+
+    check("target", reachable)
+
+    def driver_built():
+        if args.fix or not target.exists(target.driver):
+            target.ensure_driver(rebuild=args.fix)
+        result = target.run([target.driver, "input", "sleep", "1"], timeout=60)
+        if result.rc == 3:
+            return predicates.FAIL, "built, but Accessibility is not granted: " + result.error_text.strip()
+        if result.rc != 0:
+            return predicates.FAIL, "built, but it cannot post events (exit %d): %s" % (
+                result.rc, (result.error_text or result.text).strip()[:400])
+        return predicates.PASS, "input accepted, exit 0"
+
+    check("hand (CGEvents)", driver_built, fix="kagent doctor --fix")
+
+    def capture():
+        probe = target.run([target.driver, "probe", "10", "10"], timeout=60).raise_on_error("probe")
+        return predicates.PASS, "pixel at 10,10 is %s" % probe.json()["hex"]
+
+    check("eye (screen capture)", capture)
+
+    def accessibility():
+        result = target.run([target.krd, "ax", "doctor", "--json"], timeout=90)
+        if result.rc != 0:
+            return predicates.FAIL, (result.error_text or result.text).strip()[:400]
+        info = result.json()
+        if not info.get("trusted"):
+            return predicates.FAIL, "krd ax says Accessibility is not granted"
+        return predicates.PASS, "%s on-screen window(s), sample %s" % (
+            info.get("onScreenWindows"), info.get("sample"))
+
+    check("text (Accessibility)", accessibility)
+
+    def windowlist():
+        rows = perceive.windows(target)
+        return predicates.PASS, "%d window(s): %s" % (
+            len(rows), ", ".join(sorted({w["app"] for w in rows}))[:120])
+
+    check("windows", windowlist)
+
+    def decoder():
+        import vt as vtd
+        fixture = REPO / "Tests" / "krdcoreTests" / "Fixtures" / "selftest-80x24-17x33-l6.dump"
+        decoder_ = vtd.Decoder(cell_w=17, cell_h=33, cols=80, rows=24)
+        decoder_.feed(fixture.read_bytes())
+        frames = decoder_.frames()
+        if len(frames) != 2:
+            return predicates.FAIL, "expected 2 frames from the fixture, got %d" % len(frames)
+        quadrants = [frames[0].probe(10, 10), frames[0].probe(1000, 700)]
+        if quadrants[0] != (255, 0, 255) or quadrants[1] != (255, 128, 0):
+            return predicates.FAIL, "fixture pixels are wrong: %s" % (quadrants,)
+        return predicates.PASS, "escape stream -> %dx%d px, quadrants exact" % (
+            frames[0].width, frames[0].height)
+
+    check("pixels (escape decoder)", decoder)
+
+    def build():
+        binary = REPO / ".build" / "release" / "krd"
+        if not binary.exists():
+            return predicates.UNKNOWN, "not built: `make build`"
+        age = int(time.time() - binary.stat().st_mtime)
+        return predicates.PASS, "%s (%ds old)" % (binary, age)
+
+    check("krd build", build)
+
+    if context.target.remote:
+        def terminal():
+            if shutil.which("rex") is None:
+                return predicates.UNKNOWN, "rex is not on PATH: text-layer checks unavailable"
+            session = os.environ.get("REX_SESSION")
+            if not session:
+                return predicates.UNKNOWN, "no REX_SESSION: text-layer checks unavailable"
+            return predicates.PASS, "rex + %s" % session
+
+        check("terminal instrument", terminal)
+
+    failed = [c for c in checks if c["state"] == predicates.FAIL]
+    unknown = [c for c in checks if c["state"] == predicates.UNKNOWN]
+    human = "\n".join("%-5s %-22s %s" % (c["state"], c["check"], c["detail"]) for c in checks)
+    payload = {"target": target.name, "checks": checks,
+               "state": "fail" if failed else "unknown" if unknown else "pass"}
+    context.emit(payload, human)
+    context.artifacts.record({"kind": "doctor", **payload})
+    state = predicates.FAIL if failed else predicates.UNKNOWN if unknown else predicates.PASS
+    return predicates.exit_code(state), payload
+
+
+# ---------------------------------------------------------------- perception
+
+
+def cmd_see(args, context):
+    meta = perceive.see(context.target, context.artifacts,
+                        window=args.window, rect=args.rect, grid=args.grid,
+                        marks=args.marks, cursor=args.cursor, max_width=args.max_width,
+                        quality=args.quality, app=args.app, as_name=args.as_name)
+    human = "%s\n%s  %.1f KB  %s" % (
+        meta["path"],
+        "%dx%d delivered from %dx%d" % (meta["delivered"]["width"], meta["delivered"]["height"],
+                                        meta["captured"]["width"], meta["captured"]["height"]),
+        meta["bytes"] / 1024.0, meta["image_to_point"])
+    if meta.get("unchanged"):
+        human = "unchanged since the last frame (%s)" % meta["path"]
+    if args.marks:
+        lines = [human, "%s — %d marks" % (meta.get("app"), len(meta.get("marks", [])))]
+        for mark in meta.get("marks", []):
+            lines.append("  [%2d] %-10s %s %s" % (mark["n"], perceive.ROLE_SHORT.get(
+                mark["role"], mark["role"]), mark["ref"], mark["label"][:60]))
+        human = "\n".join(lines)
+    context.emit(meta, human)
+    return EXIT_OK, meta
+
+
+def cmd_text(args, context):
+    data = perceive.tree(context.target, app=args.app, pid=args.pid, window=args.window,
+                         depth=args.depth, interactive=args.interactive, maximum=args.maximum,
+                         menubar=args.menubar)
+    context.artifacts.record({"kind": "text", "app": data.get("app"), "nodes": len(data.get("nodes", []))})
+    if context.json:
+        context.emit(data)
+    else:
+        print(perceive.render_text(data))
+    return EXIT_OK, data
+
+
+def cmd_screen(args, context):
+    info = perceive.screen(context.target)
+    if context.json:
+        context.emit(info)
+    else:
+        for app in info.get("apps", []):
+            print("%-20s pid %-7s %s" % (app.get("app"), app.get("pid"),
+                                         " | ".join(filter(None, app.get("windows") or []))))
+        focus = info.get("focus") or {}
+        print("focus: %s %s %s" % (focus.get("app"), focus.get("role"), focus.get("title") or ""))
+    return EXIT_OK, info
+
+
+def cmd_windows(args, context):
+    rows = perceive.windows(context.target)
+    if args.ax:
+        try:
+            ax_rows = perceive.ax(context.target, ["windows", "--json"]).json().get("windows", [])
+        except KagentError:
+            ax_rows = []
+        rows = [dict(row, ax=[a for a in ax_rows if a.get("pid") == row["pid"]]) for row in rows]
+    if context.json:
+        context.emit({"windows": rows})
+    else:
+        for row in rows:
+            print("%-8d %-16s %-40s %s" % (row["id"], row["app"][:16], row["title"][:40],
+                                           "%d,%d %dx%d" % tuple(row["rect"])))
+    return EXIT_OK, {"windows": rows}
+
+
+# ---------------------------------------------------------------- action
+
+
+def _point_from_image(context, x, y):
+    if x is None or y is None:
+        raise KagentError("--image needs x y as read off the last frame", EXIT_USAGE)
+    return act.image_to_point(context.artifacts, x, y)
+
+
+def cmd_click(args, context):
+    payload = {}
+    if args.ref:
+        result = perceive.press(context.target, args.ref)
+        result.raise_on_error("press %s" % args.ref)
+        payload = {"via": "ax", "ref": args.ref, "out": result.text.strip()}
+    elif args.mark is not None:
+        payload = act.click_mark(context.target, context.artifacts, args.mark,
+                                 point=args.point, button=args.button)
+    else:
+        x, y = args.x, args.y
+        if args.image:
+            x, y = _point_from_image(context, x, y)
+        if x is None or y is None:
+            raise KagentError("click needs x y, --mark N, or --ref @eN", EXIT_USAGE)
+        act.click(context.target, x, y, button=args.button, count=args.count)
+        payload = {"via": "point", "at": [round(x), round(y)]}
+    context.artifacts.record({"kind": "click", **{k: v for k, v in payload.items() if k != "mark"}})
+    context.emit(payload, "clicked %s" % json.dumps(payload)[:200])
+    return EXIT_OK, payload
+
+
+def cmd_move(args, context):
+    act.move(context.target, args.x, args.y)
+    context.artifact_record = True
+    context.artifacts.record({"kind": "move", "at": [args.x, args.y]})
+    context.emit({"at": [args.x, args.y]}, "moved to %d,%d" % (args.x, args.y))
+    return EXIT_OK, {}
+
+
+def cmd_drag(args, context):
+    act.drag(context.target, args.x1, args.y1, args.x2, args.y2, steps=args.steps,
+             button=args.button)
+    context.artifacts.record({"kind": "drag", "from": [args.x1, args.y1],
+                              "to": [args.x2, args.y2]})
+    context.emit({"from": [args.x1, args.y1], "to": [args.x2, args.y2]}, "dragged")
+    return EXIT_OK, {}
+
+
+def cmd_scroll(args, context):
+    act.scroll(context.target, dy=args.dy, dx=args.dx, x=args.x, y=args.y)
+    context.artifacts.record({"kind": "scroll", "dy": args.dy, "dx": args.dx})
+    context.emit({"dy": args.dy, "dx": args.dx}, "scrolled dy=%d dx=%d" % (args.dy, args.dx))
+    return EXIT_OK, {}
+
+
+def cmd_type(args, context):
+    text = " ".join(args.text)
+    act.type_text(context.target, text)
+    context.artifacts.record({"kind": "type", "text": text[:200]})
+    context.emit({"typed": text}, "typed %d character(s)" % len(text))
+    return EXIT_OK, {}
+
+
+def cmd_key(args, context):
+    act.key(context.target, args.combo)
+    context.artifacts.record({"kind": "key", "combo": args.combo})
+    context.emit({"key": args.combo}, "pressed %s" % args.combo)
+    return EXIT_OK, {}
+
+
+def cmd_press(args, context):
+    result = perceive.press(context.target, args.ref, dry_run=args.dry_run)
+    context.artifacts.record({"kind": "press", "ref": args.ref, "rc": result.rc,
+                              "out": result.text.strip()[:400]})
+    if result.rc != 0:
+        raise KagentError((result.error_text or result.text).strip(), result.rc)
+    context.emit({"ref": args.ref, "out": result.text.strip()}, result.text.strip())
+    return EXIT_OK, {}
+
+
+def cmd_set(args, context):
+    result = perceive.set_value(context.target, args.ref, args.text, dry_run=args.dry_run)
+    context.artifacts.record({"kind": "set", "ref": args.ref, "text": args.text,
+                              "rc": result.rc})
+    if result.rc != 0:
+        raise KagentError((result.error_text or result.text).strip(), result.rc)
+    context.emit({"ref": args.ref, "text": args.text, "out": result.text.strip()},
+                 result.text.strip())
+    return EXIT_OK, {}
+
+
+def cmd_app(args, context):
+    if args.action == "ls":
+        rows = perceive.screen(context.target).get("apps", [])
+        context.emit({"apps": rows}, "\n".join(
+            "%-20s %s" % (row.get("app"), " | ".join(filter(None, row.get("windows") or [])))
+            for row in rows))
+        return EXIT_OK, rows
+    if not args.name:
+        raise KagentError("app %s needs a name" % args.action, EXIT_USAGE)
+    if args.action == "focus":
+        payload = act.focus(context.target, args.name)
+    elif args.action == "launch":
+        act.launch(context.target, args.name)
+        payload = {"launched": args.name}
+    else:
+        act.quit_app(context.target, args.name)
+        payload = {"quit": args.name}
+    context.artifacts.record({"kind": "app", "action": args.action, **payload})
+    context.emit(payload, "%s %s" % (args.action, args.name))
+    return EXIT_OK, payload
+
+
+# ---------------------------------------------------------------- assertions
+
+
+def _predicate_command(args, context, poll):
+    app = args.app
+    if poll:
+        state, rows = predicates.wait(context.target, args.spec, app=app,
+                                      artifacts=context.artifacts, timeout=args.timeout,
+                                      interval=args.interval, stable=args.stable,
+                                      invert=args.gone, tolerance=args.tolerance)
+    else:
+        rows = [predicates.evaluate(context.target, spec, app=app, artifacts=context.artifacts)
+                for spec in args.spec]
+        state = predicates.FAIL if any(s == predicates.FAIL for s, _ in rows) else \
+            predicates.UNKNOWN if any(s == predicates.UNKNOWN for s, _ in rows) else predicates.PASS
+    text = predicates.describe(args.spec, rows)
+    payload = {"state": state, "results": [{"spec": s, "state": st, "detail": d}
+                                           for s, (st, d) in zip(args.spec, rows)]}
+    context.artifacts.record({"kind": "verify" if not poll else "wait", **payload})
+    context.emit(payload, text)
+    return predicates.exit_code(state), payload
+
+
+def cmd_wait(args, context):
+    return _predicate_command(args, context, poll=True)
+
+
+def cmd_verify(args, context):
+    return _predicate_command(args, context, poll=False)
+
+
+# ---------------------------------------------------------------- scenarios
+
+
+class Dispatcher:
+    """Re-enters the CLI for a scenario step, so a scenario cannot use a verb the CLI lacks."""
+
+    def __init__(self, context):
+        self.target = context.target
+        self.context = context
+
+    def __call__(self, argv):
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        if args.command == "run":
+            raise KagentError("a scenario cannot run another scenario", EXIT_USAGE)
+        code, payload = run_command(args, self.context)
+        return code, payload
+
+
+def cmd_run(args, context):
+    spec = scenario.load(args.file)
+    name = args.artifacts or ("scenario-%s" % time.strftime("%Y%m%d-%H%M%S"))
+    artifacts = core.Artifacts(name)
+    # Every step writes into the scenario's own directory, not the session's: a report whose frames
+    # are mixed with whatever the agent did before it is not evidence of anything.
+    outer = context.artifacts
+    context.artifacts = artifacts
+    try:
+        state, report = scenario.run(spec, Dispatcher(context), artifacts,
+                                     keep_going=args.keep_going)
+    finally:
+        context.artifacts = outer
+    path = scenario.write_report(report, artifacts)
+    human = ["%s — %s" % (report["name"], report["state"])]
+    for step in report["steps"]:
+        human.append("  %-5s %-46s %5dms  %s" % (step["state"], step["cmd"][:46], step["ms"],
+                                                 step["detail"].splitlines()[0][:90]
+                                                 if step["detail"] else ""))
+    human.append("report: %s" % path)
+    context.emit({"state": report["state"], "report": str(path), **report}, "\n".join(human))
+    return state, report
+
+
+# ---------------------------------------------------------------- pixels
+
+
+def cmd_vt(args, context):
+    if args.vt_command == "runs":
+        cols, rows = render.parse_geometry(args.pane, (146, 73))
+        data = Path(args.stream).read_bytes()
+        runs = render.placeholder_runs(data, cols, rows)
+        # Per-row runs, not rectangles: a text capture stores the per-row diacritic in a cell of its
+        # own and can repaint a row in pieces, so clustering rows into rectangles is a guess. The
+        # span per row is a measurement, and it is what the layout question is actually about.
+        lines = ["row %d  cells %d  cols %d..%d" % (row, end - start + 1, start, end)
+                 for row, start, end in runs]
+        if context.json:
+            context.emit({"runs": runs})
+        elif runs:
+            print("\n".join(lines))
+            print("total %d cell(s) in %d row(s)" % (sum(e - s + 1 for _, s, e in runs),
+                                                     len({r for r, _, _ in runs})))
+        else:
+            print("no placeholder cells: the stream used the pixel path, or drew nothing")
+        return EXIT_OK, {"runs": runs}
+
+    cols, rows = render.parse_geometry(args.pane, (146, 73))
+    cell = render.parse_geometry(args.cell, (17, 33))
+    decoder = render.decode(Path(args.stream).read_bytes(), cols, rows, cell)
+    frames = decoder.frames()
+    if not frames:
+        raise KagentError("the stream contains no completed frame", EXIT_FAIL)
+    written = []
+    for index, frame in enumerate(frames):
+        if args.png:
+            out = Path("%s-%03d.png" % (args.png, index))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(frame.png_bytes())
+            written.append(str(out))
+    probes = []
+    for item in args.probe:
+        parts = item.split(",")
+        x, y = int(parts[0]), int(parts[1])
+        got = frames[-1].probe(x, y)
+        want = parts[2].lstrip("#").lower() if len(parts) > 2 else None
+        probes.append({"at": [x, y], "rgb": list(got), "expect": want,
+                       "ok": want is None or "".join("%02x" % c for c in got) == want})
+    payload = {"frames": len(frames), "written": written,
+               "size": [frames[-1].width, frames[-1].height],
+               "placements": len(decoder.placements()), "probes": probes}
+    if not context.json:
+        print("%d frame(s), last %dx%d, %d placement(s)"
+              % (len(frames), frames[-1].width, frames[-1].height, len(decoder.placements())))
+        for item in written:
+            print("  wrote %s" % item)
+        for probe in probes:
+            print("  probe %s -> %s %s" % (probe["at"], probe["rgb"],
+                                           "ok" if probe["ok"] else "MISMATCH"))
+    else:
+        context.emit(payload)
+    return (EXIT_OK if all(p["ok"] for p in probes) else EXIT_FAIL), payload
+
+
+def cmd_render(args, context):
+    command = args.cmdline
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise KagentError("render needs a command: kagent render -- krd --selftest", EXIT_USAGE)
+    cols, rows = render.parse_geometry(args.pane, (146, 73))
+    cell = render.parse_geometry(args.cell, (17, 33))
+    # A bare `krd` on PATH is fine; a path is not — `Popen` searches PATH for anything without a
+    # slash, so `.build/release/krd` would be looked for in $PATH and never found.
+    if not context.target.remote and ("/" in command[0] or Path(command[0]).exists()):
+        command = [str(Path(command[0]).resolve())] + list(command[1:])
+    local_command = command
+    if context.target.remote:
+        # `~` does not survive quoting, so the leading path is resolved before the command is built.
+        command = [context.target.expand(command[0])] + list(command[1:])
+        # `ssh -tt` makes the far end a terminal; `stty` makes it the size the caller asked for.
+        # Without the stty the remote pty keeps its default 80x24 and krd draws a smaller wall,
+        # which is exactly the kind of "it works here" that this scaffold exists to prevent.
+        remote = "stty rows %d cols %d 2>/dev/null; exec %s" % (
+            rows, cols, " ".join(_shquote(a) for a in command))
+        import shlex
+        local_command = ["ssh", "-tt"] + context.target.ssh_options + [context.target.host, remote]
+    stream, status, seconds, answered = render.run_under_pty(
+        local_command, cols=cols, rows=rows, seconds=args.seconds, cell=cell,
+        terminal=args.terminal)
+    prefix = args.png or str(context.artifacts.dir / "vt")
+    stream_path = Path("%s.vt" % prefix)
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_path.write_bytes(stream)
+
+    decoder = render.decode(stream, cols, rows, cell)
+    frames = decoder.frames()
+    written = []
+    for index, frame in enumerate(frames):
+        out = Path("%s-%03d.png" % (prefix, index))
+        out.write_bytes(frame.png_bytes())
+        written.append(str(out))
+
+    runs = render.placeholder_runs(stream, cols, rows)
+    rects = render.picture_rects(decoder, cell) or render.summary(runs)
+    # The historical bug this repo paid for twice: a picture whose pixels differ from its cell box
+    # leaves seams on a terminal that draws one image pixel per device pixel. The numbers are
+    # already here, so the check costs nothing and a run can fail on it instead of on a human's eye.
+    pictures = []
+    misfits = []
+    for p_ in decoder.placements():
+        native = decoder.images().get(p_.image_id)
+        box = (p_.cols * cell[0], p_.rows * cell[1])
+        entry = {"image": p_.image_id, "placement": p_.placement_id,
+                 "cell_rect": [p_.col, p_.row, p_.cols, p_.rows],
+                 "cell_box_px": list(box),
+                 "pixel_rect": [(p_.col - 1) * cell[0], (p_.row - 1) * cell[1], box[0], box[1]],
+                 "placeholder": p_.unicode_placeholder}
+        if native is not None:
+            probe = native.w <= 1 and native.h <= 1
+            entry["native_px"] = [native.w, native.h]
+            entry["fit"] = "exact" if (native.w, native.h) == box else "scaled"
+            entry["probe"] = probe
+            if not probe and (native.w, native.h) != box and p_.unicode_placeholder:
+                misfits.append({"image": p_.image_id, "native": [native.w, native.h],
+                                "cell_box": list(box)})
+        pictures.append(entry)
+    payload = {
+        "command": command, "exit": status, "seconds": round(seconds, 2),
+        "pane": {"cols": cols, "rows": rows}, "cell": {"w": cell[0], "h": cell[1]},
+        "stream": str(stream_path), "stream_bytes": len(stream), "answered": answered,
+        "frames": len(frames), "pngs": written,
+        "pictures": pictures,
+        "misfits": misfits,
+        "placeholder_rects": rects,
+    }
+    human = ("%s → exit %s in %.1fs, %d byte(s)\n"
+             "%d frame(s) decoded, %dx%d px, %d picture(s)\n"
+             "stream: %s"
+             % (" ".join(command), status, seconds, len(stream), len(frames),
+                frames[-1].width if frames else 0, frames[-1].height if frames else 0,
+                len(decoder.placements()), stream_path))
+    for rect in rects:
+        human += "\n  cells rows %d..%d cols %d..%d (%dx%d)" % (
+            rect["row0"], rect["row1"], rect["col0"], rect["col1"], rect["cols"], rect["rows"])
+    for path in written:
+        human += "\n  png %s" % path
+    if not args.keep_stream:
+        payload["stream_kept"] = True
+    context.artifacts.record({"kind": "render", "command": command, "exit": status,
+                              "frames": len(frames), "pixels": [frames[-1].width,
+                                                                frames[-1].height] if frames else None,
+                              "pictures": len(decoder.placements())})
+    if misfits:
+        human += "\n%d picture(s) do not match their cell box: %s" % (len(misfits), misfits[:3])
+    context.emit(payload, human)
+    if not frames:
+        return EXIT_FAIL, payload
+    if args.strict_fit and misfits:
+        return EXIT_FAIL, payload
+    return EXIT_OK, payload
+
+
+# ---------------------------------------------------------------- misc
+
+
+def cmd_pane(args, context):
+    if args.pane_command == "run":
+        # `REMAINDER` swallows options that follow the positional name, so `--pane` given in the
+        # natural place (`pane run krd --pane 146x46 -- cmd`) arrives inside the command list. Take
+        # them back rather than making the caller remember the ordering.
+        command = list(args.cmdline)
+        while len(command) >= 2 and command[0] in ("--pane", "--cwd"):
+            if command[0] == "--pane":
+                args.pane = command[1]
+            else:
+                args.cwd = command[1]
+            command = command[2:]
+        if command and command[0] == "--":
+            command = command[1:]
+        if not command:
+            raise KagentError("pane run needs a command after --", EXIT_USAGE)
+        if "/" in command[0] or Path(command[0]).exists():
+            command = [str(Path(command[0]).resolve())] + list(command[1:])
+        cols, rows = render.parse_geometry(args.pane, (146, 46)) if args.pane else (None, None)
+        payload = panes.run(context.artifacts, args.name, command, cols=cols, rows=rows,
+                            cwd=args.cwd)
+        context.emit(payload, "pane %s: %s\n  block %s" % (args.name, payload["window"],
+                                                           payload["block"]))
+        return EXIT_OK, payload
+    if args.pane_command == "read":
+        if args.runs:
+            cols, rows = render.parse_geometry(args.pane, (146, 46))
+            found = panes.runs(context.artifacts, args.name, cols, rows)
+            lines = ["row %d  cells %d  cols %d..%d" % (row, end - start + 1, start, end)
+                     for row, start, end in found]
+            if context.json:
+                context.emit({"runs": found})
+            elif found:
+                print("\n".join(lines))
+                print("total %d cell(s) in %d row(s)" % (
+                    sum(e - s + 1 for _, s, e in found), len({r for r, _, _ in found})))
+            else:
+                print("no placeholder cells: the pixel path is in use, or nothing was drawn")
+            return EXIT_OK, {"runs": found}
+        text = panes.capture(context.artifacts, args.name, "vt" if args.vt else "text")
+        if context.json:
+            context.emit({"text": text})
+        else:
+            sys.stdout.write(text if text.endswith("\n") else text + "\n")
+        return EXIT_OK, {"text": text}
+    if args.pane_command == "send":
+        payload = panes.send(context.artifacts, args.name, args.text, enter=args.enter)
+        context.emit(payload, "sent %d byte(s) to %s" % (payload["sent"], args.name))
+        return EXIT_OK, payload
+    if args.pane_command == "key":
+        payload = panes.key(context.artifacts, args.name, args.combo)
+        context.emit(payload, "pressed %s in %s" % (args.combo, args.name))
+        return EXIT_OK, payload
+    if args.pane_command == "close":
+        payload = panes.close(context.artifacts, args.name)
+        context.emit(payload, "closed %s" % args.name)
+        return EXIT_OK, payload
+    payload = panes.listing(context.artifacts)
+    context.emit(payload, "\n".join("%-12s %s" % (k, v["block"]) for k, v in payload.items())
+                 or "no panes")
+    return EXIT_OK, payload
+
+
+def cmd_prove(args, context):
+    """Three arms, one verdict: the fix is the patch and not the weather.
+
+    The arm that makes this worth running is the *baseline* one. A check that passes on the old code
+    proves nothing about the patch; a check that fails on the old code and passes on the new one is
+    the only mechanical evidence that both the bug and its fix are real. The baseline is built in a
+    throwaway git worktree, so the working tree the agent is editing is never touched.
+
+    The check is a script, because a shell one-liner in an argument grows until nobody can read it —
+    and because the script is the reproduction artifact a bug report should carry.
+    """
+    import shutil
+    import tempfile
+
+    name = args.name or ("prove-%s" % time.strftime("%Y%m%d-%H%M%S"))
+    artifacts = core.Artifacts(name)
+    check = Path(args.check).resolve()
+    if not check.exists():
+        raise KagentError("no check script at %s" % check, EXIT_USAGE)
+
+    def arm(label, tree, binary):
+        env = dict(os.environ)
+        env.update({"KRD": str(binary), "KAGENT": str(REPO / "agent" / "bin" / "kagent"),
+                    "TREE": str(tree), "ARM": label})
+        started = time.time()
+        result = subprocess.run(["/bin/sh", str(check)], cwd=str(tree), env=env,
+                                capture_output=True, text=True, timeout=1800)
+        return {"arm": label, "tree": str(tree), "binary": str(binary),
+                "exit": result.returncode, "seconds": round(time.time() - started, 1),
+                "stdout": result.stdout[-8000:], "stderr": result.stderr[-8000:]}
+
+    evidence = {"check": str(check), "baseline_ref": args.baseline, "arms": []}
+    tree = tempfile.mkdtemp(prefix="kagent-baseline-")
+    try:
+        add = subprocess.run(["git", "-C", str(REPO), "worktree", "add", "--detach", tree,
+                              args.baseline], capture_output=True, text=True)
+        if add.returncode != 0:
+            raise KagentError("cannot check out %s: %s" % (args.baseline, add.stderr.strip()),
+                              EXIT_ENVIRONMENT)
+        baseline_binary = Path(tree) / ".build" / "release" / "krd"
+        if not args.skip_baseline_build:
+            if not args.quiet:
+                sys.stderr.write("building the baseline (%s)...\n" % args.baseline)
+            build = subprocess.run(["swift", "build", "-c", "release"], cwd=tree,
+                                   capture_output=True, text=True)
+            if build.returncode != 0:
+                raise KagentError("the baseline does not build:\n" + build.stderr[-3000:],
+                                  EXIT_ENVIRONMENT)
+        if not args.skip_baseline_build and not baseline_binary.exists():
+            raise KagentError("no baseline binary at %s" % baseline_binary, EXIT_ENVIRONMENT)
+
+        if not args.quiet:
+            sys.stderr.write("arm 1/2: baseline (%s)\n" % args.baseline)
+        before = arm("before", tree, baseline_binary)
+        evidence["arms"].append(before)
+        (artifacts.dir / "before.txt").write_text(
+            "$ %s\nexit %d  (%ss)\n\n%s\n%s" % (check.name, before["exit"],
+                                                   before["seconds"], before["stdout"],
+                                                   before["stderr"]))
+        if not args.quiet:
+            sys.stderr.write("arm 2/2: working tree\n")
+        current = arm("after", REPO, context.target._local_krd())
+        evidence["arms"].append(current)
+        (artifacts.dir / "after.txt").write_text(
+            "$ %s\nexit %d  (%ss)\n\n%s\n%s" % (check.name, current["exit"],
+                                                   current["seconds"], current["stdout"],
+                                                   current["stderr"]))
+    finally:
+        subprocess.run(["git", "-C", str(REPO), "worktree", "remove", "--force", tree],
+                       capture_output=True)
+        shutil.rmtree(tree, ignore_errors=True)
+
+    if before["exit"] == 0 and current["exit"] == 0:
+        verdict, code = "not-a-bug", EXIT_FAIL
+        why = "the check already passed before the change: it does not reproduce the bug"
+    elif before["exit"] != 0 and current["exit"] == 0:
+        verdict, code = "fixed", EXIT_OK
+        why = "fails before the change, passes after it: the patch is what changed the behaviour"
+    elif before["exit"] != 0 and current["exit"] != 0:
+        verdict, code = "not-fixed", EXIT_FAIL
+        why = "still failing on the working tree"
+    else:
+        verdict, code = "regressed", EXIT_FAIL
+        why = "passed before the change and fails now"
+
+    evidence.update({"verdict": verdict, "why": why,
+                     "before_exit": before["exit"], "after_exit": current["exit"]})
+    (artifacts.dir / "state.json").write_text(json.dumps(evidence, indent=2) + "\n")
+    human = ("%s\n  before (%s): exit %d\n  after  (tree): exit %d\n  %s"
+             % (verdict, args.baseline, before["exit"], current["exit"], why))
+    context.emit(evidence, human)
+    return code, evidence
+
+
+def cmd_trace(args, context):
+    path = context.artifacts.transcript
+    if not path.exists():
+        raise KagentError("no transcript yet in %s" % context.artifacts.dir, EXIT_UNKNOWN)
+    rows = path.read_text().splitlines()[-args.n:]
+    for row in rows:
+        try:
+            entry = json.loads(row)
+        except ValueError:
+            print(row)
+            continue
+        kind = entry.get("kind", "?")
+        detail = {k: v for k, v in entry.items() if k not in ("kind", "ts")}
+        print("%s  %-8s %s" % (entry.get("ts", ""), kind, json.dumps(detail)[:220]))
+    return EXIT_OK, {}
+
+
+def cmd_selftest(args, context):
+    checks = []
+    script = REPO / "agent" / "tests" / "test_vt.py"
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+    checks.append({"check": "escape decoder", "state": predicates.PASS if result.returncode == 0
+                   else predicates.FAIL, "detail": result.stdout.strip().splitlines()[-1]
+                   if result.stdout.strip() else result.stderr.strip()[:200]})
+    # A scenario is only a test if the file it names parses: catch a broken step before a run does.
+    for path in sorted((REPO / "agent" / "scenarios").glob("*.json")):
+        try:
+            scenario.load(path)
+            checks.append({"check": "scenario %s" % path.name, "state": predicates.PASS,
+                           "detail": "%d step(s)" % len(json.loads(path.read_text())["steps"])})
+        except Exception as error:
+            checks.append({"check": "scenario %s" % path.name, "state": predicates.FAIL,
+                           "detail": str(error)})
+    if args.live:
+        state, payload = cmd_doctor(args, context)
+        checks += [{k: v for k, v in c.items() if k != "fix"} for c in payload["checks"]]
+    failed = [c for c in checks if c["state"] == predicates.FAIL]
+    human = "\n".join("%-5s %-28s %s" % (c["state"], c["check"], c["detail"]) for c in checks)
+    context.emit({"checks": checks, "state": "fail" if failed else "pass"}, human)
+    return (EXIT_FAIL if failed else EXIT_OK), {}
+
+
+if __name__ == "__main__":
+    sys.exit(main())
