@@ -1,0 +1,561 @@
+[
+  {
+    "kCGWindowBounds" : {
+      "Height" : 30,
+      "Width" : 1440,
+      "X" : 1728,
+      "Y" : -1080
+    },
+    "kCGWindowLayer" : 24,
+    "kCGWindowName" : "Menubar",
+    "kCGWindowNumber" : 119690,
+    "kCGWindowOwnerName" : "Window Server",
+    "kCGWindowOwnerPID" : 606
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 30,
+      "Width" : 1920,
+      "X" : -192,
+      "Y" : -1080
+    },
+    "kCGWindowLayer" : 24,
+    "kCGWindowName" : "Menubar",
+    "kCGWindowNumber" : 37919,
+    "kCGWindowOwnerName" : "Window Server",
+    "kCGWindowOwnerPID" : 606
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 33,
+      "Width" : 1728,
+      "X" : 0,
+      "Y" : 0
+    },
+    "kCGWindowLayer" : 24,
+    "kCGWindowName" : "Menubar",
+    "kCGWindowNumber" : 37893,
+    "kCGWindowOwnerName" : "Window Server",
+    "kCGWindowOwnerPID" : 606
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 1050,
+      "Width" : 1452,
+      "X" : 42,
+      "Y" : -1050
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "「沒有人知道為什麼行得通」《數學教你…到不該有用 - YouTube 🔊",
+    "kCGWindowNumber" : 126324,
+    "kCGWindowOwnerName" : "Brave Browser",
+    "kCGWindowOwnerPID" : 55810
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -199,
+      "Y" : -719
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126899,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 177,
+      "Width" : 192,
+      "X" : -183,
+      "Y" : -831
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94251,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 177,
+      "Width" : 192,
+      "X" : -183,
+      "Y" : -831
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "云监控运营平台(BARAD) - 发布管理 - 控制台 - 统一运维运营平台",
+    "kCGWindowNumber" : 124586,
+    "kCGWindowOwnerName" : "Google Chrome",
+    "kCGWindowOwnerPID" : 41379
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -199,
+      "Y" : -539
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126773,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 2530,
+      "Width" : 1440,
+      "X" : 1728,
+      "Y" : -1050
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "π - kkrt - hidden-vale",
+    "kCGWindowNumber" : 119477,
+    "kCGWindowOwnerName" : "Rex Beta",
+    "kCGWindowOwnerPID" : 67529
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 151,
+      "Width" : 181,
+      "X" : -176,
+      "Y" : -646
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94239,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 151,
+      "Width" : 181,
+      "X" : -176,
+      "Y" : -646
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "腾讯云测试环境 - 成都主干环境",
+    "kCGWindowNumber" : 108251,
+    "kCGWindowOwnerName" : "腾讯云测试环境",
+    "kCGWindowOwnerPID" : 38886
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -199,
+      "Y" : -402
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126772,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 112,
+      "Width" : 82,
+      "X" : -176,
+      "Y" : -470
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 96875,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 112,
+      "Width" : 82,
+      "X" : -176,
+      "Y" : -470
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "SurfaceANSIRendererTests.swift",
+    "kCGWindowNumber" : 78970,
+    "kCGWindowOwnerName" : "Xcode",
+    "kCGWindowOwnerPID" : 21825
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -199,
+      "Y" : -269
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126771,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 119,
+      "Width" : 100,
+      "X" : -176,
+      "Y" : -343
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94250,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 1,
+      "Width" : 1,
+      "X" : 1000000000,
+      "Y" : 1000000000
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : null,
+    "kCGWindowNumber" : 109628,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 572,
+      "Width" : 740,
+      "X" : 337,
+      "Y" : 297
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Settings - Developer",
+    "kCGWindowNumber" : 119623,
+    "kCGWindowOwnerName" : "Rex Beta",
+    "kCGWindowOwnerPID" : 67529
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -7,
+      "Y" : 274
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126779,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 182,
+      "Width" : 131,
+      "X" : 47,
+      "Y" : 161
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94235,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 182,
+      "Width" : 131,
+      "X" : 47,
+      "Y" : 161
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "企业微信",
+    "kCGWindowNumber" : 109638,
+    "kCGWindowOwnerName" : "企业微信",
+    "kCGWindowOwnerPID" : 38773
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 117,
+      "Width" : 97,
+      "X" : 31,
+      "Y" : 191
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94233,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 117,
+      "Width" : 97,
+      "X" : 31,
+      "Y" : 191
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "",
+    "kCGWindowNumber" : 124079,
+    "kCGWindowOwnerName" : "企业微信",
+    "kCGWindowOwnerPID" : 38773
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 107,
+      "Width" : 46,
+      "X" : 15,
+      "Y" : 191
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94400,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 107,
+      "Width" : 46,
+      "X" : 15,
+      "Y" : 191
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "",
+    "kCGWindowNumber" : 124069,
+    "kCGWindowOwnerName" : "企业微信",
+    "kCGWindowOwnerPID" : 38773
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -7,
+      "Y" : 452
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126778,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 155,
+      "Width" : 123,
+      "X" : 31,
+      "Y" : 348
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94252,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 155,
+      "Width" : 123,
+      "X" : 31,
+      "Y" : 348
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Weixin",
+    "kCGWindowNumber" : 114083,
+    "kCGWindowOwnerName" : "WeChat",
+    "kCGWindowOwnerPID" : 26465
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 102,
+      "Width" : 74,
+      "X" : 16,
+      "Y" : 374
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 100271,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 102,
+      "Width" : 74,
+      "X" : 16,
+      "Y" : 374
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Search chat history",
+    "kCGWindowNumber" : 114299,
+    "kCGWindowOwnerName" : "WeChat",
+    "kCGWindowOwnerPID" : 26465
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -7,
+      "Y" : 579
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126777,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 98,
+      "Width" : 92,
+      "X" : 15,
+      "Y" : 526
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 122606,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 98,
+      "Width" : 92,
+      "X" : 15,
+      "Y" : 526
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "",
+    "kCGWindowNumber" : 53232,
+    "kCGWindowOwnerName" : "iOA",
+    "kCGWindowOwnerPID" : 20316
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -7,
+      "Y" : 758
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126776,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 161,
+      "Width" : 161,
+      "X" : 15,
+      "Y" : 641
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94266,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 161,
+      "Width" : 161,
+      "X" : 15,
+      "Y" : 641
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "WorkBuddy",
+    "kCGWindowNumber" : 94811,
+    "kCGWindowOwnerName" : "WorkBuddy",
+    "kCGWindowOwnerPID" : 52282
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 82,
+      "Width" : 66,
+      "X" : -7,
+      "Y" : 944
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Icon Window",
+    "kCGWindowNumber" : 126775,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 183,
+      "Width" : 125,
+      "X" : 15,
+      "Y" : 806
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "Gesture Blocking Overlay",
+    "kCGWindowNumber" : 94237,
+    "kCGWindowOwnerName" : "WindowManager",
+    "kCGWindowOwnerPID" : 93439
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 183,
+      "Width" : 125,
+      "X" : 15,
+      "Y" : 806
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "",
+    "kCGWindowNumber" : 107940,
+    "kCGWindowOwnerName" : "YunDun",
+    "kCGWindowOwnerPID" : 47944
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 119,
+      "Width" : 100,
+      "X" : -176,
+      "Y" : -343
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "App Store",
+    "kCGWindowNumber" : 78652,
+    "kCGWindowOwnerName" : "App Store",
+    "kCGWindowOwnerPID" : 92976
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 180,
+      "Width" : 360,
+      "X" : 258,
+      "Y" : 221
+    },
+    "kCGWindowLayer" : -2147483601,
+    "kCGWindowName" : "What's next with month view",
+    "kCGWindowNumber" : 52,
+    "kCGWindowOwnerName" : "Notification Center",
+    "kCGWindowOwnerPID" : 985
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 180,
+      "Width" : 180,
+      "X" : 438,
+      "Y" : 41
+    },
+    "kCGWindowLayer" : -2147483601,
+    "kCGWindowName" : "Month",
+    "kCGWindowNumber" : 51,
+    "kCGWindowOwnerName" : "Notification Center",
+    "kCGWindowOwnerPID" : 985
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 180,
+      "Width" : 180,
+      "X" : 258,
+      "Y" : 41
+    },
+    "kCGWindowLayer" : -2147483601,
+    "kCGWindowName" : "Forecast",
+    "kCGWindowNumber" : 50,
+    "kCGWindowOwnerName" : "Notification Center",
+    "kCGWindowOwnerPID" : 985
+  }
+]
