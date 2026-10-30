@@ -5,6 +5,26 @@ import ScreenCaptureKit
 /// Why a panel has no picture. The wall draws a mask for every one of these (design §6.6): a card
 /// must never show a stale picture of a window that is gone, and a denied capture is not an error
 /// the reader can act on mid-screen.
+extension PanelCaptureError {
+    /// The reason in the words a mask has room for - one short word, because it is drawn *inside* a
+    /// card that may be 20 cells wide. "no picture" is the same rectangle for every cause, so this is
+    /// the only place a reader can learn why: `closed` (the window went away), `denied` (Screen
+    /// Recording), `no stream` (the window server refuses this window - `-3805`), `no pixels` (the
+    /// stream produced nothing), `failed` (anything else).
+    var maskLabel: String {
+        switch self {
+        case .windowGone: return "closed"
+        case .denied: return "denied"
+        case .noPixelBuffer: return "no pixels"
+        case let .failed(message):
+            // `-3805` is "failed during stream": ScreenCaptureKit hands back a display and refuses a
+            // window (a VM's window server does it for every window), which is not a permission
+            // problem and not something a repaint can fix.
+            return message.contains("3805") ? "no stream" : "failed"
+        }
+    }
+}
+
 enum PanelCaptureError: Error, Equatable {
     case windowGone        // the window id no longer resolves (closed, or minimised away)
     case denied            // Screen Recording refused (SCStreamErrorUserDeclined / missing entitlement)

@@ -75,6 +75,10 @@ English | [简体中文](design-overview.zh-CN.md)
 
 - A mask occupies **exactly the panel's rectangle**, so going picture ↔ mask never moves the layout.
 - A mask draws `👁 name / W×H cells`, and clicking it does the same thing as clicking the picture.
+- A mask says **why** it is a mask, in one word, where the picture would be: `closed` (the window went
+  away), `denied` (Screen Recording), `no stream` (the window server refuses that window - `-3805`),
+  `no pixels`, `failed`. Every cause draws the same rectangle, so without that word "no picture" is all
+  a reader can report - and "no picture" was the question, not the answer (`PanelCaptureError.maskLabel`).
 - Because only three windows are on screen, "everything open" is bounded **by the layout itself** — no need to
   save resources by drawing nothing.
 
@@ -165,13 +169,13 @@ a card reads as a window lying on the wall, not a window in a frame.
 | case | handling |
 |---|---|
 | landscape (16:10 / 1.54) | the width fills the stage's columns and **the band is exactly the rows the aspect gives** (`WallLayout.make(stageAspect:)`: 42 of a 137×73 pane's rows on an 8×16 cell); the rows a tall pane has over go to the card band, which then shows fewer, wider cards |
-| device pixels per reported pixel | a terminal may report its geometry in **points** and still draw an image one device pixel per image pixel (Rex answers 8×16 for a cell that is 16.7×32.7 device pixels). The capture is therefore asked for at `contentWidth × contentHeight × dpr`, both axes sharing the factor so the fit's aspect is untouched, capped at 4096 px a side; `dpr` = `--dpr`, else 2 when the pty reports no pixel size, 1 when it does. Measured at 137×73: dpr 1 → 1075×672 px = 0.50 of the box in device pixels (the picture sat at the box's top-left, "桌面还是靠左"), dpr 2 → 2150×1344 px = 0.96 |
-| where the cell size comes from | the terminal, not the pty: over ssh `ws_xpixel/ws_ypixel` are 0, so `runWall` asks `CSI 16t`/`14t` (as the mirror does) and keeps the 8×20 fallback only for a terminal that answers nothing. The fallback's cell *aspect* is 0.40; Rex's is 0.51, and that alone left 36% of the stage empty - the picture looked smaller than its frame |
+| pixels are quality, cells are geometry | with unicode placeholders the terminal fits the image into the picture's cells (§6.9), so the capture is asked for at **one reported pixel per cell** and `--dpr N` only sharpens it (both axes share the factor, capped at 4096 px a side). The pixel-sized path (`--no-placeholders`) has no fitting, so there the picture *must* be asked for in device pixels - and a terminal that reports its cell in points makes that number unavailable, which is why that path takes `--cell` and why placeholders are the default |
+| where the cell size comes from | one `PaneGeometry` snapshot: the pty's `ws_xpixel` when it has one, else the terminal's own `CSI 16t`/`14t` answer, else the 8×16 fallback (an 8×20 cell belongs to the CRT era, and its 2.5 aspect against a real 2.0 left 36% of the stage empty). Measured at start and re-measured on every resize (`PaneGeometry.measure`) |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
 | window card | the card rect is the layout's and the picture fits inside it at the window's own aspect: 43×13 cells at 137×44, 66×22 at 137×73, where the card band inherits the rows the stage does not need. A picture never resizes its own card |
-| rounded corners | every picture's own corners are cut to a radius of **one twenty-fourth of its short side** (`PanelImage.cornerRadius`), and the pixels outside the arc keep alpha 0 - so a display or a window reads as an object lying on the wall instead of a rectangle cut out of it. macOS rounds its windows anyway, so the card pictures lose nothing; the stage is where it shows |
+| corners | **square** ("把圆角边框去掉吧"). A cut corner is a hole in the picture, and a hole is filled by whatever the terminal puts behind it - Rex paints black, so a rounded picture read as a frame around a smaller picture rather than as the desktop. Every panel is opaque RGBA with alpha 255 |
 | one height per row | the cards of a page are drawn at **one height** - the tallest one every picture can reach without cropping, i.e. the widest window's (`WallPanels.sharedCardHeight`, then `PanelImage.fit(maxHeight:)`). Per-window fitting left a 16:9 card shorter than a square one, so the row's top and bottom edges disagreed ("窗口的最高高度需要保持一致"). The cost is that one wide window shortens its neighbours while it is on the page; the alternative would be cropping, which the design rules out |
-| the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
+| the maths | one direction, **cells → pixels**: `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then the height is the constraint, else the width; the result is rounded to whole **cells** (`PanelImage.fit`), and the picture's pixels are then exactly those cells × the cell (`86×27 cells at 8×16 px = 688×432 px`, not one pixel more), with no offset inside the panel. Rounding the other way - fit in pixels, re-derive the cells - left the picture up to half a cell larger than its box, which a 1:1 terminal shows as a gap and a scaling one hides as a 1-2% stretch |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |
 | capture | **only the one on stage**: three displays + three windows = 4 panels, the same cost as a single display |
 

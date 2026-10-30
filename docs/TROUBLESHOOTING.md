@@ -113,8 +113,9 @@ If that fixes it, the terminal's `?2026` handling is the bug — note it in the 
 
 **Cause.** `TIOCGWINSZ` returned `0` for `ws_xpixel`/`ws_ypixel` (typical for sshd-created ptys and
 for panes that have not been laid out yet), so the cell size had to be guessed.
-**Fix.** Three-level fallback: `CSI 16 t` + `CSI 14 t` query (250 ms) → `TIOCGWINSZ` on stdout,
-stdin, `/dev/tty` → `--cell <w>x<h>` (default `8x20`). A terminal that answers **only** `CSI 14 t`
+**Fix.** Three-level fallback: `CSI 16 t` + `CSI 14 t` query (500 ms in the wall - a late answer used to
+lose to a guess, which is how the stage ended up 20% narrow) → `TIOCGWINSZ` on stdout,
+stdin, `/dev/tty` → `--cell <w>x<h>` (the fallback when nothing answers is `8x16`). A terminal that answers **only** `CSI 14 t`
 (window size) is enough: the cell is derived as window ÷ grid, so the picture still matches the pane
 exactly (issue #56 — before that, such a terminal was treated as answering nothing and an 80x24 pane
 came out at 640x480). `--debug` prints which question was answered:
@@ -136,13 +137,18 @@ to 80×24 while input is disabled.
 **Fix.** `ssh -t user@host ~/bin/krd …`. Always. (`ssh host krd` is the mistake; krd prints an
 explicit warning about it.)
 
-### 13. After resizing the window the picture is blurry or off-centre
+### 13. After a resize the picture is blurry, or in the wrong place
 
-**Cause.** The resize path re-measures with `TermGeometry.read()` only — no CSI query — so on a pty
-that reports no pixel size it falls back to `--cell`, which may not match the new cell size.
-**Fix.** Pass `--cell` for such terminals, or resize before relying on pixel precision. A
-`SIGWINCH` still triggers re-layout, `writer.clear()` and a stream restart at the new size; the
-layout is never left stale, only possibly under-informed.
+**Two causes, both fixed.** The resize path used to re-read `TIOCGWINSZ` without asking the terminal
+(`CSI 16t`/`14t`), so on a pty that reports no pixel size it kept a `--cell` that no longer matched the
+new cell. The more important one: **a picture is an object the terminal owns**, attached to the cells it
+was placed on - a resize that only re-laid-out and repainted text left the old picture where it was,
+with the new one painted over it ("缩放不支持").
+
+**Fix.** The wall's resize now does four things in order: re-measure the cell (`PaneGeometry.measure`,
+including `CSI 16t`/`14t`), `wallCanvas.invalidate()`, **delete every image** (`a=d,d=a`), and repaint
+the whole frame (re-capture + re-place). Measured in a pty, 137x44 -> 100x30: the stage goes 86x27 cells
+/ 688x432 px to 54x17 / 432x272, with the delete landing between the two frames.
 
 ### 13b. `krd` opens a screen of pictures instead of the desktop
 

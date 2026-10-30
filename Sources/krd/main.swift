@@ -1337,7 +1337,12 @@ final class Desk {
         guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else { return }
         var paints = WallSlotPaints()
         for panel in panels {
-            paints.mark(slot: panel.slot, failures[panel.slot] == nil ? .picture : .mask)
+            if let failure = failures[panel.slot] {
+                paints.mark(slot: panel.slot, .mask)
+                paints.maskReasons[panel.slot] = failure.maskLabel
+            } else {
+                paints.mark(slot: panel.slot, .picture)
+            }
         }
         if options.demo {
             // One line that answers "why does the picture not fill its box" without a screenshot:

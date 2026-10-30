@@ -96,4 +96,23 @@ final class PanelCaptureTests: XCTestCase {
             XCTAssertEqual(PanelCapture.classify(error), error)
         }
     }
+
+    /// A mask is the same rectangle whatever went wrong, so the label inside it is the only place a
+    /// reader learns *why* - and it has to fit in a card that can be 20 cells wide.
+    func testEveryFailureHasAShortLabelForTheMask() {
+        XCTAssertEqual(PanelCaptureError.windowGone.maskLabel, "closed")
+        XCTAssertEqual(PanelCaptureError.denied.maskLabel, "denied")
+        XCTAssertEqual(PanelCaptureError.noPixelBuffer.maskLabel, "no pixels")
+        // `-3805` is the window server refusing a window, not a missing permission: naming it
+        // "denied" would send the reader to System Settings for nothing.
+        XCTAssertEqual(PanelCaptureError.failed("SCStream -3805: Failed during stream").maskLabel,
+                       "no stream")
+        XCTAssertEqual(PanelCaptureError.failed("something else").maskLabel, "failed")
+        for label in [PanelCaptureError.windowGone.maskLabel,
+                      PanelCaptureError.denied.maskLabel,
+                      PanelCaptureError.noPixelBuffer.maskLabel,
+                      PanelCaptureError.failed("x").maskLabel] {
+            XCTAssertLessThanOrEqual(label.count, 9, "\(label) will not fit a narrow card")
+        }
+    }
 }

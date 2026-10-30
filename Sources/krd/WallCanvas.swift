@@ -110,6 +110,13 @@ struct WallSlotPaints: Equatable {
     /// read a line of text. "border at half the width" plus "cell 8x16 · pic 688x432 px" is enough to
     /// tell a scaling terminal from a 1:1 one.
     var demoNote: String? = nil
+    /// Why a slot shows a mask, in one word, per slot. A mask is the same rectangle for every reason,
+    /// so without this "no picture" is all a reader can report - and "no picture" was the question, not
+    /// the answer (TROUBLESHOOTING 23b/23c). Empty means the caller did not say, and the mask falls
+    /// back to the old wording.
+    var maskReasons: [Int: String] = [:]
+
+    func maskReason(_ slot: Int) -> String? { maskReasons[slot] }
 
     func card(_ slot: Int) -> WallSlotPaint {
         cards.indices.contains(slot) ? cards[slot] : .placeholder
@@ -466,7 +473,7 @@ final class WallCanvas {
             clear(&grid, rect: layout.stage)
             return
         case .mask:
-            drawMask(&grid, rect: layout.stage)
+            drawMask(&grid, rect: layout.stage, reason: paints.maskReason(0))
             return
         case .placeholder:
             break
@@ -569,7 +576,7 @@ final class WallCanvas {
                 clear(&grid, rect: rect)    // transparent bars show what is under the picture
                 continue
             case .mask:
-                drawMask(&grid, rect: rect)
+                drawMask(&grid, rect: rect, reason: paints.maskReason(1 + slot))
                 continue
             case .placeholder:
                 break
@@ -729,7 +736,7 @@ final class WallCanvas {
         }
     }
 
-    private func drawMask(_ grid: inout Grid, rect: CellRect) {
+    private func drawMask(_ grid: inout Grid, rect: CellRect, reason: String? = nil) {
         guard !rect.isEmpty else { return }
         guard rect.rows >= 3, rect.cols >= 2 else {
             let label = DisplayWidth.truncate(symbols.dash, to: rect.cols)
@@ -739,7 +746,9 @@ final class WallCanvas {
         }
         drawBox(&grid, rect: rect)
         let inner = max(0, rect.cols - 2)
-        let body = DisplayWidth.truncate("no picture", to: inner)
+        // One word if the caller knows it ("closed", "denied", "no stream"): a reader looking at a
+        // card that will not show its window needs the reason on the card, not in a log file.
+        let body = DisplayWidth.truncate(reason ?? "no picture", to: inner)
         let offset = max(0, (inner - DisplayWidth.of(body)) / 2)
         grid.text(body, row: rect.row + (rect.rows - 1) / 2, col: rect.col + 1 + offset, .dim,
                   limit: max(0, inner - offset))
