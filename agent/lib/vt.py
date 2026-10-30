@@ -94,11 +94,12 @@ class Placement:
 class Frame:
     """What the terminal held at one `ESC[?2026l`; `rgb` is `width * height * 3`, black-backed."""
 
-    __slots__ = ("width", "height", "rgb", "images", "cells", "placements")
+    __slots__ = ("width", "height", "rgb", "images", "cells", "placements", "placement_list")
 
     def __init__(self, width, height, rgb, images, cells, placements):
         self.width, self.height, self.rgb = width, height, rgb
         self.images, self.cells, self.placements = images, cells, placements
+        self.placement_list = []
 
     def probe(self, x, y):
         o = (y * self.width + x) * 3
@@ -157,6 +158,9 @@ class Decoder:
         self._fg = (255, 255, 255)
         self._chunk = None           # the `a=t` set still collecting chunks
         self._images, self._placements, self._frames = {}, [], []
+        self._live = {}              # image id -> the placement that is on screen now
+        self._live_clear = False     # `a=d,d=a` seen, applied when the next frame settles
+        self._live_drop = set()      # `a=d,d=i,i=N` seen, same
         self._grid = {}              # image id -> [[cell row, cell col, img row, img col], ...]
         self._last_ph = None
         self._canvas, self._cw, self._ch = bytearray(), 0, 0
@@ -289,10 +293,21 @@ class Decoder:
             self._transmit(kv, payload, fresh=True)
         elif action == "p":
             self._place(kv)
-        # `a=d` (delete) frees the *terminal's* copy after the pixels are already on the glass,
-        # and every krd session ends with `a=d,d=a` (Render.swift:200, :224): honouring it would
-        # empty images()/placements() exactly when an agent comes asking. krd retransmits an id
-        # before placing it again, so keeping the store cannot draw anything stale.
+        elif action == "d":
+            # `a=d` frees the *terminal's* copy. `images()`/`placements()` deliberately keep it —
+            # every krd session ends with `a=d,d=a` (Render.swift:200, :224) and emptying the store
+            # there would answer "what was drawn" with nothing. The *live* view is different: after
+            # a resize krd deletes every placement before repainting, and a card that disappeared
+            # must not still be reported at its old rectangle. So the delete is recorded and applied
+            # when the next frame settles.
+            what = kv.get("d", "a")
+            if what == "a":
+                self._live_clear = True
+            elif what == "i" and kv.get("i"):
+                try:
+                    self._live_drop.add(int(kv["i"]))
+                except ValueError:
+                    self._live_clear = True
         # `a=q`/`a=f`/`a=c` carry no pixels either.
 
     def _transmit(self, kv, payload, fresh):
@@ -390,6 +405,12 @@ class Decoder:
         declared `c`/`r` is a normal edge case - a larger one is a bug in whoever wrote the
         stream and lands in `anomalies`, not in an assert that would kill the decode.
         """
+        if self._live_clear:
+            self._live.clear()
+            self._live_clear = False
+        for iid in self._live_drop:
+            self._live.pop(iid, None)
+        self._live_drop.clear()
         seen = set()
         for p in pending:
             seen.add(p.image_id)              # a placed image is drawn once, grid or not
@@ -415,6 +436,17 @@ class Decoder:
                               max(rows) - min(rows) + 1, True, 0)
                 self._placements.append(p)
                 pending.append(p)
+        for p in pending:
+            self._live[p.image_id] = p
+
+    def live_placements(self):
+        """Where each image is *now*: the last placement for its id, with deletes applied.
+
+        `placements()` answers "what did the stream make" and keeps deleted entries on purpose;
+        after a resize those are rectangles that no longer exist. This is the view a picture
+        geometry claim must be made against.
+        """
+        return dict(self._live)
 
     # -- raster ----------------------------------------------------------------
 
@@ -490,4 +522,6 @@ class Decoder:
         if self.rows:
             h = max(h, self.rows * self.cell_h)
         self._ensure_canvas(w, h)            # cw == w from here: the extents are what grew it
-        self._frames.append(Frame(w, h, bytes(self._canvas[:w * h * 3]), drawn, cells, len(pending)))
+        frame = Frame(w, h, bytes(self._canvas[:w * h * 3]), drawn, cells, len(pending))
+        frame.placement_list = list(pending)
+        self._frames.append(frame)

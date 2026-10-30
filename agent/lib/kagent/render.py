@@ -97,8 +97,20 @@ class TerminalAnswers:
                 self.answered["u1"] += 1
 
 
+def resize(fd, cols, rows, cell=None):
+    """Set the pty's size and let the kernel deliver SIGWINCH.
+
+    Resizing is where stale geometry shows up: the layout is recomputed, but the pictures already
+    on screen were placed for the old rectangle. Driving it here is the only way to check the
+    resize path without a person dragging a window edge.
+    """
+    width, height = cell or (0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, width * cols, height * rows))
+
+
 def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cwd=None,
-                  on_chunk=None, terminal="rex"):
+                  on_chunk=None, terminal="rex", resizes=None):
     """Run `argv` on a pty of exactly `cols`x`rows`, and collect every byte it writes.
 
     A pty is not a convenience here: krd takes its geometry from `TIOCGWINSZ` and its behaviour from
@@ -111,11 +123,22 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
     child_env = dict(os.environ)
     child_env.update(env or {})
     child_env.pop("KAGENT_RUN", None)
+    # `start_new_session=True` is not enough: it makes a new session but never makes the pty the
+    # child's *controlling* terminal, so the kernel has no foreground process group to send SIGWINCH
+    # to. The symptom is a resize that changes `stty size` and delivers nothing — krd keeps drawing
+    # the old layout and it looks exactly like a product bug. TIOCSCTTY is the missing call.
+    def child_setup():
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
     process = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
-                               start_new_session=True, env=child_env, cwd=cwd or str(REPO),
+                               preexec_fn=child_setup, env=child_env, cwd=cwd or str(REPO),
                                close_fds=True)
+    # The slave stays open in the parent: on macOS TIOCSWINSZ on the master does not always reach
+    # the child's terminal, and a resize that silently does nothing is worse than no resize at all.
     answers = TerminalAnswers(master, cell=(cell or (17, 33)), name=terminal)
-    os.close(slave)
+    # (at_seconds, cols, rows): a resize in the middle of the run, the way a person drags a window.
+    pending = sorted(resizes or [])
     started = time.time()
     chunks = []
     status = None
@@ -123,6 +146,10 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
         remaining = seconds - (time.time() - started)
         if remaining <= 0:
             break
+        while pending and time.time() - started >= pending[0][0]:
+            _, new_cols, new_rows = pending.pop(0)
+            resize(slave, new_cols, new_rows, cell)
+            pass
         ready, _, _ = select.select([master], [], [], min(0.2, max(0.01, remaining)))
         if ready:
             try:
@@ -161,6 +188,7 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
                 pass
     status = process.returncode if process.returncode is not None else status
     os.close(master)
+    os.close(slave)
     return b"".join(chunks), status, time.time() - started, answers.answered
 
 
@@ -278,15 +306,11 @@ def picture_rects(decoder, cell):
     rects are exact. Two sources, one shape, so a scenario can assert on either.
     """
     out = []
-    seen = set()
-    # Every frame re-places only what it repainted, and a tile keeps its image id and its cells, so
-    # the set of *distinct* (image, cells) is the picture on screen after the last frame. Without
-    # this a 95-frame stream reports 700 "pictures", most of them the same tile twice.
-    for placement in decoder.placements():
-        key = (placement.image_id, placement.col, placement.row, placement.cols, placement.rows)
-        if key in seen:
-            continue
-        seen.add(key)
+    # krd re-places only what it repainted, and an image keeps its id for its lifetime, so the last
+    # placement of each id (with `a=d` applied) is where that picture is *now*. Anything earlier is
+    # history: after a resize it is a rectangle that no longer exists, and counting it as a picture
+    # is how a resize bug reads as a layout with too many cards.
+    for placement in decoder.live_placements().values():
         if not placement.unicode_placeholder:
             continue
         image = decoder.images().get(placement.image_id)

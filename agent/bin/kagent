@@ -236,6 +236,8 @@ def build_parser():
     p.add_argument("--keep-stream", action="store_true", dest="keep_stream")
     p.add_argument("--terminal", default="rex", choices=["rex", "none"],
                    help="answer kitty/DSR probes like the terminal krd targets (default rex)")
+    p.add_argument("--resize", action="append", default=[], metavar="AT:COLSxROWS",
+                   help="resize the pty at AT seconds, e.g. 5:100x30 (repeatable)")
     p.add_argument("--strict-fit", action="store_true", dest="strict_fit",
                    help="fail when a picture's pixels are not exactly its cell box "
                         "(the 1:1-terminal seam bug)")
@@ -710,10 +712,10 @@ def cmd_vt(args, context):
                        "ok": want is None or "".join("%02x" % c for c in got) == want})
     payload = {"frames": len(frames), "written": written,
                "size": [frames[-1].width, frames[-1].height],
-               "placements": len(decoder.placements()), "probes": probes}
+               "placements": len(decoder.live_placements()), "probes": probes}
     if not context.json:
         print("%d frame(s), last %dx%d, %d placement(s)"
-              % (len(frames), frames[-1].width, frames[-1].height, len(decoder.placements())))
+              % (len(frames), frames[-1].width, frames[-1].height, len(decoder.live_placements())))
         for item in written:
             print("  wrote %s" % item)
         for probe in probes:
@@ -747,9 +749,14 @@ def cmd_render(args, context):
             rows, cols, " ".join(_shquote(a) for a in command))
         import shlex
         local_command = ["ssh", "-tt"] + context.target.ssh_options + [context.target.host, remote]
+    resizes = []
+    for item in args.resize:
+        at, _, shape = item.partition(":")
+        new_cols, new_rows = render.parse_geometry(shape, (cols, rows))
+        resizes.append((float(at), new_cols, new_rows))
     stream, status, seconds, answered = render.run_under_pty(
         local_command, cols=cols, rows=rows, seconds=args.seconds, cell=cell,
-        terminal=args.terminal)
+        terminal=args.terminal, resizes=resizes)
     prefix = args.png or str(context.artifacts.dir / "vt")
     stream_path = Path("%s.vt" % prefix)
     stream_path.parent.mkdir(parents=True, exist_ok=True)
@@ -770,7 +777,9 @@ def cmd_render(args, context):
     # already here, so the check costs nothing and a run can fail on it instead of on a human's eye.
     pictures = []
     misfits = []
-    for p_ in decoder.placements():
+    # Live only: after a resize, the placements from before it are rectangles that no longer exist,
+    # and reporting their geometry as a misfit is how a correct relayout looks broken.
+    for p_ in decoder.live_placements().values():
         native = decoder.images().get(p_.image_id)
         box = (p_.cols * cell[0], p_.rows * cell[1])
         entry = {"image": p_.image_id, "placement": p_.placement_id,
@@ -801,7 +810,7 @@ def cmd_render(args, context):
              "stream: %s"
              % (" ".join(command), status, seconds, len(stream), len(frames),
                 frames[-1].width if frames else 0, frames[-1].height if frames else 0,
-                len(decoder.placements()), stream_path))
+                len(decoder.live_placements()), stream_path))
     for rect in rects:
         human += "\n  cells rows %d..%d cols %d..%d (%dx%d)" % (
             rect["row0"], rect["row1"], rect["col0"], rect["col1"], rect["cols"], rect["rows"])
@@ -812,7 +821,7 @@ def cmd_render(args, context):
     context.artifacts.record({"kind": "render", "command": command, "exit": status,
                               "frames": len(frames), "pixels": [frames[-1].width,
                                                                 frames[-1].height] if frames else None,
-                              "pictures": len(decoder.placements())})
+                              "pictures": len(decoder.live_placements())})
     if misfits:
         human += "\n%d picture(s) do not match their cell box: %s" % (len(misfits), misfits[:3])
     context.emit(payload, human)
