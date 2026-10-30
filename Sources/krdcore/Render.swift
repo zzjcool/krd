@@ -402,6 +402,91 @@ public final class ScreenWriter {
         return payload.count
     }
 
+    /// The diacritics that encode a row/column number for unicode placeholders: index 0 is U+0305,
+    /// index 1 is U+030D, and so on (kitty's `rowcolumn-diacritics.txt`). Only the first 256 are
+    /// kept - a pane never has more rows.
+    static let placeholderDiacritics: [Character] = ["\u{0305}", "\u{030D}", "\u{030E}", "\u{0310}", "\u{0312}", "\u{033D}", "\u{033E}", "\u{033F}", "\u{0346}", "\u{034A}", "\u{034B}", "\u{034C}", "\u{0350}", "\u{0351}", "\u{0352}", "\u{0357}", "\u{035B}", "\u{0363}", "\u{0364}", "\u{0365}", "\u{0366}", "\u{0367}", "\u{0368}", "\u{0369}", "\u{036A}", "\u{036B}", "\u{036C}", "\u{036D}", "\u{036E}", "\u{036F}", "\u{0483}", "\u{0484}", "\u{0485}", "\u{0486}", "\u{0487}", "\u{0592}", "\u{0593}", "\u{0594}", "\u{0595}", "\u{0597}", "\u{0598}", "\u{0599}", "\u{059C}", "\u{059D}", "\u{059E}", "\u{059F}", "\u{05A0}", "\u{05A1}", "\u{05A8}", "\u{05A9}", "\u{05AB}", "\u{05AC}", "\u{05AF}", "\u{05C4}", "\u{0610}", "\u{0611}", "\u{0612}", "\u{0613}", "\u{0614}", "\u{0615}", "\u{0616}", "\u{0617}", "\u{0657}", "\u{0658}", "\u{0659}", "\u{065A}", "\u{065B}", "\u{065D}", "\u{065E}", "\u{06D6}", "\u{06D7}", "\u{06D8}", "\u{06D9}", "\u{06DA}", "\u{06DB}", "\u{06DC}", "\u{06DF}", "\u{06E0}", "\u{06E1}", "\u{06E2}", "\u{06E4}", "\u{06E7}", "\u{06E8}", "\u{06EB}", "\u{06EC}", "\u{0730}", "\u{0732}", "\u{0733}", "\u{0735}", "\u{0736}", "\u{073A}", "\u{073D}", "\u{073F}", "\u{0740}", "\u{0741}", "\u{0743}", "\u{0745}", "\u{0747}", "\u{0749}", "\u{074A}", "\u{07EB}", "\u{07EC}", "\u{07ED}", "\u{07EE}", "\u{07EF}", "\u{07F0}", "\u{07F1}", "\u{07F3}", "\u{0816}", "\u{0817}", "\u{0818}", "\u{0819}", "\u{081B}", "\u{081C}", "\u{081D}", "\u{081E}", "\u{081F}", "\u{0820}", "\u{0821}", "\u{0822}", "\u{0823}", "\u{0825}", "\u{0826}", "\u{0827}", "\u{0829}", "\u{082A}", "\u{082B}", "\u{082C}", "\u{082D}", "\u{0951}", "\u{0953}", "\u{0954}", "\u{0F82}", "\u{0F83}", "\u{0F86}", "\u{0F87}", "\u{135D}", "\u{135E}", "\u{135F}", "\u{17DD}", "\u{193A}", "\u{1A17}", "\u{1A75}", "\u{1A76}", "\u{1A77}", "\u{1A78}", "\u{1A79}", "\u{1A7A}", "\u{1A7B}", "\u{1A7C}", "\u{1B6B}", "\u{1B6D}", "\u{1B6E}", "\u{1B6F}", "\u{1B70}", "\u{1B71}", "\u{1B72}", "\u{1B73}", "\u{1CD0}", "\u{1CD1}", "\u{1CD2}", "\u{1CDA}", "\u{1CDB}", "\u{1CE0}", "\u{1DC0}", "\u{1DC1}", "\u{1DC3}", "\u{1DC4}", "\u{1DC5}", "\u{1DC6}", "\u{1DC7}", "\u{1DC8}", "\u{1DC9}", "\u{1DCB}", "\u{1DCC}", "\u{1DD1}", "\u{1DD2}", "\u{1DD3}", "\u{1DD4}", "\u{1DD5}", "\u{1DD6}", "\u{1DD7}", "\u{1DD8}", "\u{1DD9}", "\u{1DDA}", "\u{1DDB}", "\u{1DDC}", "\u{1DDD}", "\u{1DDE}", "\u{1DDF}", "\u{1DE0}", "\u{1DE1}", "\u{1DE2}", "\u{1DE3}", "\u{1DE4}", "\u{1DE5}", "\u{1DE6}", "\u{1DFE}", "\u{20D0}", "\u{20D1}", "\u{20D4}", "\u{20D5}", "\u{20D6}", "\u{20D7}", "\u{20DB}", "\u{20DC}", "\u{20E1}", "\u{20E7}", "\u{20E9}", "\u{20F0}", "\u{2CEF}", "\u{2CF0}", "\u{2CF1}", "\u{2DE0}", "\u{2DE1}", "\u{2DE2}", "\u{2DE3}", "\u{2DE4}", "\u{2DE5}", "\u{2DE6}", "\u{2DE7}", "\u{2DE8}", "\u{2DE9}", "\u{2DEA}", "\u{2DEB}", "\u{2DEC}", "\u{2DED}", "\u{2DEE}", "\u{2DEF}", "\u{2DF0}", "\u{2DF1}", "\u{2DF2}", "\u{2DF3}", "\u{2DF4}", "\u{2DF5}", "\u{2DF6}", "\u{2DF7}", "\u{2DF8}", "\u{2DF9}", "\u{2DFA}", "\u{2DFB}", "\u{2DFC}", "\u{2DFD}", "\u{2DFE}", "\u{2DFF}", "\u{A66F}", "\u{A67C}", "\u{A67D}", "\u{A6F0}", "\u{A6F1}", "\u{A8E0}", "\u{A8E1}", "\u{A8E2}", "\u{A8E3}", "\u{A8E4}", "\u{A8E5}"]
+
+    /// One picture, drawn as **unicode placeholders** instead of a pixel-sized placement.
+    ///
+    /// Why this shape: a placeholder placement (`U=1`) hands the *sizing* to the terminal. The image
+    /// is fitted into the rectangle of placeholder cells, aspect preserved ("The image will
+    /// eventually be fit to the specified rectangle, its aspect ratio preserved", kitty protocol
+    /// §Unicode placeholders), so the picture's cell rectangle - which krd knows exactly, because it
+    /// is the layout - is the only geometry that matters. No cell-pixel estimate, no `--dpr`, no
+    /// "the picture is half its box because the terminal reports points": the class of bug that put
+    /// the wall's desktop at the box's top-left four times in one evening.
+    ///
+    /// The cost is transmission efficiency: the placeholder grid is ordinary text (invisible), so it
+    /// has to be rewritten whenever those cells are repainted, and the terminal does the resampling.
+    @discardableResult
+    public func emitPanelAsPlaceholder(id: Int, placementID: Int, row: Int, col: Int,
+                                       cols: Int, rows: Int, pixels: [UInt8], width: Int,
+                                       height: Int, level: Int, paneCols: Int, paneRows: Int,
+                                       format panelFormat: PixelFormat = .rgba,
+                                       sync: Bool = true) -> Int {
+        guard width > 0, height > 0, cols > 0, rows > 0,
+              let payload = zlibCompress(pixels, level: level), !payload.isEmpty else { return 0 }
+        lastFrameBytes += payload.count
+        totalBytes += payload.count
+        framesEmitted += 1
+        lastCompressedTiles += 1
+
+        if sync { append("\u{1B}[?2026h") }
+        // 1. Transmit only - a placeholder image must not carry a placement of its own.
+        let chars = Array(Data(payload).base64EncodedString().utf8)
+        let compression = ",o=z"
+        let control = "Gf=\(panelFormat.protocolChannels),s=\(width),v=\(height),a=t"
+            + "\(compression),q=\(quiet),i=\(id)"
+        var i = 0
+        var first = true
+        while i < chars.count {
+            let end = min(i + 4096, chars.count)
+            let more = end == chars.count ? 0 : 1
+            append("\u{1B}_")
+            append(first ? "\(control),m=\(more);" : "Gm=\(more);")
+            out.append(contentsOf: chars[i..<end])
+            append("\u{1B}\\")
+            i = end
+            first = false
+        }
+        // 2. The virtual placement: the cell rectangle the picture should fill.
+        append("\u{1B}_Gi=\(id),p=\(placementID),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)\u{1B}\\")
+
+        // 3. The placeholder cells. The row diacritic on the first cell of a row is enough - the
+        // protocol lets a cell inherit "row of the left cell, column + 1" - so each row costs one
+        // diacritic. The image id travels in the foreground colour.
+        let r = (id >> 16) & 0xFF, g = (id >> 8) & 0xFF, b = id & 0xFF
+        let colour = "\u{1B}[38;2;\(r);\(g);\(b)m"
+        for line in 0..<rows {
+            let paneRow = row + line
+            guard paneRow <= paneRows else { break }
+            // Never write the final cell of the final row: a pending wrap there scrolls the grid and
+            // takes every placement on it one row up (WallLayout.clip enforces the same rule).
+            var cells = cols
+            if paneRow == paneRows { cells = min(cells, paneCols - col) }
+            if cells <= 0 { break }
+            append("\u{1B}[\(paneRow);\(col)H")
+            append(colour)
+            for cell in 0..<cells {
+                append("\u{10EEEE}")
+                if cell == 0, let mark = Self.placeholderDiacritic(line) {
+                    append(String(mark))
+                }
+            }
+            append("\u{1B}[39m")
+        }
+        if sync { append("\u{1B}[?2026l") }
+        return payload.count
+    }
+
+    /// The diacritic for a row number, or `nil` when the table runs out (a pane taller than 256
+    /// rows), in which case the row is drawn without one - the terminal then reuses the row above,
+    /// which is wrong but better than a crash.
+    static func placeholderDiacritic(_ row: Int) -> Character? {
+        row >= 0 && row < placeholderDiacritics.count ? placeholderDiacritics[row] : nil
+    }
+
     /// The escapes both a tile and a panel need. Kept in one place so a terminal that draws tiles
     /// draws panels: any difference between the two would show up as "the mirror works, the wall
     /// does not", which is the hardest kind of bug to read.

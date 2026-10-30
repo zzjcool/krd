@@ -68,6 +68,10 @@ struct Options {
     /// its geometry in points and still draw images 1:1 in device pixels. 0 = decide from the
     /// geometry source (2 when only ANSI answers were available, 1 when the pty reported pixels).
     var dpr: Double? = nil
+    /// Draw the wall's pictures as kitty *unicode placeholders* (`U=1`) instead of a pixel-sized
+    /// placement: the terminal then fits the image into the picture's cell rectangle, so no estimate
+    /// of the cell's pixel size can put the desktop in the corner (see `emitPanelAsPlaceholder`).
+    var placeholders = true
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
 
@@ -163,8 +167,9 @@ func usage() -> String {
       --cursor            draw the pointer into the picture (default: hidden — the pane already
                           follows the local pointer, and a drawn one dirties tiles as the mouse
                           moves; --no-cursor is still accepted and means the same as the default)
-      --dpr <n>           device pixels per reported pixel for pictures (default: 2 when the
-                          terminal only answers CSI 16t/14t, 1 when the pty reports pixels)
+      --dpr <n>           device pixels per reported pixel for the pixel-sized path (default: 2
+                          when the terminal only answers CSI 16t/14t, 1 when the pty reports them)
+      --no-placeholders   draw pictures as pixel-sized placements instead of unicode placeholders
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
@@ -322,6 +327,8 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
                 options.cell = (w, h)
             }
             i += 1
+        case "--no-placeholders": options.placeholders = false
+        case "--placeholders": options.placeholders = true
         case "--dpr":
             if let spec = args[safe: i + 1], let value = Double(spec), value > 0, value <= 4 {
                 options.dpr = value
@@ -1257,14 +1264,31 @@ final class Desk {
         for picture in pictures {
             // `panel.rect` is the picture's own rectangle (WallPanels.make), so mask, placeholder,
             // caption and picture are one box, and the cells outside it stay unpainted.
-            writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
-                             row: picture.panel.rect.row, col: picture.panel.rect.col,
-                             cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
-                             pixels: picture.pixels, width: picture.width,
-                             height: picture.height, level: Self.wallPanelLevel,
-                             // RGBA: the bars are transparent so the wall's own background shows
-                             // through (design §6.6) - the mirror's tiles stay opaque RGB.
-                             format: .rgba, sync: writer.perTileSync)
+            // With placeholders the terminal fits the image into this exact cell rectangle, so the
+            // picture lands where the layout says whatever the terminal claims its cell is. The
+            // pixel-sized path stays behind the flag: it is the only way to tell which of the two
+            // misbehaved when a terminal refuses placeholders.
+            if options.placeholders {
+                writer.emitPanelAsPlaceholder(id: picture.panel.imageID,
+                                              placementID: picture.panel.placementID,
+                                              row: picture.panel.rect.row,
+                                              col: picture.panel.rect.col,
+                                              cols: picture.panel.rect.cols,
+                                              rows: picture.panel.rect.rows,
+                                              pixels: picture.pixels, width: picture.width,
+                                              height: picture.height, level: Self.wallPanelLevel,
+                                              paneCols: pane.cols, paneRows: pane.rows,
+                                              format: .rgba, sync: writer.perTileSync)
+            } else {
+                writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
+                                 row: picture.panel.rect.row, col: picture.panel.rect.col,
+                                 cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
+                                 pixels: picture.pixels, width: picture.width,
+                                 height: picture.height, level: Self.wallPanelLevel,
+                                 // RGBA: the bars are transparent so the wall's own background shows
+                                 // through (design §6.6) - the mirror's tiles stay opaque RGB.
+                                 format: .rgba, sync: writer.perTileSync)
+            }
         }
         writer.endFrame()
     }
