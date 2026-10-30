@@ -108,6 +108,17 @@ struct Viewport {
             && (originPixelY...(originPixelY + pixelHeight)).contains(py)
     }
 
+    /// The rect whose *size* caps a layout's pixel budget: the capture, not the frame it came from.
+    ///
+    /// `--zoom` cuts `sourceRect` down to a crop, and ScreenCaptureKit is then asked for
+    /// `width`/`height` pixels of that crop. Handing the layout the *full* frame's size instead
+    /// makes it ask for as many pixels as the window has, out of a crop that has fewer points: a
+    /// 2x zoom got a 2x-upscaled picture at four times the bytes (issue #73). Placement is not
+    /// affected — `fit` is derived from this same size, so the picture still fills the pane.
+    static func layoutSource(crop: CGRect, full: CGRect) -> CGSize {
+        (crop.width >= 2 && crop.height >= 2) ? crop.size : full.size
+    }
+
     /// The part of `full` a `scale`-times zoom shows, centred on `focus`.
     ///
     /// Total by construction, because every input here comes from a display or from a pointer
