@@ -120,6 +120,10 @@ struct WallSlotPaints: Equatable {
     /// much narrower than the box. Its caption goes under the *picture* - under the box's left edge
     /// it would sit in the empty margin, reading as a label for nothing (design §6.6: one caption
     /// row under each picture, text never under a placement).
+    ///
+    /// Keyed like `mark(slot:)` and `card(slot:)`: 0 is the stage and 1... are this page's cards in
+    /// `layout.cards` order. The painter reads it with a card *index*, so it adds one - mixing the
+    /// two conventions put card n's caption under card n-1's picture.
     var cardPictureCells: [Int: CellRect] = [:]
 
     func pictureCells(_ slot: Int) -> CellRect? { cardPictureCells[slot] }
@@ -643,9 +647,10 @@ final class WallCanvas {
             let text = "\(symbols.window) \(window.app) \(symbols.dash) \(title)"
             // Under the picture when there is one, under the box otherwise (a mask fills its box,
             // so there the two are the same rectangle). A picture narrower than its box would
-            // otherwise leave its caption out in the margin.
+            // otherwise leave its caption out in the margin. `slot` is the card index; the paints
+            // are keyed by slot id (1... are the cards), so ask for `slot + 1`.
             var rect = box
-            if let cells = paints.pictureCells(slot), cells.cols >= 8 {
+            if let cells = paints.pictureCells(slot + 1), cells.cols >= 8 {
                 let col = max(box.col, min(cells.col, box.maxCol))
                 rect = CellRect(col: col, row: box.row,
                                 cols: max(0, min(cells.cols, box.maxCol - col + 1)), rows: 1)

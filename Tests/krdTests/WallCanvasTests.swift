@@ -990,6 +990,36 @@ final class WallCanvasTests: XCTestCase {
 /// In the same file as `WallCanvasTests` on purpose: the fixture model and `makeLayout` are
 /// private to it, and a second copy of them would be a second thing to keep in step.
 extension WallCanvasTests {
+    /// A card's caption goes under its **picture**, not under its box: the box is the slot's whole
+    /// width and the picture inside it is fitted by aspect, so a 4:3 window in a 16:9 slot keeps
+    /// margins either side. `cardPictureCells` is keyed by *slot* (1... are the cards, like
+    /// `mark(slot:)`) while the painter walks the page by *index*, and mixing the two put card n's
+    /// caption under card n-1's picture: on a page whose last row starts again at column 1 that drew
+    /// a one-cell `…` at the right edge of the card (a page of 4 at 118x73 does exactly that).
+    func testACardCaptionFollowsItsPictureNotItsBox() {
+        let model = model()                                  // 7 windows
+        let layout = makeLayout(fixtureState(), cols: 118, rows: 73, model)
+        let box = layout.cards[0]
+        XCTAssertGreaterThan(box.cols, 16, "the box has room for a narrower picture inside it")
+        let picture = CellRect(col: box.col + 4, row: box.row, cols: box.cols - 8, rows: box.rows)
+        var paints = WallSlotPaints()
+        paints.mark(slot: 1, .picture)
+        paints.cardPictureCells[1] = picture
+        let lines = WallCanvas(symbols: .ascii).lines(cols: 118, rows: 73, model: model,
+                                                     layout: layout, focus: nil, paints: paints)
+        // `cellAt`, not `Array(line)[col]`: a caption row carries CJK titles, and a Character index
+        // is not a column once one is on the row.
+        let first = lines[layout.cardCaptions[0].row - 1]
+        XCTAssertEqual(cellAt(first, picture.col), Character(WallSymbols.ascii.window),
+                       "the caption starts under the picture, not under the box")
+        for col in box.col..<picture.col {
+            XCTAssertEqual(cellAt(first, col), " ", "cell \(col) is margin, not label")
+        }
+        // …and card 2's caption is its own: it was the one that used to inherit card 1's picture.
+        let second = lines[layout.cardCaptions[1].row - 1]
+        XCTAssertEqual(cellAt(second, layout.cards[1].col), Character(WallSymbols.ascii.window))
+    }
+
     func testTheFooterNamesTheTerminalThatNeedsTheGrant() {
         let canvas = WallCanvas(symbols: .emoji)
         let model = model()
