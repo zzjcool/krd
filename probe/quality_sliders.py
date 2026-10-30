@@ -100,6 +100,18 @@ def transmit(kind, payload, cells_w, cells_h, dims):
 
 # ---------------------------------------------------------------- video
 
+def clip_size(path):
+    """The clip's own aspect, so the picture is not stretched into whatever shape the pane is."""
+    try:
+        out_ = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                               '-show_entries', 'stream=width,height', '-of', 'csv=p=0', path],
+                              stdout=subprocess.PIPE, check=True).stdout.decode()
+        w, h = (int(v) for v in out_.strip().split(',')[:2])
+        return (w, h) if w > 0 and h > 0 else (16, 9)
+    except Exception:
+        return (16, 9)
+
+
 def source(clip, w, h, fps=30):
     cmd = ['ffmpeg', '-v', 'error', '-stream_loop', '-1', '-i', clip,
            '-vf', f'scale={w}:{h}:flags=bilinear', '-r', str(fps),
@@ -191,13 +203,21 @@ def main():
     global out
     out = sys.stdout
     cols, rows, cell_w, cell_h = gp.pane()
+    clip_w, clip_h = clip_size(clip)
     if cells:
         want_w, want_h = (int(v) for v in cells.split('x'))
-        box_w, box_h = min(want_w, cols - 2), min(want_h, rows - 10)
+        box_w = min(want_w, cols - 2)
     else:
-        box_w, box_h = min(96, cols - 2), max(8, rows - 10)
+        box_w = min(96, cols - 2)
+    # fit the clip's aspect inside the space above the bars: a 720x466 clip in a 137-row pane used
+    # to be stretched into a portrait box, which reads as "the display is broken"
+    box_h_max = (min(63, rows - 10) if not cells else min(want_h, rows - 10))
+    box_h = max(6, min(box_h_max, int(round(box_w * cell_w * clip_h / clip_w / cell_h))))
     src_w = max(64, int(box_w * cell_w)) // 2 * 2
-    src_h = max(64, int(box_h * cell_h)) // 2 * 2
+    src_h = max(64, int(src_w * clip_h / clip_w)) // 2 * 2
+
+    sys.stderr.write(f'clip {clip_w}x{clip_h} -> box {box_w}x{box_h} cells '
+                     f'({src_w}x{src_h} px source), pane {cols}x{rows}\n')
 
     screen = Screen(cols, rows)
     bars = [Bar('colour', '--quality', QUALITY, lambda v: f'{v:>3d}   {LABEL[v]}'),
