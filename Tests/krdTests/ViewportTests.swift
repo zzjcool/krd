@@ -147,6 +147,20 @@ final class ViewportTests: XCTestCase {
         XCTAssertEqual(overshoot.y, window.maxY, accuracy: 0.001)
     }
 
+    /// A wall-only session has no picture at all, so its viewport is size zero. `(1...max(cols, 1))`
+    /// used to call `(1, 1)` "inside the picture", and a viewport with no cells must never route a
+    /// click into the remote path (`Input.swift:267-279`): a click on the wall's own header became a
+    /// click at the screen origin.
+    func testAZeroSizeViewportContainsNothing() {
+        let empty = Viewport(pixelWidth: 0, pixelHeight: 0, cols: 0, rows: 0, sourceRect: .zero)
+        for cx in -2...4 {
+            for cy in -2...4 {
+                XCTAssertFalse(empty.contains(cell: cx, cy), "cell \(cx),\(cy) was inside an empty pane")
+                XCTAssertFalse(empty.contains(pixel: cx, cy), "pixel \(cx),\(cy) was inside an empty picture")
+            }
+        }
+    }
+
     /// The contrast case: display mode maps the same cell to a different point, which is why the
     /// source rect, not the display, is the origin that matters.
     func testDisplayModeMapsAgainstTheDisplayInstead() {

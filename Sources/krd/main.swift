@@ -71,6 +71,13 @@ struct Options {
     var noChrome = false
     /// Open a panel at startup, for screenshots and for `--dev --selftest` without input.
     var devPanel: String? = nil
+    /// The landing screen (`--wall`): displays plus the most recently used windows as text, with
+    /// no capture at all. Opt-in, because the mirror is what krd is for — and it renders fully with
+    /// the Screen Recording grant denied (`WallSource` reads nothing that needs one).
+    var wall = false
+    /// The `--wall` glyph table (`--symbols`): `emoji` unless the terminal draws `▲ ▣ ⤢` two cells
+    /// wide, which would slide the bar off the column a click maps to.
+    var symbols: WallSymbols = .emoji
     /// Replace ScreenCaptureKit with a desktop drawn in process. No permission, runs forever.
     var mock = false
     var mockSize: (w: Int, h: Int)? = nil
@@ -108,6 +115,10 @@ func usage() -> String {
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
       --no-chrome         force the TUI layer off, e.g. for scripts
       --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
+      --wall              the landing screen: displays + the most recently used windows, as
+                          text instead of a mirror (opt-in; the mirror stays the default)
+      --symbols <m>       --wall glyphs: emoji (default) or ascii, for terminals that draw
+                          ▲ ▣ ⤢ two cells wide
       --mock              draw the desktop in process: no screen, no permission, runs forever
       --mock-size WxH     size of the generated desktop (default 1920x1200)
       --list              list displays and windows, then exit
@@ -158,6 +169,16 @@ func parseClipboardSpec(_ spec: String) -> ClipboardPolicy {
         exit(2)
     }
     return policy
+}
+
+/// `--symbols <spec>`, or a usage error: a typo must not silently pick a glyph table.
+func parseSymbolsSpec(_ spec: String) -> WallSymbols {
+    guard let symbols = WallSymbols(spec: spec) else {
+        FileHandle.standardError.write(
+            Data("krd: --symbols wants emoji|ascii, got \"\(spec)\"\n".utf8))
+        exit(2)
+    }
+    return symbols
 }
 
 func parseArguments() -> Options {
@@ -267,6 +288,13 @@ func parseArguments() -> Options {
             let parts = spec.split(separator: "x").compactMap { Int($0) }
             if parts.count == 2, parts[0] > 8, parts[1] > 8 { options.mockSize = (parts[0], parts[1]) }
         case "--no-chrome": options.noChrome = true
+        case "--wall": options.wall = true
+        case "--symbols":
+            options.symbols = parseSymbolsSpec(args[safe: i + 1] ?? "")
+            i += 1
+        // The `--flag=value` spelling too, for the same reason as `--ime=` / `--clipboard=`.
+        case let arg where arg.hasPrefix("--symbols="):
+            options.symbols = parseSymbolsSpec(String(arg.dropFirst("--symbols=".count)))
         case "--list": options.listOnly = true
         case "-v", "--version": print("krd \(krdVersion)"); exit(0)
         case "-h", "--help": print(usage()); exit(0)
@@ -385,13 +413,30 @@ final class Desk {
     private var chromeSampleTiles = 0
     private var chromeSampleTime = Date()
     private var chromeToastUntil = Date()
+    // The wall (`--wall`). `wallState != nil` *is* wall mode: no picture, no capturer, and every
+    // cell of the pane belongs to `WallCanvas`, so each path that would fit or restart a mirror
+    // looks at this one flag first.
+    private var wallState: WallState?
+    /// Wall mode as a plain `Bool`, because `chromeClick` runs on the reader thread and reads it:
+    /// `wallState` is written on the main queue (every click, by `wallClick`), so reading *that*
+    /// from another thread would be a race on a multi-word value. This one is written once, before
+    /// `startInput()` starts the reader, and never again.
+    private var wallMode = false
+    private var wallCanvas: WallCanvas?
+    private var wallModel = WallModel()
+    private var wallTimer: DispatchSourceTimer?
+    /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
+    /// answer to "would the wall look different?" — the 1 s tick emits nothing while both match.
+    private var wallPane: (cols: Int, rows: Int)?
     private var pipeSamples: [Double] = []
     private var targetLabel = "-"
     private var shareable: SCShareableContent?
     private var mock: MockDesktop?
     private var geometrySource = "-"
 
-    private var chromeEnabled: Bool { options.dev && !options.noChrome }
+    /// The wall owns the whole pane, so `--dev` has no rows to take: the layer stays off even when
+    /// both flags are given.
+    private var chromeEnabled: Bool { options.dev && !options.noChrome && !options.wall }
     /// Wall time from capture callback to last byte out, per frame.
     private(set) var lastPipeMs = 0.0
     private var recorder: FrameRecorder?
@@ -500,6 +545,16 @@ final class Desk {
             mock.start()
             Log.write("krd: mock \(layout.pixelW)x\(layout.pixelH) px @\(options.fps) fps, "
                       + "\(layout.tilesX)x\(layout.tilesY) tiles, no capture\n")
+            while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
+        }
+
+        // The wall is text and needs no grant: `CGWindowListCopyWindowInfo` hands out owner, pid,
+        // bounds and window number without one (only `kCGWindowName` is withheld, and a card with
+        // no title draws `window N`). This branch is therefore strictly before the first
+        // `SCShareableContent` call — the one that throws when Screen Recording is denied — so a
+        // wall-only session starts and renders with the grant missing.
+        if options.wall {
+            runWall()
             while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         }
 
@@ -672,6 +727,103 @@ final class Desk {
 
         while true {
             try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    // MARK: the wall (--wall)
+
+    /// Start the landing screen: alternate screen, resize handler, input, one enumeration and a
+    /// 1 s tick. No capturer, no tile grid, no chrome rows — the wall owns every cell.
+    private func runWall() {
+        if let cell = options.cell { TermGeometry.fallbackCell = cell }
+        // A size-zero viewport is what "there is no picture" means to the mouse path: no cell and
+        // no pixel is inside it (`Viewport.contains`), so every report lands in `chromeClick`,
+        // which routes it to the wall. Set before input starts, and never overwritten — nothing in
+        // this mode calls `applyLayout`.
+        stateLock.lock()
+        viewport = Viewport(pixelWidth: 0, pixelHeight: 0, cols: 0, rows: 0, sourceRect: .zero)
+        stateLock.unlock()
+        writer.beginSession()
+        installSignalCleanup()
+        installResizeHandler()
+        // The desk is built *before* input: `startInput()` decides the wall's key policy from
+        // wall mode, and it runs on the main queue before the reader thread exists — the only
+        // race-free moment to read that. The first paint stays after it, so input is installed
+        // before the wall appears.
+        wallCanvas = WallCanvas(symbols: options.symbols)
+        wallState = WallState()
+        wallMode = true
+        startInput()
+        refreshWall(force: true)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in self?.refreshWall(force: false) }
+        timer.resume()
+        wallTimer = timer
+    }
+
+    /// The pane the wall draws into: the tty's size, with `--pane` honoured the way the bench and
+    /// the mock path honour it (how a wrong-looking wall gets reproduced at an exact size).
+    private func wallGeometry() -> (cols: Int, rows: Int) {
+        var geometry = TermGeometry.read()
+        if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
+        return (cols: max(1, geometry.cols), rows: max(1, geometry.rows))
+    }
+
+    /// Re-enumerate the world and repaint — but only when the wall would actually look different:
+    /// the display list, the window list (order included, it is "most recently used first"), or the
+    /// pane size. That comparison is also what keeps an idle wall at 0 B/s with a 1 s tick.
+    private func refreshWall(force: Bool) {
+        guard !cleanedUp, wallState != nil else { return }
+        let pane = wallGeometry()
+        let model = WallSource.model()
+        guard force || model != wallModel || pane.cols != wallPane?.cols
+                || pane.rows != wallPane?.rows else { return }
+        wallModel = model
+        wallPane = pane
+        // The world can shrink under a static wall (a display unplugged, a window closed) while the
+        // offsets still point past the end; clamping here is what keeps the shelf from going blank.
+        wallState?.clamp(displays: model.displays.count, windows: model.windows.count)
+        drawWall()
+    }
+
+    /// Paint from the cached model. The click path uses this and never `refreshWall(force: true)`:
+    /// a click has to be drawn against the list it was made on, and re-enumerating every window
+    /// dictionary inside a click handler is not a thing to do.
+    private func drawWall() {
+        guard let canvas = wallCanvas, let state = wallState, let pane = wallPane else { return }
+        let layout = state.layout(cols: pane.cols, rows: pane.rows,
+                                  displays: wallModel.displays.count,
+                                  windows: wallModel.windows.count)
+        writer.writeChrome(canvas.draw(cols: pane.cols, rows: pane.rows, model: wallModel,
+                                       layout: layout, focus: state.focus))
+    }
+
+    /// The one seam the capture phase replaces (contract §5.1, design §8).
+    ///
+    /// Switching to a mirror needs a new `SCContentFilter` for the picked display or window and a
+    /// stream restart, neither of which this phase owns. So a pick is recorded — it is already in
+    /// `wallState.focus`, which is what turns the footer into the way back — plus one line to
+    /// `Log`. Deliberately absent here: `makeCaptureTarget`, `restartCapture`, a capturer.
+    ///
+    /// The line only goes out when `--debug`/`--log` opened a file: `Log`'s sink is stderr
+    /// otherwise, and a single line there scrolls the wall off its own grid (CONTRIBUTING.md
+    /// rule 1).
+    private func enterFocus(_ focus: WallState.Focus) {
+        guard Log.path != nil else { return }
+        switch focus {
+        case .display(let index):
+            let name = wallModel.displays.indices.contains(index) ? wallModel.displays[index].name
+                : "no display"
+            Log.write("krd: --wall: would mirror display \(index) (\(name)); the capture path "
+                      + "lands with the picture phase\n")
+        case .window(let index):
+            let window = wallModel.windows.indices.contains(index) ? wallModel.windows[index] : nil
+            let app = window?.app ?? ""
+            var title = "window \(index + 1)"
+            if let name = window?.title, !name.isEmpty { title = name }
+            Log.write("krd: --wall: would mirror window \(index + 1) (\(app) — \(title), "
+                      + "id \(window?.windowID ?? 0)); the capture path lands with the picture phase\n")
         }
     }
 
@@ -1426,6 +1578,14 @@ final class Desk {
     }
 
     private func handleResize() {
+        // The wall has no picture to re-fit: the pane changed size, so the canvas forgets its
+        // previous grid (the next draw is a full repaint at the new width) and the model is re-read.
+        // The guard below would no-op here — a wall session has no filter and no mock.
+        if wallState != nil {
+            wallCanvas?.invalidate()
+            refreshWall(force: true)
+            return
+        }
         guard !cleanedUp, filter != nil || mock != nil else { return }
         let geometry = TermGeometry.read()
         applyLayout(geometry: geometry)
@@ -1648,14 +1808,32 @@ final class Desk {
 
     private func startInput() {
         guard !options.noInput else { return }
+        // Read once, here: `startInput()` runs on the main queue before `reader.start()` starts the
+        // reader thread, so this is the only race-free moment to ask whether the desk is a wall.
+        let wallMode = self.wallMode
         let reader = InputReader(
             viewport: { [weak self] in
                 self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1,
                                                     sourceRect: .zero)
             },
-            dryRun: options.dryRun) { [weak self] in self?.shutdown() }
-        reader.onChromeKey = { [weak self] byte in self?.chromeKey(byte) ?? false }
-        reader.onChromeClick = { [weak self] row, col in self?.chromeClick(row: row, col: col) }
+            // A wall never posts an event: there is no remote desktop behind it, and `--dry-run`
+            // already carries exactly this meaning ("parse input, never post a CGEvent"). This is
+            // not redundant with the key policy below, which only ever sees *control* bytes
+            // (`Input.swift:413`): a printable key arrives as `.text` and a kitty report as `.key`,
+            // and both post straight through `postKey`/`postUnicode` (`Input.swift:153,156`) — so a
+            // stray `q` on the wall was still posted as CGKeyCode 12. Measured in a pty session.
+            dryRun: options.dryRun || wallMode) { [weak self] in self?.shutdown() }
+        // The wall has no keyboard vocabulary — every key belongs to a remote desktop that does not
+        // exist in this mode (design §1/§5) — so nothing is delegated to the chrome's prefix state
+        // either. `0x1C` is the exception: `Input.swift` takes Ctrl-\ as "leave" after this closure
+        // is done, and that is the only key a wall still owes the user.
+        reader.onChromeKey = { [weak self] byte in
+            guard !wallMode else { return byte != 0x1C }
+            return self?.chromeKey(byte) ?? false
+        }
+        reader.onChromeClick = { [weak self] row, col, wheel in
+            self?.chromeClick(row: row, col: col, isWheel: wheel)
+        }
         reader.trace = options.debug
         reader.ime = options.ime
         if options.debug {
@@ -1737,7 +1915,24 @@ final class Desk {
         return false
     }
 
-    private func chromeClick(row: Int, col: Int) {
+    /// The wall consumes every click on the pane: the whole pane is text, so "outside the picture"
+    /// is the normal case there, and a cell the wall does not know is swallowed rather than
+    /// forwarded to the remote desktop (design §8: the route decision is "inside the picture
+    /// rect", and the wall has no picture at all).
+    private func chromeClick(row: Int, col: Int, isWheel: Bool) {
+        if wallMode {
+            // A wheel report is not a click, and nothing under the wall scrolls: the bar is
+            // clicked. Ignoring it here is what keeps a two-finger scroll from entering a card.
+            // The guard stays on the calling thread because it touches nothing.
+            guard !isWheel else { return }
+            // This closure runs on the *reader* thread (`InputReader.onChromeClick`), while the
+            // wall's 1 s tick, `handleResize()` and `shutdown()` all own the desk on the main
+            // queue. Mutating `wallState` and repainting from here would race that tick on the
+            // canvas's previous-cell grid and on the shelf offsets, so the wall branch only hops:
+            // after this line everything the wall owns is touched by exactly one thread.
+            DispatchQueue.main.async { [weak self] in self?.wallClick(row: row, col: col) }
+            return
+        }
         guard chromeEnabled, let geometry = chromeGeometry else { return }
         switch chrome.hitTest(row: row, col: col, geometry: geometry) {
         case .statusSegment(let id):
@@ -1754,6 +1949,28 @@ final class Desk {
         case .outside:
             break
         }
+    }
+
+    /// The wall half of `chromeClick`, on the main queue — the same queue as the 1 s tick, so the
+    /// model, the canvas and the offsets are never read and written from two threads (see the hop
+    /// in `chromeClick` for the whole reason).
+    private func wallClick(row: Int, col: Int) {
+        guard var state = wallState, let pane = wallPane else { return }
+        let displays = wallModel.displays.count
+        let windows = wallModel.windows.count
+        let layout = state.layout(cols: pane.cols, rows: pane.rows,
+                                  displays: displays, windows: windows)
+        // nil = header, band header, blank row, the gap column, a dead end of the bar: those
+        // cells belong to the wall too, so the click ends here.
+        guard let action = layout.action(row: row, col: col) else { return }
+        state.apply(action, displays: displays, windows: windows)
+        wallState = state
+        switch action {
+        case .enterStage(let index): enterFocus(.display(index))
+        case .enterCard(let index): enterFocus(.window(index))
+        default: break
+        }
+        drawWall()
     }
 
     /// A panel changes the layout: the picture keeps its rows when the panel fits underneath,
@@ -1779,6 +1996,10 @@ final class Desk {
         }
         chromeTimer?.cancel()
         chromeTimer = nil
+        // The wall's 1 s tick holds the desk (and the model) alive: without this, a torn-down wall
+        // keeps enumerating the window server and painting into a session that is already gone.
+        wallTimer?.cancel()
+        wallTimer = nil
         mock?.stop()
         mock = nil
         input?.restore()

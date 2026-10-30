@@ -56,6 +56,8 @@ krd --cursor                 # draw the target's pointer into the picture (defau
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture
 krd --mock --dev             # the same, with the screen mocked: no permission needed
+krd --wall                   # the landing screen: displays + recent windows, as text
+krd --wall --symbols ascii   # one-cell-everywhere glyphs (terminals that draw ▲ two wide)
 krd --debug                  # stats to a log file, never to the screen
 krd --format rgba            # fall back to f=32 if the terminal rejects f=24
 krd --bench                  # time the encoder on synthetic frames, no terminal needed

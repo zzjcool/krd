@@ -39,8 +39,11 @@ final class InputReader {
     /// Prefix-mode byte handling for the TUI layer (`--dev`). Returns true when the byte belongs
     /// to the chrome, i.e. must not reach the remote desktop.
     var onChromeKey: ((UInt8) -> Bool)?
-    /// A click outside the picture, in 1-based cells: the status line and its panels.
-    var onChromeClick: ((Int, Int) -> Void)?
+    /// A click outside the picture, in 1-based cells: the status line and its panels, and — with
+    /// `--wall` — the whole pane, which has no picture at all. The flag is `report.isWheel`: a wall
+    /// click is a click on a control, and a wheel report over it must not enter anything, so the
+    /// receiver has to be able to tell the two apart.
+    var onChromeClick: ((Int, Int, Bool) -> Void)?
 
     /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
     /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
@@ -264,9 +267,14 @@ final class InputReader {
         let spot: String
         if pixelMouse {
             guard viewport.contains(pixel: cx, cy) else {
-                if !motion, let click = onChromeClick {
+                // Press only: a release is the same click again, and the wall's bar *steps* per
+                // click (`cardStep(per)`), so delivering both would move two pages for one click.
+                // The chrome path opened a panel twice before this and that was invisible, because
+                // opening an already-open panel is a no-op.
+                if !motion, !report.isRelease, let click = onChromeClick {
                     let cell = TermGeometry.read().cellSize
-                    click(Int(Double(cy) / max(cell.h, 1)) + 1, Int(Double(cx) / max(cell.w, 1)) + 1)
+                    click(Int(Double(cy) / max(cell.h, 1)) + 1, Int(Double(cx) / max(cell.w, 1)) + 1,
+                          report.isWheel)
                 }
                 if !motion { downButton = nil }
                 return
@@ -275,7 +283,7 @@ final class InputReader {
             spot = "px(\(cx),\(cy))"
         } else {
             guard viewport.contains(cell: cx, cy) else {
-                if !motion { onChromeClick?(cy, cx) }
+                if !motion, !report.isRelease { onChromeClick?(cy, cx, report.isWheel) }
                 if !motion { downButton = nil }
                 return
             }

@@ -169,8 +169,10 @@ struct WallState: Equatable {
 /// 3. **Nothing above row 1.** The clamp is `max(0, …)`, never a negative row.
 /// 4. **Per-cell diff against the previous grid.** An unchanged wall emits zero bytes (that is
 ///    also "0 B/s when nothing moves"); a resize, or `invalidate()`, drops the previous grid and
-///    the next draw is a full repaint. Trail of blanks is trimmed and changed cells are merged
-///    into runs while they stay contiguous, so a redraw costs one escape per row, not per cell.
+///    the next draw is a full repaint. A trailing blank is trimmed *only* when the previous grid
+///    already had a blank in that cell (see `render`: trimming a blank over an old glyph is how a
+///    shrinking line leaves its tail on the terminal), and changed cells are merged into runs while
+///    they stay contiguous, so a redraw costs one escape per row, not per cell.
 ///
 /// ## Why a second cell grid instead of reusing `Chrome` (contract §5.5)
 ///
@@ -387,10 +389,17 @@ final class WallCanvas {
                   limit: max(0, budget - used))
     }
 
-    /// The card boxes of this page: a dim frame, then (top aligned, only what fits) the app, the
-    /// title and the size. `cardH` may be as small as 3, i.e. a single interior row — then only the
-    /// app line is drawn, because a box with its second line missing still reads as a panel, while
-    /// a squeezed one that overwrites its own border does not.
+    /// The card boxes of this page: a dim frame, then as many of the three lines (app, title, size)
+    /// as fit, vertically centred in the interior.
+    ///
+    /// Centred, not top aligned, because what phase 1 draws here is the §4 *mask*, not the picture:
+    /// the common card is 44x14, i.e. a 12-row interior, and three lines hanging under the top
+    /// border read as an empty panel that happens to have some text in it. The picture the capture
+    /// phase paints into exactly this rect will be centred, so the text is too — nothing jumps when
+    /// it arrives. An interior of 1 or 2 rows has no room to centre and keeps the block at the top
+    /// (`max(0, …)`), and `cardH < 3` is no card at all: the frame itself needs three rows, so such
+    /// a rect never reaches here. A squeezed box still keeps its first lines and never overwrites a
+    /// border.
     private func drawCards(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
         for (slot, rect) in layout.cards.enumerated() {
             guard !rect.isEmpty, rect.rows >= 3, rect.cols >= 2 else { continue }
@@ -402,31 +411,28 @@ final class WallCanvas {
             let inner = rect.cols - 4              // one blank cell inside each border
             guard inner >= 1 else { continue }
             let col = rect.col + 2
-            let last = rect.maxRow - 1              // the row above the bottom border
-            var row = rect.row + 1
 
-            grid.text(DisplayWidth.truncate("\(symbols.window) \(window.app)", to: inner),
-                      row: row, col: col, .bright, limit: inner)
-            row += 1
-
-            if row <= last {
-                if let title = wallTitle(window) {
-                    grid.text(DisplayWidth.truncate(title, to: inner), row: row, col: col,
-                              .plain, limit: inner)
-                } else {
-                    // No screen-recording grant (or a window without a name) degrades to a
-                    // position, which is still a label the user can tell apart (design §3).
-                    grid.text(DisplayWidth.truncate("window \(index + 1)", to: inner),
-                              row: row, col: col, .dim, limit: inner)
-                }
-                row += 1
+            // The block is built first so it can be positioned as a whole.
+            var lines: [(text: String, style: Chrome.Style)] = [
+                (DisplayWidth.truncate("\(symbols.window) \(window.app)", to: inner), .bright),
+            ]
+            if let title = wallTitle(window) {
+                lines.append((DisplayWidth.truncate(title, to: inner), .plain))
+            } else {
+                // No screen-recording grant (or a window without a name) degrades to a position,
+                // which is still a label the user can tell apart (design §3).
+                lines.append((DisplayWidth.truncate("window \(index + 1)", to: inner), .dim))
             }
+            lines.append((DisplayWidth.truncate("\(pixels(window.bounds.width))\(symbols.times)"
+                                                + "\(pixels(window.bounds.height))",
+                                                to: inner), .dim))
 
-            if row <= last {
-                let size = "\(pixels(window.bounds.width))\(symbols.times)"
-                    + "\(pixels(window.bounds.height))"
-                grid.text(DisplayWidth.truncate(size, to: inner), row: row, col: col, .dim,
-                          limit: inner)
+            let interior = rect.rows - 2           // rows between the two borders
+            let shown = lines.prefix(max(0, interior))
+            var row = rect.row + 1 + max(0, (interior - shown.count) / 2)
+            for line in shown {
+                grid.text(line.text, row: row, col: col, line.style, limit: inner)
+                row += 1
             }
         }
     }
@@ -477,13 +483,18 @@ final class WallCanvas {
     /// segment can actually move — a dead end is dim and inert (design §5), so there is no `▲` that
     /// swallows a click.
     ///
-    /// The caps are the three positions §2C enumerates: above the display segment (on the header
-    /// row), below it (on the stage caption row), and below the card segment (on the card caption
-    /// row; row 0 == "there is no card band", and the grid never writes row 0).
+    /// The caps are the four positions the design asks for: above the display segment (header row),
+    /// below it (stage caption row), above the card segment (band header row) and below that one
+    /// (card caption row; no card band → nothing there, the grid never writes row 0).
+    ///
+    /// The band-row cap is what makes the two segments *two*: §6 breaks them with `╵` / `╷`, and
+    /// with only the stage's bottom cap the shafts would read as one bar running from the header to
+    /// the cards, leaving the `▣ recent` row unpainted where the mockup has a `╷`.
     private func drawBar(_ grid: inout Grid, layout: WallLayout) {
         let col = layout.barCol
         grid.set(row: layout.headerRow, col: col, glyph(symbols.capTop), .dim)
         grid.set(row: layout.stageCaption.row, col: col, glyph(symbols.capBottom), .dim)
+        grid.set(row: layout.bandRow, col: col, glyph(symbols.capTop), .dim)
         if let first = layout.cardCaptions.first {
             grid.set(row: first.row, col: col, glyph(symbols.capBottom), .dim)
         }
@@ -582,6 +593,14 @@ final class WallCanvas {
 
     // MARK: diff renderer
 
+    /// True when the pane already shows `cells[i]`: either there is no previous grid (a full
+    /// repaint) or `prev` holds that very cell there. Equality is the whole test — the cell that is
+    /// blank now must have been that same blank before for a trailing trim to be a no-op on screen.
+    private func showsAlready(_ old: [Cell]?, at i: Int, _ cells: [Cell]) -> Bool {
+        guard let old, old.count == cells.count else { return true }
+        return old[i] == cells[i]
+    }
+
     /// Positioned writes for the cells that changed. No newline, no `(rows, cols)`, no row above 1.
     private func render(_ cells: [Cell], cols: Int, rows: Int) -> [UInt8] {
         if cols != self.cols || rows != self.rows {
@@ -611,8 +630,16 @@ final class WallCanvas {
                     end += 1
                 }
                 while end > x, cells[y * cols + end - 1].ch == " ",
-                      !cells[y * cols + end - 1].continuation {
-                    end -= 1                    // trailing blanks are already blank: do not send them
+                      !cells[y * cols + end - 1].continuation,
+                      showsAlready(old, at: y * cols + end - 1, cells) {
+                    // A trailing blank is dropped only when the pane *already* shows a blank there.
+                    // On a full repaint (`old == nil`) that is every one of them, which is what keeps
+                    // the dumps small. On a diff it is what makes a line that got shorter erase
+                    // itself: the cells past the new text held glyphs in the previous grid, so
+                    // trimming them drops the only bytes that would paint over those glyphs — the
+                    // old text then survives on the terminal while `lines`, the diff and the byte
+                    // count all look right. That is a silent stale-glyph bug, not an optimisation.
+                    end -= 1
                 }
                 if y == max(0, rows) - 1 {
                     end = min(end, cols - 1)    // never arm pending-wrap on the final cell

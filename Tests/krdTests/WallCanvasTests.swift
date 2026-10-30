@@ -13,8 +13,9 @@ import krdcore
 ///
 /// What the four fixtures pin, so a later diff is explainable: the header, the stage box and its
 /// centred label, the stage caption, the band header with its right-aligned `⤢ n`, three card boxes
-/// (top-aligned app / title / size inside a fixed frame), three captions, the footer with its
-/// right-aligned panel count, both bar segments with their arrows, thumb and caps — as bytes, i.e.
+/// (the app / title / size block centred in the frame, as many lines as fit), three captions, the
+/// footer with its right-aligned panel count, both bar segments with their arrows, thumb and caps
+/// (including the `╵`/`╷` break between the segments on the band row) — as bytes, i.e.
 /// the cursor moves, the SGR choices and the trailing-blank trimming included, at a wide pane
 /// (137x44: 3 cards of 44 cells and a 24-row stage) and a narrow one (60x24: 18-cell cards and a
 /// 12-row stage) in both symbol modes. A change to *any* string template, style, position or
@@ -187,7 +188,12 @@ final class WallCanvasTests: XCTestCase {
         XCTAssertTrue(touched.isSubset(of: allowed),
                       "rows outside card 1 were repainted: \(touched.sorted())")
         // And the two rows that actually changed: the title line inside the box, the caption.
-        XCTAssertEqual(touched, Set([card.row + 2, layout.cardCaptions[1].row]))
+        // The block of three lines is centred in the interior (the phase-1 mask is centred in its
+        // rect), so in the 14-row card of the 137x44 golden — a 12-row interior — it starts on the
+        // fifth interior row: app at `row + 5`, title at `row + 6`, size at `row + 7`. Top alignment
+        // would have made the title `row + 2`, which is no longer where the painter puts it.
+        XCTAssertEqual(card.rows, 14, "this test reasons about the 14-row card of the 137x44 golden")
+        XCTAssertEqual(touched, Set([card.row + 6, layout.cardCaptions[1].row]))
         XCTAssertFalse(bytes.contains(0x0A))
     }
 
@@ -268,6 +274,114 @@ final class WallCanvasTests: XCTestCase {
         }
     }
 
+    // MARK: a line that shrinks must erase what it used to say
+
+    /// The bug these three tests exist for: the diff renderer trims trailing blanks from a changed
+    /// run, and as long as it trims them **unconditionally** it also drops the blanks that are there
+    /// to *overwrite* the previous frame. Nothing in a single draw can see that — `lines` is right
+    /// and the bytes look plausible — so every case replays the second stream onto the pane the
+    /// first one left behind, which is the only grid that still holds those glyphs.
+    ///
+    /// The footer is the live reproduction: a pick turns it into `⬅ 🖥 back · picked … · the mirror
+    /// follows in the capture phase`, `back` (`focus: nil`) turns it into the short landing line, and
+    /// the tail of the picked sentence has to be painted over with blanks.
+    func testALineThatShrinksErasesItsOldTail() {
+        var picked = fixtureState()
+        picked.focus = .window(2)
+        let cases: [(String, (model: WallModel, state: WallState),
+                     (model: WallModel, state: WallState))] = [
+            ("footer: picked -> nothing picked",
+             (model(), picked), (model(), fixtureState())),
+            // The reverse direction is the same codepath (a run of new cells) and must agree with
+            // `lines` too: a line that *grows* writes its whole length, no trimming involved.
+            ("footer: nothing picked -> picked",
+             (model(), fixtureState()), (model(), picked)),
+        ]
+        for (label, first, second) in cases {
+            assertTwoDrawsMatchThePane(label, first: first, second: second, cols: 137, rows: 44)
+        }
+    }
+
+    /// The same shape one level down: the same window count, only window 0's title gets shorter, so
+    /// the card's title line, the card caption under it and the title inside the picked footer all
+    /// end earlier than the text the pane is showing.
+    func testATitleThatShrinksErasesTheOldTitle() {
+        var short = model()
+        short.windows[0] = retitled(short.windows[0], "π")
+        var picked = fixtureState()
+        picked.focus = .window(0)
+        let cases: [(String, (model: WallModel, state: WallState),
+                     (model: WallModel, state: WallState))] = [
+            ("title: long -> short", (model(), fixtureState()), (short, fixtureState())),
+            ("title: short -> long", (short, fixtureState()), (model(), fixtureState())),
+            ("picked title: long -> short", (model(), picked), (short, picked)),
+            ("picked title: short -> long", (short, picked), (model(), picked)),
+        ]
+        for (label, first, second) in cases {
+            assertTwoDrawsMatchThePane(label, first: first, second: second, cols: 137, rows: 44)
+        }
+    }
+
+    /// And the band's own label: `▣ recent    1–3 / 7` shrinks to `1–2 / 2` when windows close, and
+    /// the third card (frame, centred text, caption) disappears entirely — the widest case of "the
+    /// cells that used to hold glyphs are blank in the new grid".
+    func testAWindowListThatShrinksErasesTheGoneCard() {
+        var small = model()
+        small.windows = Array(small.windows.prefix(2))
+        let cases: [(String, (model: WallModel, state: WallState),
+                     (model: WallModel, state: WallState))] = [
+            ("windows: 7 -> 2", (model(), fixtureState()), (small, fixtureState())),
+            ("windows: 2 -> 7", (small, fixtureState()), (model(), fixtureState())),
+        ]
+        for (label, first, second) in cases {
+            assertTwoDrawsMatchThePane(label, first: first, second: second, cols: 137, rows: 44)
+        }
+        // The 60x24 geometry too: there the stage and the cards are squeezed, so the shrink has to
+        // erase part of a card instead of a whole one.
+        for (label, first, second) in cases {
+            assertTwoDrawsMatchThePane("60x24 " + label, first: first, second: second,
+                                       cols: 60, rows: 24)
+        }
+    }
+
+    /// Draw `first` and then `second` on one canvas, and require the *pane* to end up on `second`.
+    ///
+    /// The second assertion is the whole point: the second stream is replayed onto the grid the first
+    /// one left, not onto a blank one, and it must reproduce `lines` cell for cell. A trimmed blank
+    /// that the previous grid had filled with a glyph fails here and nowhere else.
+    private func assertTwoDrawsMatchThePane(_ label: String,
+                                            first: (model: WallModel, state: WallState),
+                                            second: (model: WallModel, state: WallState),
+                                            cols: Int, rows: Int,
+                                            file: StaticString = #filePath, line: UInt = #line) {
+        let canvas = WallCanvas()
+        let a = paint(canvas, first, cols: cols, rows: rows)
+        let b = paint(canvas, second, cols: cols, rows: rows)
+        XCTAssertFalse(a.bytes.isEmpty,
+                       "\(label): the first draw is a full repaint", file: file, line: line)
+        XCTAssertEqual(replay(a.bytes, cols: cols, rows: rows), a.lines,
+                       "\(label): the first stream does not reproduce the first frame",
+                       file: file, line: line)
+        XCTAssertNotEqual(a.lines, b.lines,
+                          "\(label): the two frames are identical, so the case proves nothing",
+                          file: file, line: line)
+        XCTAssertFalse(b.bytes.isEmpty,
+                       "\(label): a changed wall has to emit something", file: file, line: line)
+        XCTAssertEqual(replay([a.bytes, b.bytes], cols: cols, rows: rows), b.lines,
+                       "\(label): the second draw left the first frame's glyphs on the pane",
+                       file: file, line: line)
+    }
+
+    /// One `draw` plus the `lines` of the *same* frame, from the same layout.
+    private func paint(_ canvas: WallCanvas, _ frame: (model: WallModel, state: WallState),
+                       cols: Int, rows: Int) -> (bytes: [UInt8], lines: [String]) {
+        let layout = makeLayout(frame.state, cols: cols, rows: rows, frame.model)
+        return (canvas.draw(cols: cols, rows: rows, model: frame.model, layout: layout,
+                            focus: frame.state.focus),
+                canvas.lines(cols: cols, rows: rows, model: frame.model, layout: layout,
+                             focus: frame.state.focus))
+    }
+
     /// The two `focus` footers are the only strings the goldens cannot reach (the fixtures have
     /// `focus == nil`), so they are pinned here: a pick rewrites the footer row and nothing else.
     func testTheFocusFooterIsOneRowAndSaysWhatWasPicked() {
@@ -288,6 +402,98 @@ final class WallCanvasTests: XCTestCase {
             XCTAssertTrue(footer.contains(wanted), "\(focus): footer is \(footer.debugDescription)")
             XCTAssertTrue(footer.contains("back"), "\(focus): no way back in \(footer.debugDescription)")
             XCTAssertEqual(DisplayWidth.of(footer), cols)
+        }
+    }
+
+    // MARK: the two polish items the mockup asked for
+
+    /// Design §6 breaks the bar between its two segments (`中间用 ╵/╷ 断开`): `╵` closes the display
+    /// segment on the stage caption row and `╷` opens the card segment on the band header row, with
+    /// `╷` above the display segment and `╵` under the cards. The band row used to draw nothing, so
+    /// the two shafts read as one continuous bar down the pane.
+    func testTheBarBreaksBetweenItsTwoSegments() {
+        let model = model()
+        for c in geometries {
+            for symbols in WallSymbols.allCases {
+                let layout = makeLayout(fixtureState(), cols: c.cols, rows: c.rows, model)
+                let lines = WallCanvas(symbols: symbols).lines(cols: c.cols, rows: c.rows,
+                                                               model: model, layout: layout,
+                                                               focus: nil)
+                // The bar owns the last column, and every glyph in it is one cell wide, so the last
+                // character of a row is that row's bar cell (`lines` drops style; the goldens pin
+                // the `.dim` SGR).
+                let caps: [(row: Int, glyph: String)] = [
+                    (layout.headerRow, symbols.capTop),
+                    (layout.stageCaption.row, symbols.capBottom),
+                    (layout.bandRow, symbols.capTop),
+                    (layout.cardCaptions[0].row, symbols.capBottom),
+                ]
+                for cap in caps {
+                    XCTAssertEqual(lines[cap.row - 1].last, cap.glyph.first,
+                                   "\(c.cols)x\(c.rows) \(symbols.rawValue): cell "
+                                   + "(\(cap.row),\(layout.barCol)) is not \(cap.glyph)")
+                }
+            }
+        }
+    }
+
+    /// The three lines are centred in the card's interior, because what phase 1 draws there is the
+    /// §4 mask (centred in its rectangle), not the picture yet. Two things must not change with it:
+    /// an interior with no room to centre keeps the block at the top, and a squeezed card keeps only
+    /// the lines that fit.
+    func testTheCardTextBlockIsCentredInItsInterior() {
+        let model = model()
+        let symbols = WallSymbols.emoji
+        let canvas = WallCanvas(symbols: symbols)
+
+        // The common card: 44x14, i.e. a 12-row interior for three lines. 12 - 3 = 9, so the block
+        // starts four rows down and app / title / size land on the fifth, sixth and seventh
+        // interior row — four blank rows above it and five below.
+        let wide = makeLayout(fixtureState(), cols: 137, rows: 44, model)
+        let lines = canvas.lines(cols: 137, rows: 44, model: model, layout: wide, focus: nil)
+        let card = wide.cards[0]
+        XCTAssertEqual(card.cols, 44)
+        XCTAssertEqual(card.rows, 14)
+        XCTAssertTrue(cardInterior(lines, row: card.row + 5, card)
+                        .hasPrefix("\(symbols.window) Brave Browser"),
+                      "the app line leads the block, at the block's left edge")
+        XCTAssertTrue(cardInterior(lines, row: card.row + 6, card).hasPrefix("「沒有人知道"),
+                      "the title is the block's second line")
+        XCTAssertTrue(cardInterior(lines, row: card.row + 7, card)
+                        .hasPrefix("1452\(symbols.times)1050"),
+                      "the size is the block's third line")
+        for row in (card.row + 1)...(card.row + 4) {
+            XCTAssertEqual(cardInterior(lines, row: row, card), blankInterior(card),
+                           "row \(row) is above the centred block and has to be empty")
+        }
+        for row in (card.row + 8)...(card.maxRow - 1) {
+            XCTAssertEqual(cardInterior(lines, row: row, card), blankInterior(card),
+                           "row \(row) is below the centred block and has to be empty")
+        }
+
+        // No room to centre: a 4-row card (2 interior rows) still starts at the top, and a 3-row
+        // card (1 interior row) draws only the app line. Both are today's behaviour, kept on
+        // purpose — the mask has to fill the short frame, not float in it.
+        for (rows, cardH, shown) in [(13, 4, 2), (12, 3, 1)] {
+            let small = makeLayout(fixtureState(), cols: 60, rows: rows, model)
+            let smallLines = canvas.lines(cols: 60, rows: rows, model: model, layout: small,
+                                          focus: nil)
+            let box = small.cards[0]
+            XCTAssertEqual(box.rows, cardH, "60x\(rows): card height")
+            XCTAssertTrue(cardInterior(smallLines, row: box.row + 1, box)
+                            .hasPrefix("\(symbols.window) Brave"),
+                          "60x\(rows): the app line stays on the first interior row")
+            if shown == 2 {
+                XCTAssertTrue(cardInterior(smallLines, row: box.row + 2, box)
+                                .hasPrefix("「沒有人知道"),
+                              "60x\(rows): the title takes the second and last interior row")
+                XCTAssertFalse(cardInterior(smallLines, row: box.row + 2, box)
+                                .contains("1452"),
+                               "60x\(rows): the size line does not fit and must not be squeezed in")
+            } else {
+                XCTAssertTrue(smallLines[box.maxRow - 1].hasPrefix(symbols.boxBL),
+                              "60x\(rows): the row under the app line is the card's bottom border")
+            }
         }
     }
 
@@ -443,41 +649,71 @@ final class WallCanvasTests: XCTestCase {
         return out
     }
 
-    /// Replay a byte stream onto a blank pane and read it out again. It understands exactly what
-    /// the painter emits — `ESC[<row>;<col>H`, `ESC[<sgr>m` (styles ignored: the goldens are what
-    /// pin them) and UTF-8 text — and it reads the cursor after every write, so it is an
-    /// independent second opinion on both the positions and the wide-glyph cells.
+    /// The text cells of a card on `row`: inside the two borders *and* the one blank cell each side
+    /// keeps, i.e. exactly `rect.cols - 4` characters. The callers only ask this about card 0, which
+    /// starts at column 1, so no wide glyph to its left can shift the character indexing (inside the
+    /// frame there is either one block of text or nothing).
+    private func cardInterior(_ lines: [String], row: Int, _ rect: CellRect) -> String {
+        let chars = Array(lines[row - 1])
+        let lo = rect.col + 1, hi = rect.maxCol - 3
+        guard hi >= lo, chars.count > hi else { return "" }
+        return String(chars[lo...hi])
+    }
+
+    /// What `cardInterior` reads for an empty one, so "blank" is a comparison and not an absence.
+    private func blankInterior(_ rect: CellRect) -> String {
+        String(repeating: " ", count: max(0, rect.cols - 4))
+    }
+
+    /// Replay a byte stream onto a blank pane and read it out again.
     private func replay(_ bytes: [UInt8], cols: Int, rows: Int) -> [String] {
+        replay([bytes], cols: cols, rows: rows)
+    }
+
+    /// Replay a *sequence* of streams onto **one** pane and read the grid out only after the last
+    /// one — a terminal that drew two frames keeps whatever the second stream forgot to overwrite.
+    /// It understands exactly what the painter emits — `ESC[<row>;<col>H`, `ESC[<sgr>m` (styles
+    /// ignored: the goldens are what pin them) and UTF-8 text — and it reads the cursor after every
+    /// write, so it is an independent second opinion on both the positions and the wide-glyph cells.
+    /// The cursor survives from one stream to the next, like a terminal's.
+    private func replay(_ streams: [[UInt8]], cols: Int, rows: Int) -> [String] {
         var cells = [Character](repeating: " ", count: cols * rows)
         /// True for the second cell of a wide glyph: it is covered by the character before it.
         var covered = [Bool](repeating: false, count: cols * rows)
         var row = 1, col = 1
-        var i = 0
-        while i < bytes.count {
-            if bytes[i] == 0x1B, i + 1 < bytes.count, bytes[i + 1] == 0x5B {
-                var j = i + 2
-                while j < bytes.count, !(bytes[j] >= 0x40 && bytes[j] <= 0x7E) { j += 1 }
-                if j < bytes.count, bytes[j] == UInt8(ascii: "H") {
-                    let params = String(decoding: bytes[(i + 2)..<j], as: UTF8.self)
-                    let parts = params.split(separator: ";").compactMap { Int($0) }
-                    if parts.count == 2 { row = parts[0]; col = parts[1] }
+        for bytes in streams {
+            var i = 0
+            while i < bytes.count {
+                if bytes[i] == 0x1B, i + 1 < bytes.count, bytes[i + 1] == 0x5B {
+                    var j = i + 2
+                    while j < bytes.count, !(bytes[j] >= 0x40 && bytes[j] <= 0x7E) { j += 1 }
+                    if j < bytes.count, bytes[j] == UInt8(ascii: "H") {
+                        let params = String(decoding: bytes[(i + 2)..<j], as: UTF8.self)
+                        let parts = params.split(separator: ";").compactMap { Int($0) }
+                        if parts.count == 2 { row = parts[0]; col = parts[1] }
+                    }
+                    i = j + 1
+                    continue
                 }
-                i = j + 1
-                continue
+                // One run of text: up to the next escape. Decoded as a whole so a multi-byte (or
+                // multi-scalar) character stays in one piece.
+                var j = i
+                while j < bytes.count, bytes[j] != 0x1B { j += 1 }
+                for ch in String(decoding: bytes[i..<j], as: UTF8.self) {
+                    let width = DisplayWidth.of(ch)
+                    if width == 0 { continue }
+                    guard row >= 1, row <= rows, col >= 1, col + width - 1 <= cols else { continue }
+                    cells[(row - 1) * cols + (col - 1)] = ch
+                    // Writing into a cell un-covers it: on a second frame the pane may still have a
+                    // wide glyph's continuation cell here, and a stale flag would hide the glyph
+                    // this stream just put there (the painter always writes both halves of a wide
+                    // glyph it erases, so the flag is cleared by the write, not by the readout).
+                    covered[(row - 1) * cols + (col - 1)] = false
+                    if width == 2 { covered[(row - 1) * cols + col] = true }
+                    col += width
+                }
+                i = j
             }
-            // One run of text: up to the next escape. Decoded as a whole so a multi-byte (or
-            // multi-scalar) character stays in one piece.
-            var j = i
-            while j < bytes.count, bytes[j] != 0x1B { j += 1 }
-            for ch in String(decoding: bytes[i..<j], as: UTF8.self) {
-                let width = DisplayWidth.of(ch)
-                if width == 0 { continue }
-                guard row >= 1, row <= rows, col >= 1, col + width - 1 <= cols else { continue }
-                cells[(row - 1) * cols + (col - 1)] = ch
-                if width == 2 { covered[(row - 1) * cols + col] = true }
-                col += width
-            }
-            i = j
         }
         var out: [String] = []
         for y in 0..<max(0, rows) {
