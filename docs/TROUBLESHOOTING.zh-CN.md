@@ -93,8 +93,11 @@ placement 可能永远没被提交。
 **根因。** `TIOCGWINSZ` 的 `ws_xpixel`/`ws_ypixel` 返回 0（sshd 建的 pty、还没布局的 pane 都是这样），
 单元格尺寸只能靠猜。
 **对策。** 三级回退：`CSI 16 t` + `CSI 14 t` 查询（250 ms）→ stdout/stdin/`/dev/tty` 的 `TIOCGWINSZ`
-→ `--cell <w>x<h>`（默认 `8x20`）。如果你的终端两个查询都不答，就把真实单元格尺寸显式传进去，比如
-`--cell 17x33`。
+→ `--cell <w>x<h>`（默认 `8x20`）。终端**只**答 `CSI 14 t`（窗口像素）也够用：单元格按「窗口 ÷ 网格」
+推导出来，画面依然和 pane 精确对齐（issue #56 —— 在此之前这种终端会被当成「什么都没答」，80×24 的
+pane 出图 640×480）。`--debug` 会写明答的是哪一个问题：
+`krd: geometry source CSI 16t+14t`、`CSI 14t (cell derived)`、`--cell` 或 `TIOCGWINSZ`。两个查询都不答时，日志会把后果说清楚（`the image will be WxH for a CxR pane`），
+这时再显式传真实单元格尺寸，比如 `--cell 17x33`。
 
 ### 11. 启动就卡住：一个字都不输出，进程干等
 
