@@ -822,5 +822,46 @@ final class WallCanvasTests: XCTestCase {
         XCTAssertEqual(WallCanvas.fittedRect(aspect: 0, inside: band, cellW: 17, cellH: 33), band)
         XCTAssertEqual(WallCanvas.fittedRect(aspect: 1.6, inside: band, cellW: 0, cellH: 0), band)
     }
+
+    /// The fallback contract: a slot whose capture failed draws the mask **on the same rectangle**
+    /// the picture would have filled, and the caption row still names the thing.
+    ///
+    /// This is the half of "picture or mask, never a reflow" that can be asserted without a screen.
+    /// The other half — a real failed capture reaching this state — is `PanelCapture.classify` plus
+    /// one `catch` in `paintWall`; the case a reader actually hits (a window closed) is not even a
+    /// mask: the window leaves the model and the next one takes the card.
+    func testAPictureSlotLeavesItsCellsEmptyAndAMaskKeepsTheRect() {
+        let model = WallModel(displays: [WallDisplay(name: "Built-in", width: 1512, height: 982,
+                                                     id: 1, main: true)],
+                              windows: [OrderedWindow(windowID: 11, pid: 1, app: "Safari",
+                                                      title: "Apple", bounds: .init(x: 0, y: 0,
+                                                                                    width: 1200, height: 800)),
+                                        OrderedWindow(windowID: 12, pid: 2, app: "Notes",
+                                                      title: "Memo", bounds: .init(x: 0, y: 0,
+                                                                                  width: 900, height: 640))])
+        let layout = WallLayout.make(paneCols: 137, paneRows: 44, displayCount: 1,
+                                     windowCount: 2, per: 3, stageStart: 0, cardStart: 0)
+        let canvas = WallCanvas(symbols: .emoji)
+
+        // A picture in the stage: nothing of the placeholder survives inside the rect.
+        var picturePaints = WallSlotPaints()
+        picturePaints.mark(slot: 0, .picture)
+        let pictured = canvas.lines(cols: 137, rows: 44, model: model, layout: layout,
+                                    focus: nil, cellW: 17, cellH: 33, paints: picturePaints)
+        // `lines` is 0-based, the layout is 1-based: index by row - 1, the way the rest of this
+        // suite does.
+        let stageRows = pictured[(layout.stage.row - 1)..<layout.stage.maxRow]
+        XCTAssertFalse(stageRows.joined().contains("Built-in"), "no text under a placement")
+
+        // A mask in the stage: the rect is still a box, and it says why it is empty.
+        var maskPaints = WallSlotPaints()
+        maskPaints.mark(slot: 0, .mask)
+        let masked = canvas.lines(cols: 137, rows: 44, model: model, layout: layout,
+                                  focus: nil, cellW: 17, cellH: 33, paints: maskPaints)
+        let maskRows = masked[(layout.stage.row - 1)..<layout.stage.maxRow]
+        XCTAssertTrue(maskRows.joined().contains("no picture"))
+        // The caption row keeps naming the display, so only the pixels are lost.
+        XCTAssertTrue(masked[layout.stageCaption.row - 1].contains("Built-in"))
+    }
 }
 

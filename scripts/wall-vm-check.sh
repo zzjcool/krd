@@ -116,12 +116,17 @@ bytes=$(wc -c <"$RAW" | tr -d ' ')
 [ "$bytes" -gt 0 ] || die "the wall painted nothing ($RAW is empty)"
 header=no; if grep -qa 'krd' "$RAW"; then header=yes; fi
 footer=no; if grep -qa 'click a card' "$RAW"; then footer=yes; fi
+# Pictures travel as APC (ESC _ G ... ESC \), one `a=t` per image. Counted, not grepped for the
+# payload: a wall with no pictures still looks like a wall, and that is exactly the regression this
+# line exists to catch (the first live run painted a perfect wall with zero images in it).
+images=$(tr -d '\000' <"$RAW" | tr -c '[:print:]\n' '\n' | grep -o 'a=t' | wc -l | tr -d ' ')
 # Distinct SGR sequences are the cheapest honest signal that styles survived the run.
 esc=$(printf '\033')
 sgr=$(grep -ao "$esc\[[0-9;]*m" "$RAW" | sort -u | wc -l | tr -d ' ')
 printf '    bytes        : %s\n' "$bytes"
 printf '    header "krd" : %s\n' "$header"
 printf '    footer       : %s (phrase "click a card", %s glyphs)\n' "$footer" "$symbols"
+printf '    pictures     : %s image(s) transmitted (a=t)\n' "$images"
 printf '    distinct SGR : %s\n' "$sgr"
 printf '    raw bytes    : %s\n' "$RAW"
 
@@ -136,4 +141,5 @@ else
 fi
 
 [ "$header" = yes ] || die "the header word 'krd' is missing: the wall is not painting its header"
-say "ok: the wall painted $bytes bytes, header present, screenshot: $PNG"
+[ "$images" -gt 0 ] || say "    note: no pictures - either nothing is on screen, or capture failed (masks)"
+say "ok: the wall painted $bytes bytes, $images picture(s), header present, screenshot: $PNG"
