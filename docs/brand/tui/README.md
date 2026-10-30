@@ -16,6 +16,7 @@ node logo-tui.mjs --banner        # --help 用的 5 行大写字标
 node logo-tui.mjs --art           # 46×23 的字符版寄居蟹（README / demo）
 node logo-tui.mjs --favicon x.svg --px 32
 node logo-tui.mjs --shot out.html --cols 116 --rows 38 --animal hermit
+node logo-tui.mjs --png ../../media/mascot.png --animal hermit --trim   # 只画蟹，裁到墨边
 ```
 
 零依赖，一个文件。造型在 `ANIMALS[].draw()` 里，改一处两种渲染一起变。
