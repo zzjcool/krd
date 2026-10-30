@@ -31,6 +31,11 @@ kagent --target host doctor        # the host's own capabilities
 kagent doctor                      # the VM's
 ```
 
+The VM runs its **own copy** of krd at `~/bin/krd` (`kagent doctor` reports how old the *local*
+`.build/release/krd` is, which is a different file). So a build in this checkout is always
+`--target host`, and a run against the deployed binary is always `--target vm ... '~/bin/krd'`. A
+local path with the default target fails loudly rather than turning into "0 frames decoded".
+
 ## The five capabilities
 
 ### 1. An eye
@@ -64,6 +69,10 @@ kagent set @e14 --text "hello"       # write AXValue, then read it back
 
 A text screen is a few hundred tokens where a frame is ~100 KB, and unlike pixels it can be asserted
 on. Use it first; use `see` when the question is about the picture.
+
+Refs (`@e481`) are numbered per dump, so they cannot be cross-referenced between two commands — one
+`press @e481` each, in the same invocation that printed it. Roles print short (`button`), not
+`AXButton`.
 
 ### 3. Hands
 
@@ -106,8 +115,14 @@ Every predicate answers three ways, and the exit code carries the difference:
 "Could not look" must never be reported as "is not there". That rule is the reason for exit 5.
 
 Predicate strings: `element:role:text`, `noelement:…`, `window:text`, `nowindow:…`,
-`pixel:x,y=#rrggbb`, `same:NAME`, `diff:NAME`, `shell:cmd`, `file:path`, `app:name`.
+`pixel:x,y=#rrggbb`, `same:NAME`, `diff:NAME`, `changed`, `shell:cmd`, `file:path`, `app:name`.
 A bare word is `element:*:word`.
+
+`same:`/`diff:` compare a **32x24 block signature** with a 1% tolerance (`--tolerance`), not an exact
+hash: a blinking caret changes the hash of a screen a person would call identical, and a predicate
+that fires on a caret teaches you to ignore it. `changed` with no argument means "since the last
+frame this run took". The frame `see --as NAME` wrote and the `same:NAME` that reads it must live in
+the same `--run` (both default to `latest`).
 
 ### 5. Pixels without a terminal
 
@@ -116,19 +131,31 @@ would draw. No screen, no permission, no terminal — which is how a rendering c
 locked machine, and in CI.
 
 ```bash
-kagent render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+kagent --target host render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
 kagent render --target vm --pane 146x46 --cell 17x33 -- '~/bin/krd' --wall
+
 kagent vt render /tmp/stream.vt --png /tmp/frame      # a stream captured elsewhere
+kagent vt text artifacts/<run>/vt.vt --grep demo      # the text layer: footers, status lines
 kagent vt runs /tmp/pane.vt                          # placeholder cell rects, from a text capture
 ```
 
 `render` runs the command on a pty sized exactly as asked, answers the terminal probes krd sends
 (`U=1` placement, DSR, cell size) the way Rex does — otherwise krd measures a different code path —
-and reports, per picture:
+and reports one line per picture:
 
 ```
-cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
+frames=2  pane=2482x1518 px  pictures=4  misfits=0
+picture 1  cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
 ```
+
+`cells` is `[col, row, cols, rows]`, and `native` is what was actually transmitted, so the comparison
+is against the image the terminal was handed, not the box echoed back. The first line also says how
+the run ended: `exited 0` (krd finished) or `stopped at the 12.0s deadline` (`--seconds`, default 12,
+is how long it gets to draw before the pty closes). A run that decodes no frame is a failed
+measurement — exit 2 — unless you pass `--allow-empty`.
+
+`vt text` prints what a text capture would show, pictures as `#`, which is how a footer or a status
+line is read back without a screenshot.
 
 `--strict-fit` fails when `native` is not exactly `cells x cell`. That inequality is the seam bug
 this repo paid for twice: a 1:1 terminal leaves slivers between tiles whose pixels differ from their

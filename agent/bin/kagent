@@ -219,23 +219,32 @@ def build_parser():
     q = vt_sub.add_parser("render", help="write the frames as PNG")
     q.add_argument("stream")
     q.add_argument("--png", default=None, help="output prefix (a frame index is appended)")
-    q.add_argument("--pane", default=None, help="cols x rows (default 146x73)")
-    q.add_argument("--cell", default="17x33", help="cell size in pixels")
+    q.add_argument("--pane", default=None, help="cols x rows (default: the last row used)")
+    q.add_argument("--cell", default="17x33", help="cell size in pixels (default 17x33)")
     q.add_argument("--probe", action="append", default=[], metavar="X,Y[,RRGGBB]")
+    q = vt_sub.add_parser("text", help="print the text layer of a stream (the pictures as #)")
+    q.add_argument("stream")
+    q.add_argument("--pane", default=None, help="cols x rows (default: the last row used)")
+    q.add_argument("--grep", default=None, help="only rows containing this")
+    q.add_argument("--all", action="store_true", dest="every_row",
+                   help="keep trailing blank rows")
     q = vt_sub.add_parser("runs", help="placeholder cell rectangles per row")
     q.add_argument("stream")
     q.add_argument("--pane", default=None)
 
     p = add("render", help="run a command on a pty and decode what it drew")
-    p.add_argument("--pane", default="146x73", help="cols x rows")
-    p.add_argument("--cell", default="17x33", help="cell size in pixels")
-    p.add_argument("--seconds", type=float, default=12.0)
+    p.add_argument("--pane", default="146x73", help="cols x rows (default 146x73)")
+    p.add_argument("--cell", default="17x33", help="cell size in pixels (default 17x33)")
+    p.add_argument("--seconds", type=float, default=12.0,
+                   help="how long to let the program draw before the pty is closed (default 12)")
     p.add_argument("--png", default=None, help="PNG prefix (a frame index is appended)")
     p.add_argument("--keep-stream", action="store_true", dest="keep_stream")
     p.add_argument("--terminal", default="rex", choices=["rex", "none"],
                    help="answer kitty/DSR probes like the terminal krd targets (default rex)")
     p.add_argument("--resize", action="append", default=[], metavar="AT:COLSxROWS",
                    help="resize the pty at AT seconds, e.g. 5:100x30 (repeatable)")
+    p.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                   help="treat a stream with no frames as a pass instead of a failed measurement")
     p.add_argument("--strict-fit", action="store_true", dest="strict_fit",
                    help="fail when a picture's pixels are not exactly its cell box "
                         "(the 1:1-terminal seam bug)")
@@ -464,6 +473,12 @@ def cmd_see(args, context):
 
 
 def cmd_text(args, context):
+    if not args.app and not args.pid:
+        # "the focused app" is what a reader means by a bare `kagent text`, and krd ax refuses to
+        # guess. Do the guess here, where the intent is known, instead of making every caller type
+        # `--app` for the thing they are already looking at.
+        app, pid = perceive.focused_app(context.target)
+        args.app, args.pid = app, pid
     data = perceive.tree(context.target, app=args.app, pid=args.pid, window=args.window,
                          depth=args.depth, interactive=args.interactive, maximum=args.maximum,
                          menubar=args.menubar)
@@ -695,6 +710,28 @@ def cmd_run(args, context):
 
 
 def cmd_vt(args, context):
+    if args.vt_command == "text":
+        # The text layer is already in the stream: krd draws every row with an explicit CUP, so a
+        # footer can be read back exactly as a person would see it. Without this, "what does krd
+        # say about its own picture" needs a hand-written VT replay, which is how a check gets
+        # rewritten (and wrong) in every session.
+        stream = (sys.stdin.buffer.read() if args.stream == "-"
+                  else Path(args.stream).read_bytes())
+        screen = render.screen_of(stream, 0, 0)
+        last = max(screen) if screen else 0
+        cols, rows = render.parse_geometry(args.pane, (0, last))
+        lines = render.text_lines(stream, cols, rows or last)
+        while lines and not lines[-1].strip() and not args.every_row:
+            lines.pop()
+        kept = [(n, line) for n, line in enumerate(lines, start=1)
+                if not args.grep or args.grep in line]
+        if context.json:
+            context.emit({"rows": [{"row": n, "text": line} for n, line in kept]})
+        else:
+            for n, line in kept:
+                print("%3d|%s" % (n, line))
+        return EXIT_OK, {"rows": len(kept)}
+
     if args.vt_command == "runs":
         cols, rows = render.parse_geometry(args.pane, (146, 73))
         data = Path(args.stream).read_bytes()
@@ -763,6 +800,20 @@ def cmd_render(args, context):
     # slash, so `.build/release/krd` would be looked for in $PATH and never found.
     if not context.target.remote and ("/" in command[0] or Path(command[0]).exists()):
         command = [str(Path(command[0]).resolve())] + list(command[1:])
+    if context.target.remote and ("/" in command[0] or command[0].startswith("~")):
+        # The most expensive trap in this tool: `render -- .build/release/krd` with the default
+        # target is a path that does not exist on the VM, and all it produces is ssh saying
+        # "no such file" into a stream nobody reads, then "0 frames decoded". Say which machine the
+        # caller is thinking of.
+        asked = command[0]
+        # `~` is not expanded inside quotes, so resolve it the way the real command will be.
+        probe = context.target.run_sh("test -x %s && echo yes || echo no"
+                                      % _shquote(context.target.expand(asked)),
+                                      timeout=20).text.strip()
+        if probe != "yes":
+            raise KagentError(
+                "%s is not on the VM. A build in this checkout runs on this machine: "
+                "add `--target host`. The VM has its own copy at ~/bin/krd." % asked, EXIT_USAGE)
     local_command = command
     if context.target.remote:
         # `~` does not survive quoting, so the leading path is resolved before the command is built.
@@ -830,28 +881,49 @@ def cmd_render(args, context):
         "misfits": misfits,
         "placeholder_rects": rects,
     }
-    human = ("%s → exit %s in %.1fs, %d byte(s)\n"
-             "%d frame(s) decoded, %dx%d px, %d picture(s)\n"
-             "stream: %s"
-             % (" ".join(command), status, seconds, len(stream), len(frames),
-                frames[-1].width if frames else 0, frames[-1].height if frames else 0,
-                len(decoder.live_placements()), stream_path))
+    # What "exit" means depends on where the command ran, and saying so is the difference between
+    # "the program finished" and "the harness shot it at the deadline" -- which a reader will
+    # otherwise have to infer from a bare 255 (ssh's own teardown code) or a None.
+    if status is None or status < 0:
+        ending = "stopped at the %.1fs deadline" % args.seconds
+    elif context.target.remote and status == 255:
+        ending = "stopped at the %.1fs deadline (ssh reported 255)" % args.seconds
+    else:
+        ending = "exited %d" % status
+    asked = getattr(args, "argv", None) or command
+    echoes = " ".join(command)
+    if " ".join(asked) != echoes:
+        echoes = " ".join(asked) + "  (ran " + echoes + ")"
+    human = ["%s → %s after %.1fs, %d byte(s) of stream"
+             % (echoes, ending, seconds, len(stream)),
+             "frames=%d  pane=%dx%d px  pictures=%d  misfits=%d"
+             % (len(frames), frames[-1].width if frames else 0,
+                frames[-1].height if frames else 0, len(pictures), len(misfits))]
+    for index, picture in enumerate(pictures, start=1):
+        human.append("picture %-2d cells=%s native=%s fit=%s%s"
+                     % (index, picture["cell_rect"], picture.get("native_px"),
+                        picture.get("fit", "?"), "  (probe)" if picture.get("probe") else ""))
     for rect in rects:
-        human += "\n  cells rows %d..%d cols %d..%d (%dx%d)" % (
-            rect["row0"], rect["row1"], rect["col0"], rect["col1"], rect["cols"], rect["rows"])
-    for path in written:
-        human += "\n  png %s" % path
-    if not args.keep_stream:
-        payload["stream_kept"] = True
-    context.artifacts.record({"kind": "render", "command": command, "exit": status,
-                              "frames": len(frames), "pixels": [frames[-1].width,
-                                                                frames[-1].height] if frames else None,
-                              "pictures": len(decoder.live_placements())})
+        human.append("placeholder cells rows %d..%d cols %d..%d (%dx%d)"
+                     % (rect["row0"], rect["row1"], rect["col0"], rect["col1"],
+                        rect["cols"], rect["rows"]))
+    human.append("stream: %s" % stream_path)
+    if len(written) == 1:
+        human.append("png: %s" % written[0])
+    elif written:
+        human.append("png: %s … %s (%d frames)" % (written[0], written[-1], len(written)))
+    human = "\n".join(human)
     if misfits:
         human += "\n%d picture(s) do not match their cell box: %s" % (len(misfits), misfits[:3])
     context.emit(payload, human)
     if not frames:
         return EXIT_FAIL, payload
+    if not frames and not args.allow_empty:
+        raise KagentError(
+            "the stream decoded to no frame at all: the program never drew, or it died first "
+            "(run without --quiet to see its own output; --allow-empty if drawing nothing is "
+            "the expected result)", EXIT_UNKNOWN)
+
     if args.strict_fit and misfits:
         return EXIT_FAIL, payload
     return EXIT_OK, payload

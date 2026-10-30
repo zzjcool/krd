@@ -98,7 +98,7 @@ agent-check:
 	$(AGENT) selftest
 
 agent-render: build
-	$(AGENT) render --pane 80x24 --cell 17x33 --seconds 6 --strict-fit -- \
+	$(AGENT) --target host render --pane 80x24 --cell 17x33 --seconds 6 --strict-fit -- \
 	  $(KRD) --selftest
 
 agent-scenario:

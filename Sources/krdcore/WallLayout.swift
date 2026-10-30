@@ -12,13 +12,17 @@
 ///     row 1                       header
 ///     row 2          … +stageH    the stage — one display, the full content width
 ///     row 2+stageH                the stage caption — exactly 1 row
-///     row 3+stageH                the "recent" band header
-///     row 4+stageH   … +cardH     the card section — a page of `per` x `cardRowCount`
-///     row 4+stageH+cardH          cards, each its picture's height, its caption under it
-///     row 5+stageH+cardH          one blank row
-///     row 6+stageH+cardH          the footer == the last pane row
+///     row 3+stageH                the divider rule — 1 row, or 0 when `wantsDivider` is false
+///     row 4+stageH                the "recent" band header
+///     row 5+stageH   … +cardH     the card section — a page of `per` x `cardRowCount`
+///     row 5+stageH+cardH          cards, each its picture's height, its caption under it
+///     row 6+stageH+cardH          one blank row
+///     row 7+stageH+cardH          the footer == the last pane row
 ///
-/// `cardH == 0` means "no card band at all": the card rows vanish and `footerRow == 5 + stageH`.
+/// The divider row is easy to forget when reading a measurement: with it the footer lands one row
+/// lower than the budget above without it, so a wall measured at 146x46 (stageH 28, cardH 11) has
+/// its footer on row 46, not 45. `cardH == 0` means "no card band at all": the card rows vanish and
+/// `footerRow == 6 + stageH` (7 with a divider).
 /// The rows are placed with a cursor instead of by adding the constants up, because the constants
 /// only hold while every band fits. A 6-row pane has no room for a card band, and a cursor that
 /// skips the band keeps the caption and the footer on distinct rows rather than stacking them.

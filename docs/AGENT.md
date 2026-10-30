@@ -71,7 +71,7 @@ agent/bin/kagent prove --check agent/checks/<name>.sh --baseline HEAD
 Rendering questions are answered from the escape stream, never from a screenshot:
 
 ```bash
-agent/bin/kagent render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+agent/bin/kagent --target host render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
 agent/bin/kagent render --target vm --pane 146x46 --cell 17x33 -- '~/bin/krd' --wall
 ```
 

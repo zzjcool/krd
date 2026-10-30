@@ -47,7 +47,12 @@ def _matches(node, role, text):
 
 def evaluate(target, spec, app=None, artifacts=None, tolerance=0.01):
     """One predicate, one sample. Returns (state, detail)."""
-    if ":" not in spec:
+    # A bare `changed` means "the screen moved since the last frame this run took". Aliasing it to
+    # a name (`changed:before`) is the same as `diff:before`; both are tolerant, because an exact
+    # hash is flipped by a blinking caret and a predicate that cannot fail is worse than none.
+    if spec in ("changed", "unchanged"):
+        kind, rest = spec, ""
+    elif ":" not in spec:
         spec = "element:*:" + spec
     kind, _, rest = spec.partition(":")
 
@@ -114,19 +119,19 @@ def evaluate(target, spec, app=None, artifacts=None, tolerance=0.01):
             "matches" if equal else "differs from", rest, delta * 100,
             meta["hash"][:12], snapshot["hash"][:12], tolerance * 100)
 
-    if kind == "changed":
+    if kind in ("changed", "unchanged"):
         if artifacts is None:
-            return UNKNOWN, "changed needs a run directory"
+            return UNKNOWN, "%s needs a run directory" % kind
+        last = artifacts.dir / "last-shot.json"
+        if not last.exists():
+            return UNKNOWN, "no previous frame: run `see` first"
+        previous = json.loads(last.read_text())
         meta = perceive.see(target, artifacts, max_width=480)
-        same = meta["hash"] == rest
-        return (FAIL if same else PASS), "hash %s (was %s)" % (meta["hash"][:12], rest[:12])
-
-    if kind == "unchanged":
-        if artifacts is None:
-            return UNKNOWN, "unchanged needs a run directory"
-        meta = perceive.see(target, artifacts, max_width=480)
-        same = meta["hash"] == rest
-        return (PASS if same else FAIL), "hash %s (wanted %s)" % (meta["hash"][:12], rest[:12])
+        delta = perceive.signature_delta(previous.get("signature"), meta.get("signature"))
+        same = delta <= tolerance
+        state = (PASS if not same else FAIL) if kind == "changed" else (PASS if same else FAIL)
+        return state, "%s since the last frame: %.2f%% of blocks changed (tolerance %.2f%%)" % (
+            "not changed" if same else "changed", delta * 100, tolerance * 100)
 
     if kind == "shell":
         result = target.run_sh(rest, timeout=120)

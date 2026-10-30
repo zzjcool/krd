@@ -72,7 +72,7 @@ agent/bin/kagent wait 'same:closed'      # 屏幕又回到了原样
 这是"图是不是填满它的格子"唯一诚实的答案，也是能在锁屏机器和 CI 上跑的那条路。
 
 ```bash
-agent/bin/kagent render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+agent/bin/kagent --target host render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
 agent/bin/kagent render --target vm --pane 146x46 --cell 17x33 -- '~/bin/krd' --wall
 ```
 

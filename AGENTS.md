@@ -20,6 +20,6 @@ cost time.
 ```bash
 agent/bin/kagent doctor
 agent/bin/kagent see --marks          # or: kagent text -i
-agent/bin/kagent render --pane 80x24 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+agent/bin/kagent --target host render --pane 80x24 --cell 17x33 --strict-fit -- .build/release/krd --selftest
 swift build -c release && swift test
 ```

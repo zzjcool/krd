@@ -17,6 +17,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -177,6 +178,9 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
                 chunks.append(data)
             status = process.returncode
             break
+    # Measured before the teardown: a program that ignores SIGTERM for five seconds is a fact worth
+    # knowing, but it is not the program drawing for five more seconds.
+    elapsed = time.time() - started
     if process.poll() is None:
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -189,7 +193,7 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
     status = process.returncode if process.returncode is not None else status
     os.close(master)
     os.close(slave)
-    return b"".join(chunks), status, time.time() - started, answers.answered
+    return b"".join(chunks), status, elapsed, answers.answered
 
 
 def decode(stream, cols, rows, cell):
@@ -208,41 +212,76 @@ def text_layer(stream, cols):
     return lines
 
 
-def placeholder_runs(stream, cols, rows):
-    """Per row: how many placeholder cells and which columns they cover.
+# A CSI ends at the first byte in @..~; the parameter bytes may carry a private prefix (?, >, <...).
+# Getting this wrong is not cosmetic: an unmatched `ESC[?2026h` becomes four visible characters on
+# the screen, and a text report then shows residue that a real terminal never displays.
+CSI = re.compile(r"\x1b\[([0-9;:?<>=!]*)([@-~])")
 
-    This is the geometry check that needs no pixels at all: a picture that does not equal its box
-    shows up as a shorter run, an off-centre start, or a gap.
+
+def screen_of(stream, cols, rows):
+    """The text buffer a terminal would hold, as {row: {col: char}}.
+
+    krd positions every row explicitly with CUP and never relies on newlines, so the screen is
+    rebuilt from the cursor movements. Graphics escapes are skipped; placeholder cells are kept as
+    their own characters, because that is exactly what a text capture shows.
     """
-    import re
-    placeholder = chr(0x10EEEE)
-    # The grid is written as CUP + fg colour + cells, so rebuild the screen from the CUPs rather
-    # than trusting newlines: krd positions every row explicitly.
     text = stream.decode("utf-8", "replace")
     screen = {}
     row, col = 1, 1
     i = 0
     while i < len(text):
         if text.startswith("\x1b[", i):
-            match = re.match(r"\x1b\[([0-9;]*)([A-Za-z])", text[i:])
+            match = CSI.match(text, i)
             if not match:
-                i += 1
+                i += 2
                 continue
             params, final = match.group(1), match.group(2)
-            if final == "H":
-                parts = [p for p in params.split(";") if p.isdigit()]
-                row = int(parts[0]) if parts else 1
-                col = int(parts[1]) if len(parts) > 1 else 1
+            numbers = [p for p in params.lstrip("?<>=!").split(";") if p.isdigit()]
+            if final in "Hf":
+                row = int(numbers[0]) if numbers else 1
+                col = int(numbers[1]) if len(numbers) > 1 else 1
+            elif final == "A":
+                row = max(1, row - (int(numbers[0]) if numbers else 1))
+            elif final == "B":
+                row += int(numbers[0]) if numbers else 1
+            elif final == "C":
+                col += int(numbers[0]) if numbers else 1
+            elif final == "D":
+                col = max(1, col - (int(numbers[0]) if numbers else 1))
+            elif final == "G":
+                col = int(numbers[0]) if numbers else 1
+            elif final == "K":
+                mode = int(numbers[0]) if numbers else 0
+                cells = screen.setdefault(row, {})
+                if mode == 2:
+                    cells.clear()
+                else:
+                    for c in [c for c in cells if c >= col]:
+                        del cells[c]
             elif final == "J":
-                screen.clear()
-            i += len(match.group(0))
+                mode = int(numbers[0]) if numbers else 0
+                if mode in (2, 3):
+                    screen.clear()
+                else:
+                    for r in [r for r in screen if r > row]:
+                        del screen[r]
+                    cells = screen.setdefault(row, {})
+                    for c in [c for c in cells if c >= col]:
+                        del cells[c]
+            i = match.end()
+            continue
+        if text.startswith("\x1b]", i):
+            bel = text.find("\x07", i)
+            st = text.find("\x1b\\", i)
+            ends = [e + (1 if e == bel else 2) for e in (bel, st) if e >= 0]
+            i = min(ends) if ends else len(text)
+            continue
+        if text.startswith("\x1b_G", i):
+            end = text.find("\x1b\\", i)
+            i = len(text) if end < 0 else end + 2
             continue
         if text.startswith("\x1b", i):
-            if text.startswith("\x1b_G", i):
-                end = text.find("\x1b\\", i)
-                i = len(text) if end < 0 else end + 2
-                continue
-            i += 1
+            i += 2          # charset designators, keypad modes, single-character escapes
             continue
         char = text[i]
         if char == "\n":
@@ -250,11 +289,46 @@ def placeholder_runs(stream, cols, rows):
             col = 1
         elif char == "\r":
             col = 1
+        elif char == "\t":
+            col = ((col - 1) // 8 + 1) * 8 + 1
+        elif char < " ":
+            pass
         else:
             screen.setdefault(row, {})[col] = char
             col += 1
         i += 1
+    return screen
 
+
+def text_lines(stream, cols, rows):
+    """The screen as lines, for reading a footer or a status line back."""
+    screen = screen_of(stream, cols, rows)
+    placeholder = chr(0x10EEEE)
+    out = []
+    for r in range(1, rows + 1):
+        cells = screen.get(r, {})
+        if not cells:
+            out.append("")
+            continue
+        width = max(cells)
+        line = []
+        for c in range(1, width + 1):
+            char = cells.get(c, " ")
+            if char == placeholder or 0x0300 <= ord(char) <= 0x036F:
+                char = "#"          # a placeholder cell: the picture lives here
+            line.append(char)
+        out.append("".join(line).rstrip())
+    return out
+
+
+def placeholder_runs(stream, cols, rows):
+    """Per row: how many placeholder cells and which columns they cover.
+
+    This is the geometry check that needs no pixels at all: a picture that does not equal its box
+    shows up as a shorter run, an off-centre start, or a gap.
+    """
+    placeholder = chr(0x10EEEE)
+    screen = screen_of(stream, cols, rows)
     runs = []
     for r in range(1, rows + 1):
         cells = sorted(c for c, ch in screen.get(r, {}).items()

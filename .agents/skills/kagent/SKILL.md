@@ -25,7 +25,8 @@ click will happen**, so stop instead of testing against a dead machine.
 ```bash
 # look — a JPEG plus the coordinate contract, or numbered boxes on everything clickable
 agent/bin/kagent see --marks --grid 200
-# read — the accessibility tree as lines (cheap, and assertable)
+# read — the accessibility tree as lines (cheap, and assertable). No --app means the focused app;
+# --app Finder / --pid 495 reads another one.
 agent/bin/kagent text -i -d 6
 # act — by mark number (AXPress, falls back to the centre), by point, or by ref
 agent/bin/kagent click --mark 4
@@ -45,8 +46,15 @@ agent/bin/kagent see --as closed
 agent/bin/kagent click 12 10
 agent/bin/kagent wait 'diff:closed'          # something drew
 agent/bin/kagent key escape
-agent/bin/kagent wait 'same:closed'          # ...and the screen came back, pixel for pixel
+agent/bin/kagent wait 'same:closed'          # ...and the screen came back
 ```
+
+`same:`/`diff:` compare a 32x24 block signature, not a hash: a blinking caret changes the hash of
+an otherwise identical screen, so the hash is the wrong question and the default 1% block tolerance
+is why the second command passes. `changed` (no argument) means "since the last frame this run took".
+`see --as NAME` and the `same:NAME` that reads it must share a `--run` (both default to `latest`).
+Refs (`@e481`) are numbered per dump — do not carry one from `text` into a later `press`.
+`see --marks` truncates on a terminal; the full list is `artifacts/<run>/marks.json`.
 
 ## Rendering without a terminal
 
@@ -54,13 +62,29 @@ This is the only honest way to answer "does the picture fill its box" when the s
 it runs in CI:
 
 ```bash
-agent/bin/kagent render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+# a build in THIS checkout always needs --target host: the default target is the VM, and the VM
+# has its own copy of krd at ~/bin/krd (a path like .build/release/krd there is "no such file")
+agent/bin/kagent --target host render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
 agent/bin/kagent render --target vm --pane 146x46 --cell 17x33 -- '~/bin/krd' --wall
 ```
 
-Read the report, not the PNG: `misfits: 0` means every picture's pixels equal its cell box
-(`--strict-fit` fails otherwise — that is the 1:1-terminal seam bug), and `placeholder_rects` is the
-card geometry in cells. The PNGs are for when the numbers surprise you.
+Read the report, not the PNG. It prints one line per picture:
+
+```
+frames=2  pane=2482x1518 px  pictures=4  misfits=0
+picture 1  cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
+...
+placeholder cells rows 2..29 cols 29..115 (87x28)
+```
+
+`cells` is `[col, row, cols, rows]`, `native` is the pixels actually transmitted, and `misfits: 0`
+means every picture's pixels equal its cell box (`--strict-fit` fails otherwise — that is the
+1:1-terminal seam bug). `placeholder cells` is the same geometry as a text capture would see it.
+`stopped at the 12.0s deadline` is the harness closing the pty, not a crash; `exited 1` is krd.
+`--seconds` is how long it gets to draw (default 12). The PNGs are for when the numbers surprise you.
+
+`kagent vt text artifacts/<run>/vt.vt` prints the text layer of a captured stream (pictures as `#`),
+which is how you read a footer or a status line back without a screenshot.
 
 `--terminal rex` (the default) answers the `U=1`/DSR/cell-size probes the way Rex does. Without it
 krd takes its fallback transport and you measure a path no user is on.
@@ -92,8 +116,9 @@ agent/bin/kagent prove --check agent/checks/<repro>.sh --baseline HEAD
 ```bash
 swift build -c release && swift test
 agent/bin/kagent selftest
-agent/bin/kagent render --pane 80x24 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+agent/bin/kagent --target host render --pane 80x24 --cell 17x33 --strict-fit -- .build/release/krd --selftest
 agent/bin/kagent run agent/scenarios/screen-changes-and-restores.json
+for check in agent/checks/*.sh; do sh "$check"; done
 ```
 
-Report numbers, not adjectives: `frames=23 pictures=168 misfits=0`, `card 87x28 cells at rows 2..29`.
+Report numbers, not adjectives: `frames=40 pictures=24 misfits=0`, `card 87x28 cells at rows 2..29`.
