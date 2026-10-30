@@ -83,11 +83,12 @@ enum WallPictures {
                     panelHeight: raster.height,
                     originX: 0,
                     originY: 0,
-                    // Round the picture's own corners (design §6.6): the capture is the size it will
-                    // be drawn at, so the radius is in the same pixels and does not change when the
-                    // pane is resized.
-                    cornerRadius: PanelImage.cornerRadius(width: raster.width,
-                                                          height: raster.height))
+                    // No rounded corners ("把圆角边框去掉吧，我记得加之前是正常的"). A cut corner is a
+                    // *hole* in the picture: the terminal puts its own background there (Rex: black),
+                    // so a rounded picture reads as a frame around a smaller picture instead of as
+                    // the desktop itself. It is also the only alpha in the wall's images, and alpha
+                    // is the property a terminal is most likely to handle differently from RGB.
+                    cornerRadius: 0)
                 guard canvas.count == raster.width * raster.height * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }

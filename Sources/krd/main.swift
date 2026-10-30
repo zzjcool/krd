@@ -71,7 +71,7 @@ struct Options {
     /// Draw the wall's pictures as kitty *unicode placeholders* (`U=1`) instead of a pixel-sized
     /// placement: the terminal then fits the image into the picture's cell rectangle, so no estimate
     /// of the cell's pixel size can put the desktop in the corner (see `emitPanelAsPlaceholder`).
-    var placeholders = true
+    var placeholders = false
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
 
