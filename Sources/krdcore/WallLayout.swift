@@ -122,6 +122,8 @@ public struct WallLayout: Equatable {
     public let footerRow: Int
     /// The effective per — may be smaller than the requested one on a narrow pane.
     public let per: Int
+    /// Cells between two neighbouring cards on this pane (`cardGap(content)`).
+    public let cardGap: Int
     public let stageStart: Int
     public let cardStart: Int
     public let displayCount: Int
@@ -201,9 +203,10 @@ public struct WallLayout: Equatable {
 
         // Narrower than a readable card? Show one card fewer (design §6.5). The loop stops at 1,
         // so even a 1-column pane gets a (1-cell) card instead of none.
+        let gap = cardGap(content)
         var perEff = max(1, per)
-        while perEff > 1 && cardWidth(content, perEff) < minCardCols { perEff -= 1 }
-        let winW = max(1, cardWidth(content, perEff))
+        while perEff > 1 && cardWidth(content, perEff, gap: gap) < minCardCols { perEff -= 1 }
+        let winW = max(1, cardWidth(content, perEff, gap: gap))
 
         // Height follows from the width, so a card keeps its shape at any pane size: 44 cells ->
         // 44 / (1.62 * 2) = 13.6 -> 14 rows, which is the height the mockup was measured with.
@@ -286,7 +289,7 @@ public struct WallLayout: Equatable {
         var cardCaptions: [CellRect] = []
         if cardH > 0 {
             for i in 0..<pageCount {
-                let col = 1 + i * (winW + 1)
+                let col = 1 + i * (winW + gap)
                 cards.append(clip(col: col, row: cardsTop, width: winW, height: cardH))
                 cardCaptions.append(clip(col: col, row: cardsTop + cardH, width: winW, height: 1))
             }
@@ -320,6 +323,7 @@ public struct WallLayout: Equatable {
             cardCaptions: cardCaptions,
             footerRow: footerRow,
             per: perEff,
+            cardGap: gap,
             stageStart: firstStage,
             cardStart: firstCard,
             displayCount: displays,
@@ -328,12 +332,20 @@ public struct WallLayout: Equatable {
         )
     }
 
-    /// `floor((content - (n - 1)) / n)`: the cards share the content width with one gap cell
-    /// between neighbours and are all the same width (design §6.5: 137 cols / 3 -> 44).
-    private static func cardWidth(_ content: Int, _ n: Int) -> Int {
+    /// `floor((content - (n - 1) * gap) / n)`: the cards share the content width with `gap` cells
+    /// between neighbours and are all the same width (design §6.5: 137 cols / 3 -> 43).
+    private static func cardWidth(_ content: Int, _ n: Int, gap: Int) -> Int {
         guard n > 0 else { return 0 }
-        return (content - (n - 1)) / n
+        return (content - (n - 1) * gap) / n
     }
+
+    /// Cells between two neighbouring cards: one cell was the first version and read as the cards
+    /// touching ("窗口的间距可以再大点" in review). It scales with the pane rather than being a
+    /// constant, because air is only free where there is width to spend: on 137 columns a 3-cell gap
+    /// still leaves every card 43 cells - the same 14 rows as before, so it costs nothing - while on
+    /// 60 columns a 3-cell gap is a fifth of a 13-cell card and would drop `per` from 4 to 3 to pay
+    /// for it.
+    static func cardGap(_ content: Int) -> Int { max(1, content / 45) }
 
     private static func clamp(_ value: Int, _ lo: Int, _ hi: Int) -> Int {
         min(max(value, lo), max(lo, hi))

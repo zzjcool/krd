@@ -92,10 +92,10 @@ final class WallLayoutTests: XCTestCase {
     /// if any of these disagree, the formula is wrong, not the design.
     func testPinnedGeometryMatchesTheDesignTable() {
         let pinned: [(cols: Int, rows: Int, per: Int, winW: Int, cardH: Int, stageH: Int)] = [
-            (137, 44, 3, 44, 14, 23),      // 24 before the divider row existed
-            (137, 44, 2, 67, 21, 16),
-            (137, 44, 4, 33, 10, 27),
-            (100, 36, 3, 32, 10, 19),
+            (137, 44, 3, 43, 13, 24),      // the 3-cell gap costs the cards a row, the stage gains it
+            (137, 44, 2, 66, 20, 17),
+            (137, 44, 4, 31, 10, 27),
+            (100, 36, 3, 31, 10, 19),
             (60, 24, 2, 28, 9, 8),
             (60, 24, 3, 18, 6, 11),
             (60, 24, 4, 13, 4, 13),
@@ -123,11 +123,12 @@ final class WallLayoutTests: XCTestCase {
                            Int((Double(winW) / (WallLayout.cardAspect * WallLayout.cellAspect)).rounded()))
             XCTAssertEqual(rows, cardH, "\(winW) cells is \(cardH) rows")
         }
-        // The layout really derives it from the width (the table above is reachable): the 44-cell
-        // card is 14 rows in the 137-column pane, which is the number the mockup was drawn with.
+        // The layout really derives it from the width (the table above is reachable): the cards in
+        // the 137-column pane are 43 cells wide - 44 before the gap between them grew - and 13
+        // rows tall. The 2-row drop is the price of the air; the freed row went to the stage.
         let card = layout(137, 44, windows: 14, per: 3).cards[0]
-        XCTAssertEqual(card.cols, 44)
-        XCTAssertEqual(card.rows, 14)
+        XCTAssertEqual(card.cols, 43)
+        XCTAssertEqual(card.rows, 13)
     }
 
     /// The row budget, band by band, against the table in contract §2B. A cursor that skips the
@@ -156,8 +157,8 @@ final class WallLayoutTests: XCTestCase {
                                CellRect(col: pane.cols, row: 4 + stageH + divider, cols: 1, rows: cardH),
                                "\(label): the card segment covers the cards")
                 XCTAssertEqual(l.cards.map(\.col),
-                               (0..<l.cards.count).map { 1 + $0 * (l.cards[0].cols + 1) },
-                               "\(label): one gap cell between cards")
+                               (0..<l.cards.count).map { 1 + $0 * (l.cards[0].cols + l.cardGap) },
+                               "\(label): one gap between cards")
             }
         }
         // No card band: the two card rows vanish and the footer moves up by two.
@@ -478,7 +479,7 @@ final class WallLayoutTests: XCTestCase {
         let l = layout(137, 44, windows: 7, per: 3, cardStart: 4)
         XCTAssertEqual(l.cardStart, 4)
         XCTAssertEqual(l.cards.count, 3, "windows 4,5,6")
-        XCTAssertEqual(l.cards.last?.maxCol, l.cards[0].maxCol + 2 * (l.cards[0].cols + 1))
+        XCTAssertEqual(l.cards.last?.maxCol, l.cards[0].maxCol + 2 * (l.cards[0].cols + l.cardGap))
 
         // Asking for a start past the end clamps to the last full page: 7 - 3 = 4.
         let clamped = layout(137, 44, windows: 7, per: 3, cardStart: 6)
@@ -492,7 +493,7 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertEqual(l.cards.count, 1)
         XCTAssertEqual(l.cardCaptions.count, 1)
         XCTAssertEqual(l.cards[0].col, 1, "the single card is left-aligned")
-        XCTAssertEqual(l.cards[0].cols, 44, "…and still one card wide")
+        XCTAssertEqual(l.cards[0].cols, 43, "…and still one card wide")
         XCTAssertEqual(l.action(row: l.cards[0].row, col: 1), .enterCard(0))
         // The empty slots to the right are not hit-testable.
         XCTAssertNil(l.action(row: l.cards[0].row, col: l.cards[0].maxCol + 2))
@@ -518,9 +519,11 @@ final class WallLayoutTests: XCTestCase {
 
     /// The bar is a scrollbar, not a slider: clicking the shaft puts the thumb where the click was.
     func testThumbAndJumpAreInverse() {
-        // 137x44, per 3: 12 shaft cells for 11 positions — every start is representable.
-        for start in 0...11 {
-            let l = layout(137, 44, windows: 14, per: 3, cardStart: start)
+        // 137x44, per 3: a 13-row card segment is an 11-cell shaft, and 9 windows are 7 positions,
+        // so every start is representable. (The shaft used to be one cell longer; the gap between
+        // the cards took that row, which is why this case asks for 9 windows and not 14.)
+        for start in 0...6 {
+            let l = layout(137, 44, windows: 9, per: 3, cardStart: start)
             let seg = l.bar.cards
             XCTAssertEqual(seg.start, start)
             guard let thumb = seg.thumbRow() else { return XCTFail("start \(start): no thumb") }

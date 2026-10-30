@@ -152,6 +152,6 @@ final class WallPanelRowHeightTests: XCTestCase {
         let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
                                     stageSource: nil, cardSources: cards)
         XCTAssertEqual(panels.count, 2)
-        for panel in panels { XCTAssertEqual(panel.fit.contentHeight, 462) }
+        for panel in panels { XCTAssertEqual(panel.fit.contentHeight, 429) }   // 13 rows
     }
 }

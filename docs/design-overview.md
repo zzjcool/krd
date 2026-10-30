@@ -37,7 +37,7 @@ English | [简体中文](design-overview.zh-CN.md)
 
 ## 2. Why three
 
-- A readable card needs 24–44 cells; three fit a 137-cell pane exactly, four start truncating captions.
+- A readable card needs 24–44 cells; three fit a 137-cell pane comfortably, four start truncating captions.
 - With "most recently used" ordering, the one you want is nearly always on the first page; scrolling is the
   fallback, not the path.
 - **One display at a time** (see §6.6): the number of displays must not change the cost, and must not squeeze
@@ -128,7 +128,11 @@ it says where a section ends, which a blank row does not. It is also the first t
 worth less than a row of picture.
 
 - Content width `content = cols - 2` (bar plus padding); `winW = floor((content - (per-1)) / per)` -
-  137 columns / 3 → 44 cells, and the card's height follows from its width at a 1.62 aspect (→ 14 rows).
+  137 columns / 3 → 43 cells, and the card's height follows from its width at a 1.62 aspect (→ 13 rows).
+- Between two cards: `cardGap = max(1, content / 45)` cells - 3 at 137 columns, 1 on a 60-column pane. One
+  cell was the first version and read as the cards touching; the gap scales with the width because air on a
+  narrow pane is paid for with a card (`per` drops from 4 to 3 at 60 columns if the gap is 3). At 137 columns
+  the 3-cell gap costs the cards one row (44×14 → 43×13) and gives it to the stage, which grows 23 → 24.
 - The stage takes the remaining rows: `mainH = rows - (5 or 6) - winRows - 1` (6 when there is a
   divider). At 137x44 that is **stage 23 + cards 14** - one row of picture less than before the rule.
 - Whole-cell placement only; never the last cell of the last row (autowrap pushes the whole picture up).
@@ -149,7 +153,7 @@ card reads as a window lying on the wall, not a window in a frame.
 |---|---|
 | landscape (16:10 / 1.54) | the height fills the stage's rows and the width is ~72 cells centred (137×44 at 17×33 cells); ~30 cells of transparency on each side |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
-| window card | the card rect **never changes** (44×14 cells at 137×44); the picture fits inside at the window's own aspect, the rest is transparent |
+| window card | the card rect **never changes** (43×13 cells at 137×44); the picture fits inside at the window's own aspect, the rest is transparent |
 | one height per row | the cards of a page are drawn at **one height** - the tallest one every picture can reach without cropping, i.e. the widest window's (`WallPanels.sharedCardHeight`, then `PanelImage.fit(maxHeight:)`). Per-window fitting left a 16:9 card shorter than a square one, so the row's top and bottom edges disagreed ("窗口的最高高度需要保持一致"). The cost is that one wide window shortens its neighbours while it is on the page; the alternative would be cropping, which the design rules out |
 | the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |

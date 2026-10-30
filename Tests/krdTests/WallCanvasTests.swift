@@ -189,10 +189,10 @@ final class WallCanvasTests: XCTestCase {
                       "rows outside card 1 were repainted: \(touched.sorted())")
         // And the two rows that actually changed: the title line inside the box, the caption.
         // The block of three lines is centred in the interior (the phase-1 mask is centred in its
-        // rect), so in the 14-row card of the 137x44 golden — a 12-row interior — it starts on the
+        // rect), so in the 13-row card of the 137x44 golden — an 11-row interior — it starts on the
         // fifth interior row: app at `row + 5`, title at `row + 6`, size at `row + 7`. Top alignment
         // would have made the title `row + 2`, which is no longer where the painter puts it.
-        XCTAssertEqual(card.rows, 14, "this test reasons about the 14-row card of the 137x44 golden")
+        XCTAssertEqual(card.rows, 13, "this test reasons about the 13-row card of the 137x44 golden")
         XCTAssertEqual(touched, Set([card.row + 6, layout.cardCaptions[1].row]))
         XCTAssertFalse(bytes.contains(0x0A))
     }
@@ -446,14 +446,14 @@ final class WallCanvasTests: XCTestCase {
         let symbols = WallSymbols.emoji
         let canvas = WallCanvas(symbols: symbols)
 
-        // The common card: 44x14, i.e. a 12-row interior for three lines. 12 - 3 = 9, so the block
+        // The common card: 43x13, i.e. an 11-row interior for three lines. 11 - 3 = 8, so the block
         // starts four rows down and app / title / size land on the fifth, sixth and seventh
-        // interior row — four blank rows above it and five below.
+        // interior row — four blank rows above it and four below.
         let wide = makeLayout(fixtureState(), cols: 137, rows: 44, model)
         let lines = canvas.lines(cols: 137, rows: 44, model: model, layout: wide, focus: nil)
         let card = wide.cards[0]
-        XCTAssertEqual(card.cols, 44)
-        XCTAssertEqual(card.rows, 14)
+        XCTAssertEqual(card.cols, 43)
+        XCTAssertEqual(card.rows, 13)
         XCTAssertTrue(cardInterior(lines, row: card.row + 5, card)
                         .hasPrefix("\(symbols.window) Brave Browser"),
                       "the app line leads the block, at the block's left edge")

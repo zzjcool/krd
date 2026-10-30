@@ -483,6 +483,9 @@ final class Desk {
     /// picture or a mask, and that decides what the text layer may draw), so a tick that arrives
     /// mid-capture is remembered rather than raced.
     private var wallPaintTask: Task<Void, Never>?
+    /// Whether anything has ever been written to the wall's screen. Only the *first* paint is
+    /// allowed to go out before the pictures do (see `drawWall`).
+    private var wallPaintedOnce = false
     private var wallDirtyWhilePainting = false
     /// zlib level for a wall panel. Level 6 would spend ~3x the CPU to save a few percent on a
     /// picture that is only encoded when the desk changes (design §12: no frame loop to pay for).
@@ -919,6 +922,17 @@ final class Desk {
             // wall, placeholders and all.
             paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:])
             return
+        }
+        // The first paint does not wait for pixels. ScreenCaptureKit's first call in a session can
+        // take seconds - a permission round-trip through replayd, a window server that just woke up -
+        // and until this line existed the wall wrote *nothing* until the capture came back, so a slow
+        // first capture was an empty alternate screen with no way to tell it apart from a crash.
+        // The placeholders are the phase-1 wall, they cost a few KB of text, and the picture frame
+        // overwrites them a moment later. Later paints skip this: a repaint is cheap only because it
+        // is one frame, and by then the previous picture is already on screen.
+        if !wallPaintedOnce {
+            wallPaintedOnce = true
+            paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:])
         }
         // One repaint at a time: a second capture while the first is in flight would put pictures
         // from two different models on one screen.
