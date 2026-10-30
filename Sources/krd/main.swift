@@ -68,10 +68,11 @@ struct Options {
     /// its geometry in points and still draw images 1:1 in device pixels. 0 = decide from the
     /// geometry source (2 when only ANSI answers were available, 1 when the pty reported pixels).
     var dpr: Double? = nil
-    /// Draw the wall's pictures as kitty *unicode placeholders* (`U=1`) instead of a pixel-sized
-    /// placement: the terminal then fits the image into the picture's cell rectangle, so no estimate
-    /// of the cell's pixel size can put the desktop in the corner (see `emitPanelAsPlaceholder`).
-    var placeholders = false
+    /// Draw the wall's pictures as kitty *unicode placeholders* (`U=1`): the terminal then fits the
+    /// image into the picture's cell rectangle, so no estimate of the cell's pixel size can put the
+    /// desktop in the corner (`emitPanelAsPlaceholder`). `nil` = ask the terminal once at startup
+    /// (`TermGeometry.supportsPlaceholders`), which is the default: guessing is what this replaces.
+    var placeholders: Bool? = nil
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
 
@@ -169,7 +170,8 @@ func usage() -> String {
                           moves; --no-cursor is still accepted and means the same as the default)
       --dpr <n>           device pixels per reported pixel for the pixel-sized path (default: 2
                           when the terminal only answers CSI 16t/14t, 1 when the pty reports them)
-      --no-placeholders   draw pictures as pixel-sized placements instead of unicode placeholders
+      --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
+                          pixel-sized placement. Default: one probe at startup, then the answer
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
@@ -594,7 +596,12 @@ final class Desk {
     private var wallTimer: DispatchSourceTimer?
     /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
     /// answer to "would the wall look different?" — the 1 s tick emits nothing while both match.
-    private var wallPane: (cols: Int, rows: Int, cellW: Double, cellH: Double)?
+    /// One snapshot of the pane this wall draws into: the layout and every capture size come from
+    /// it, and nothing else may measure the terminal (design §6.9).
+    private var wallPane: PaneGeometry?
+    /// The transport the wall's pictures actually use, decided once: `--placeholders` if given,
+    /// otherwise by probing the terminal (see `TermGeometry.supportsPlaceholders`).
+    private var wallPlaceholders = false
     /// The repaint in flight, if any. The wall captures before it paints (a slot is either a
     /// picture or a mask, and that decides what the text layer may draw), so a tick that arrives
     /// mid-capture is remembered rather than raced.
@@ -1001,59 +1008,45 @@ final class Desk {
     /// Called from the resize handler, so a pane that is resized after the first paint (or whose
     /// first answer timed out) ends up with the geometry the terminal actually has rather than with
     /// the one guessed at startup.
-    private func remeasureWallCell() {
-        guard options.cell == nil, options.pane == nil else { return }
-        let pane = TermGeometry.read()
-        guard pane.pixelWidth == 0 || pane.pixelHeight == 0 else { return }
-        guard let measured = TermGeometry.query(timeoutMs: 500) else { return }
-        TermGeometry.fallbackCell = measured.cellSize
-        Log.write("krd: wall cell re-measured on resize: "
-                  + "\(Int(measured.cellSize.w))x\(Int(measured.cellSize.h)) px "
-                  + "(\(TermGeometry.lastAnswer.label))\n")
+    private func remeasureWallPane() {
+        guard let pane = wallPane else { return }
+        // The grid is cheap (an ioctl); the *cell* is what a resize can change and what a terminal
+        // may only answer once its pane has been laid out - so it is re-asked here, not per tick.
+        let fresh = PaneGeometry.measure(cell: options.cell, grid: options.pane,
+                                         dpr: options.dpr) { Log.write($0) }
+        guard fresh != pane else { return }
+        wallPane = fresh
+        refreshWall(force: true)
     }
 
     /// Start the landing screen: alternate screen, resize handler, input, one enumeration and a
     /// 1 s tick. No capturer, no tile grid, no chrome rows — the wall owns every cell.
     private func runWall() {
-        if let cell = options.cell {
-            TermGeometry.fallbackCell = cell
-        } else if options.pane == nil {
-            // The pane's *cell* size, asked from the terminal itself. Over ssh the pty reports
-            // `ws_xpixel/ws_ypixel = 0`, so without this the wall fitted every picture to the
-            // hard-coded 8x20 fallback - a cell aspect of 0.40. Rex's real cell is 0.51 (and its
-            // ANSI answers say 8x16 = 0.50), so the fit left 36% of the stage's height empty: the
-            // picture looked smaller than its frame. Only the *ratio* has to be roughly right for
-            // the layout, and a terminal that answers nothing keeps the fallback.
-            // 500 ms, not 150: a terminal that answers does so in microseconds, but a busy one
-            // (Rex renders its own UI while we ask) can answer late, and a late answer used to be
-            // as bad as no answer - the wall fell back to a guessed cell aspect and drew the
-            // desktop at 80% of the width. Half a second before the first paint is invisible next
-            // to a fit that is 20% wrong.
-            if let measured = TermGeometry.query(timeoutMs: 500) {
-                TermGeometry.fallbackCell = measured.cellSize
-                // The one number every fit in the wall depends on, and the one a reader cannot see:
-                // "the picture does not reach the full width" is answered by this line plus their
-                // terminal's own cell (design §6.6).
-                Log.write("krd: wall cell \(Int(measured.cellSize.w))x\(Int(measured.cellSize.h)) px, "
-                          + "measured from the terminal (\(TermGeometry.lastAnswer.label))\n")
-            } else {
-                Log.write("krd: wall cell \(Int(TermGeometry.fallbackCell.w))x"
-                          + "\(Int(TermGeometry.fallbackCell.h)) px, assumed (the terminal did not answer)\n")
+        // One measurement, one log line: the grid, the cell, and where the cell came from. Every
+        // fit in this wall is computed from this value, so a picture that does not fill its cells
+        // is answered by this line plus the reader's terminal - never by a guess somewhere else.
+        let pane = PaneGeometry.measure(cell: options.cell, grid: options.pane,
+                                        dpr: options.dpr) { Log.write($0) }
+        wallPane = pane
+        // Pictures: kitty unicode placeholders when the terminal accepts them, else pixel-sized
+        // placements. One probe, one log line, and the answer is a reply rather than a hope - a
+        // terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells.
+        if let forced = options.placeholders {
+            wallPlaceholders = forced
+            Log.write("krd: pictures as \(forced ? "unicode placeholders (U=1)" : "pixel-sized placements") (forced)\n")
+        } else {
+            switch TermGeometry.supportsPlaceholders() {
+            case .some(true):
+                wallPlaceholders = true
+                Log.write("krd: the terminal answered a U=1 placeholder: pictures are fitted into their cells\n")
+            case .some(false):
+                wallPlaceholders = false
+                Log.write("krd: the terminal refused U=1: pictures are drawn at their own pixel size\n")
+            case .none:
+                wallPlaceholders = false
+                Log.write("krd: the terminal did not answer the U=1 probe: pixel-sized pictures\n")
             }
         }
-        // How many device pixels one *reported* pixel is worth for the pictures. A terminal may
-        // answer `CSI 16t`/`CSI 14t` in points - Rex answers 8x16 for a cell that is 16.7x32.7
-        // device pixels - and still draw an image at its own pixel size, one device pixel per image
-        // pixel (kitty's "the image will be scaled to fit" is descriptive prose, not a requirement,
-        // and Ghostty/Rex only ever shrink). The picture was therefore half the width of its box and
-        // anchored top-left, which reads as "桌面还是靠左" while the box itself was full width.
-        // The pty's own `ws_xpixel` is the only source that is in device pixels; when it is 0 the
-        // answers are points and the picture is asked for at 2x (design §6.6).
-        let paneNow = TermGeometry.read()
-        let dpr = options.dpr ?? (paneNow.pixelWidth > 0 ? 1.0 : 2.0)
-        WallPictures.pixelScale = dpr
-        Log.write("krd: wall pictures at \(dpr)x the reported pixels "
-                  + "(pty pixel size \(paneNow.pixelWidth)x\(paneNow.pixelHeight))\n")
 
         // A size-zero viewport is what "there is no picture" means to the mouse path: no cell and
         // no pixel is inside it (`Viewport.contains`), so every report lands in `chromeClick`,
@@ -1097,26 +1090,21 @@ final class Desk {
         wallTimer = timer
     }
 
-    /// The pane the wall draws into: the tty's size, with `--pane` honoured the way the bench and
-    /// the mock path honour it (how a wrong-looking wall gets reproduced at an exact size).
-    private func wallGeometry() -> (cols: Int, rows: Int, cellW: Double, cellH: Double) {
-        var geometry = TermGeometry.read()
-        if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
-        let cell = geometry.cellSize
-        return (cols: max(1, geometry.cols), rows: max(1, geometry.rows),
-                cellW: cell.w, cellH: cell.h)
-    }
-
     /// Re-enumerate the world and repaint — but only when the wall would actually look different:
     /// the display list, the window list (order included, it is "most recently used first"), or the
     /// pane size. That comparison is also what keeps an idle wall at 0 B/s with a 1 s tick.
     private func refreshWall(force: Bool) {
         guard !cleanedUp, wallState != nil else { return }
-        let pane = wallGeometry()
+        guard let stored = wallPane else { return }
+        // The grid can change without a resize report (an ssh client that resizes its own pty), so
+        // it is re-read every tick - an ioctl, no query. The *cell* is not: it is re-measured on a
+        // resize only (`remeasureWallPane`), because a terminal that answers `CSI 16t` late is not
+        // something to ask once a second.
+        let tty = TermGeometry.read()
+        let pane = options.pane == nil && (tty.cols != stored.cols || tty.rows != stored.rows)
+            ? stored.with(cols: tty.cols, rows: tty.rows) : stored
         let model = WallSource.model()
-        guard force || model != wallModel || pane.cols != wallPane?.cols
-                || pane.rows != wallPane?.rows || pane.cellW != wallPane?.cellW
-                || pane.cellH != wallPane?.cellH else { return }
+        guard force || model != wallModel || pane != wallPane else { return }
         wallModel = model
         wallPane = pane
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
@@ -1132,7 +1120,7 @@ final class Desk {
                                       displays: model.displays.count,
                                       windows: model.windows.count,
                                       stageAspect: stageAspect(model, state),
-                                      cellAspect: pane.cellH / pane.cellW)
+                                      cellAspect: pane.cellAspect)
             wallState?.clamp(displays: model.displays.count, windows: model.windows.count,
                              per: layout.per)
         }
@@ -1148,7 +1136,7 @@ final class Desk {
                                   displays: wallModel.displays.count,
                                   windows: wallModel.windows.count,
                                   stageAspect: stageAspect(wallModel, state),
-                                  cellAspect: pane.cellH / pane.cellW)
+                                  cellAspect: pane.cellAspect)
         let model = wallModel
         let panels = wallPanels(layout: layout, model: model, pane: pane)
         guard !panels.isEmpty else {
@@ -1207,7 +1195,7 @@ final class Desk {
     }
 
     private func wallPanels(layout: WallLayout, model: WallModel,
-                            pane: (cols: Int, rows: Int, cellW: Double, cellH: Double)) -> [WallPanel] {
+                            pane: PaneGeometry) -> [WallPanel] {
         var stage: PanelSource?
         if model.displays.indices.contains(layout.stageStart) {
             let display = model.displays[layout.stageStart]
@@ -1226,7 +1214,14 @@ final class Desk {
             return PanelSource(kind: .window(window.windowID),
                                aspect: Double(width) / Double(height))
         }
-        return WallPanels.plan(layout: layout, cellW: pane.cellW, cellH: pane.cellH,
+        // How many device pixels a picture is captured at is *quality*, not geometry: with
+        // placeholders the terminal fits the image into the cells, so one reported pixel per cell is
+        // already sharp when the terminal upscales, and asking for the full device resolution of a
+        // big pane is what made a terminal refuse the image and leave the mask showing. The
+        // pixel-sized path has no fitting, so it needs the real ratio.
+        let scale = wallPlaceholders ? (options.dpr ?? 1) : pane.dpr
+        let cell = pane.pictureCell(scale: scale)
+        return WallPanels.plan(layout: layout, cellW: cell.w, cellH: cell.h,
                                stageSource: stage, cardSources: cards)
     }
 
@@ -1268,7 +1263,7 @@ final class Desk {
             // picture lands where the layout says whatever the terminal claims its cell is. The
             // pixel-sized path stays behind the flag: it is the only way to tell which of the two
             // misbehaved when a terminal refuses placeholders.
-            if options.placeholders {
+            if wallPlaceholders {
                 writer.emitPanelAsPlaceholder(id: picture.panel.imageID,
                                               placementID: picture.panel.placementID,
                                               row: picture.panel.rect.row,
@@ -2389,7 +2384,7 @@ final class Desk {
             // that answered late (or was still laying the pane out) left the wall fitting every
             // picture to a guess for the rest of the session - "没有响应式". A resize is exactly the
             // moment the terminal has a fresh answer to give, and it is where a font change lands.
-            remeasureWallCell()
+            remeasureWallPane()
             wallCanvas?.invalidate()
             refreshWall(force: true)
             return
@@ -2791,7 +2786,7 @@ final class Desk {
         let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                   displays: displays, windows: windows,
                                   stageAspect: stageAspect(wallModel, state),
-                                  cellAspect: pane.cellH / pane.cellW)
+                                  cellAspect: pane.cellAspect)
         // nil = header, the divider, the gap column, a dead end of the bar, a shelf with nothing to
         // scroll: those cells belong to the wall too, so the gesture ends here.
         let action = wheel == 0 ? layout.action(row: row, col: col)

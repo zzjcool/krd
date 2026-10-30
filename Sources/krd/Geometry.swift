@@ -54,6 +54,167 @@ struct TermGeometry {
     }
 }
 
+/// One snapshot of the terminal a wall draws into: the grid, and what one cell is worth.
+///
+/// Why one type and not the three sources the wall used before (a per-tick `ioctl`, a mutable
+/// `TermGeometry.fallbackCell`, and the `CSI 16t` answer cached in a static): the fit, the capture
+/// size and the click mapping each read the cell from a different place, so they could each be
+/// computed from a different cell. Every "the picture does not fill its box" report of the last
+/// rounds is a version of that. A value, taken once at start and once per resize, cannot disagree
+/// with itself.
+///
+/// The wall's geometry is *cells*: the layout decides them, and with unicode placeholders the
+/// terminal fits the image into exactly those cells (design §6.9). `cellW`/`cellH`/`dpr` therefore
+/// only decide how much *quality* the picture is captured at - never where it goes, never how big
+/// its box is.
+struct PaneGeometry: Equatable {
+    var cols: Int
+    var rows: Int
+    /// One cell, in the units the pty or `CSI 16t` answered in (device pixels when the pty reports
+    /// `ws_xpixel`, otherwise whatever the terminal chose to call a pixel - Rex answers points).
+    var cellW: Double
+    var cellH: Double
+    /// Device pixels per reported pixel: the quality multiplier the pixel-sized path needs and the
+    /// placeholder path ignores.
+    var dpr: Double
+    /// Where the cell size came from, for the one log line a bug report needs.
+    var source: String
+
+    /// A cell's height over its width, which is the shape every wall fit is written in.
+    var cellAspect: Double { cellW > 0 ? cellH / cellW : 2 }
+
+    /// The same pane, new grid (a resize without a re-measure).
+    func with(cols newCols: Int, rows newRows: Int) -> PaneGeometry {
+        var copy = self
+        copy.cols = max(1, newCols)
+        copy.rows = max(1, newRows)
+        return copy
+    }
+
+    /// One cell at `scale` device pixels per reported pixel: what a picture is captured against.
+    func pictureCell(scale: Double) -> (w: Double, h: Double) {
+        (w: cellW * scale, h: cellH * scale)
+    }
+}
+
+extension TermGeometry {
+    /// Write `bytes` to the terminal and collect what comes back for up to `timeoutMs`, with stdin
+    /// in raw non-blocking mode. `nil` when nothing came back. Only used before input starts (a probe
+    /// steals whatever it reads, so it must not run while the mouse is live).
+    static func ask(_ bytes: String, timeoutMs: Int, until: (String) -> Bool) -> String? {
+        var original = termios()
+        guard tcgetattr(STDIN_FILENO, &original) == 0 else { return nil }
+        var raw = original
+        raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
+        // c_cc[0]/[1] are VEOF/VEOL on macOS, not VMIN/VTIME: name them, or the fd keeps blocking.
+        withUnsafeMutableBytes(of: &raw.c_cc) { p in
+            p[Int(VMIN)] = 0
+            p[Int(VTIME)] = 0
+        }
+        guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return nil }
+        defer { tcsetattr(STDIN_FILENO, TCSANOW, &original) }
+        let out = Array(bytes.utf8)
+        out.withUnsafeBufferPointer { buf in
+            var off = 0
+            while off < buf.count {
+                let n = Darwin.write(STDOUT_FILENO, buf.baseAddress! + off, buf.count - off)
+                if n <= 0 { return }
+                off += n
+            }
+        }
+        var response = ""
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
+        var buffer = [UInt8](repeating: 0, count: 256)
+        while Date() < deadline, !until(response) {
+            var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+            let remaining = max(1, Int32(deadline.timeIntervalSinceNow * 1000))
+            guard poll(&pfd, 1, remaining) > 0 else { continue }
+            let n = Darwin.read(STDIN_FILENO, &buffer, buffer.count)
+            if n > 0 { response += String(decoding: buffer[0..<n], as: UTF8.self) }
+        }
+        return response.isEmpty ? nil : response
+    }
+
+    /// Does this terminal implement kitty unicode placeholders (`U=1`)?
+    ///
+    /// The wall's whole geometry question turns on this one bit. With `U=1` the *terminal* fits the
+    /// image into the rectangle of placeholder cells, aspect preserved, so the picture's box is the
+    /// layout and no estimate of a cell's pixel size can be wrong. Without it, krd has to guess the
+    /// cell in device pixels and an image that does not match is drawn at the wrong size in the
+    /// corner - the bug this replaces.
+    ///
+    /// A reply, not an assumption: the transmit is sent with `q=2` (silent) and the placement with
+    /// `q=0`, so the only message that comes back is the placement's `OK` or `E...`. A terminal that
+    /// ignores `U=1` draws the placeholder cells as missing-glyph boxes over the picture - much worse
+    /// than a small picture - so "no answer" counts as "no".
+    static func supportsPlaceholders(timeoutMs: Int = 300) -> Bool? {
+        let transmit = "\u{1B}_Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA\u{1B}\\"
+        let place = "\u{1B}_Gi=31,p=1,a=p,U=1,q=0,c=1,r=1\u{1B}\\"
+        let reply = ask(transmit + place, timeoutMs: timeoutMs) { text in
+            text.contains("i=31;OK") || text.contains("i=31;E")
+        }
+        DeleteProbeImage()
+        guard let reply else { return nil }
+        return reply.contains("i=31;OK")
+    }
+
+    /// Remove the probe's image by id, so it can never sit on the wall as a stray pixel.
+    private static func DeleteProbeImage() {
+        let bytes = Array("\u{1B}_Ga=d,d=i,i=31\u{1B}\\".utf8)
+        bytes.withUnsafeBufferPointer { buf in
+            _ = Darwin.write(STDOUT_FILENO, buf.baseAddress!, buf.count)
+        }
+    }
+}
+
+extension PaneGeometry {
+    /// The one place a wall's geometry is decided: the pty's grid, the pty's pixel size if it has
+    /// one, else the terminal's own `CSI 16t`/`14t` answer, else the documented fallback.
+    ///
+    /// `grid` is `--pane CxR` (the bench and the mock path reproduce a wall at an exact size), and
+    /// `cell` is `--cell WxH` (a cell the terminal will not answer for). Both win over measurement:
+    /// a report has to be reproducible.
+    static func measure(cell explicitCell: (w: Double, h: Double)?,
+                        grid: (cols: Int, rows: Int)?,
+                        dpr: Double?,
+                        log: (String) -> Void) -> PaneGeometry {
+        let pty = TermGeometry.read()
+        let cols = max(1, grid?.cols ?? pty.cols)
+        let rows = max(1, grid?.rows ?? pty.rows)
+        var cellW: Double, cellH: Double, source: String
+        /// Is the cell already in *device* pixels? Only then may a picture be sized 1:1.
+        var deviceCell = false
+        if let explicitCell, explicitCell.w > 0, explicitCell.h > 0 {
+            (cellW, cellH, source) = (explicitCell.w, explicitCell.h, "--cell")
+            deviceCell = true        // an operator's number is the number they meant
+        } else if pty.pixelWidth > 0, pty.pixelHeight > 0 {
+            // The only answer that needs no second guess: the pty's own window size.
+            cellW = Double(pty.pixelWidth) / Double(cols)
+            cellH = Double(pty.pixelHeight) / Double(rows)
+            source = "the pty's pixel size \(pty.pixelWidth)x\(pty.pixelHeight)"
+            deviceCell = true
+        } else if let measured = TermGeometry.query(timeoutMs: 500) {
+            (cellW, cellH) = (measured.cellSize.w, measured.cellSize.h)
+            // `CSI 14t` is the text area *in pixels*, so a cell derived from it is a device pixel
+            // cell; `CSI 16t` alone is whatever the terminal calls a pixel (Rex answers points).
+            deviceCell = TermGeometry.lastAnswer.sawWindowPixels
+            source = "measured from the terminal (\(TermGeometry.lastAnswer.label))"
+        } else {
+            (cellW, cellH) = (TermGeometry.fallbackCell.w, TermGeometry.fallbackCell.h)
+            source = "assumed (the terminal did not answer)"
+        }
+        // Device pixels per reported pixel. With unicode placeholders this is only *quality* - the
+        // terminal fits the image into the cells - so one reported pixel per cell is enough and it
+        // keeps a full-width stage inside a terminal's image budget. The pixel-sized path has no
+        // fitting, so there the picture must be asked for in device pixels or it is drawn small.
+        let pane = PaneGeometry(cols: cols, rows: rows, cellW: cellW, cellH: cellH,
+                                dpr: dpr ?? (deviceCell ? 1 : 2), source: source)
+        log("krd: wall cell \(Int(cellW))x\(Int(cellH)) px, \(source)\(deviceCell ? "" : " (not device pixels)") - "
+            + "\(cols)x\(rows) cells, \(pane.dpr)x pictures\n")
+        return pane
+    }
+}
+
 /// Where the picture goes and how a terminal cell maps back to source points.
 struct Viewport {
     /// Captured/scaled frame size in device pixels.
@@ -165,6 +326,12 @@ extension TermGeometry {
             case .windowOnly: return "CSI 14t (cell derived)"
             case .none: return "-"
             }
+        }
+
+        /// Did the terminal tell us its text area in *pixels* (`CSI 14t`)? A cell divided out of
+        /// that is a device pixel cell, which is the only kind a picture can be sized 1:1 against.
+        var sawWindowPixels: Bool {
+            self == .windowOnly || self == .cellAndWindow
         }
     }
 

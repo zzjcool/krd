@@ -242,6 +242,29 @@ Alt-`G`，后面全变成文字。
 
 ## 4. ScreenCaptureKit 与权限
 
+### 23e. 图只占了盒子的一部分 / 贴在左上角
+
+在 kitty 终端上放一张图有两条路，只有一条是对的：**格子**（`U=1` unicode placeholder，默认）和 **像素**
+（`--no-placeholders`）。
+
+1. 用 `--debug` 跑，读 krd 启动时打的两行日志：
+
+   ```
+   krd: wall cell 8x16 px, measured from the terminal (CSI 16t+14t) (not device pixels) - 137x44 cells, 2x pictures
+   krd: the terminal answered a U=1 placeholder: pictures are fitted into their cells
+   ```
+
+   * 出现 `the terminal answered a U=1 placeholder` → 图是按格子放的。如果仍然不对，错的是**盒子**而不是传输方式：
+     去查布局（`krd --wall --pane 137x44 --mock ...`），不要查图形协议。
+   * 出现 `refused U=1` / `did not answer the U=1 probe` → 走的是像素路径，图的尺寸取决于 `dpr`：图偏小说明终端
+     按设备像素 1:1 画、而 krd 要少了（`--dpr 2` 会变宽）；`--dpr` 调大后图反而**变小**，是终端因体积拒收
+     （kitty 的字节预算，`q=2` 会把错误吞掉）：把 `--dpr` 调小。
+
+2. "贴左上、其余空白"是**图比盒子小、且被 1:1 画出**的特征，从来不是 `c`/`r` 写错——会缩放的终端上 `c`/`r` 写错
+   只会让图变成奇怪的形状，仍然填满盒子。
+
+3. `--placeholders` / `--no-placeholders` 可以强制任一条路，这是拿同一个终端做对照的办法。
+
 ### 23. 只来一帧，然后流永远停住
 
 **根因。** 这一代 macOS 上 `SCStreamConfiguration.queueDepth = 1` 会把流卡死：第一帧送到了，之后没有

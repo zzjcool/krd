@@ -245,6 +245,33 @@ A mirror the **wall handed over** (`--wall-at`) gets one row of macOS window fur
 It is not the `--dev` line: that one is a measurement (`pipe 54 ms`) and lives at the bottom. Both can be on at once,
 and the bar costs the picture exactly one row.
 
+## 6.9 The picture is placed by cells, never by pixels
+
+**The terminal fits the picture into the picture's cells.** The wall's pictures travel as kitty *unicode
+placeholders* (`U=1`): a transmit (`a=t`, no placement), a virtual placement on the picture's own cell rectangle
+(`a=p,U=1,c=…,r=…`), and a grid of invisible `U+10EEEE` cells - one per cell of the rectangle, with the image id in
+the foreground colour and a combining diacritic on the first cell of each row, which is enough for the rest of the row
+(the protocol lets a cell inherit "the cell to its left, column + 1").
+
+Why this replaced the pixel-sized placement: a `c`/`r` placement plus an image asks the terminal to *scale*, and a
+terminal may answer `CSI 16t` in points while drawing one image pixel per device pixel. Then a picture sized to its
+box arrives at half the box's width, anchored top-left, and the rest of the identical box shows the terminal's
+background - the report that produced this section (`外面是全宽了，桌面还是靠左`). With `U=1` the image is "fit to the
+specified rectangle, its aspect ratio preserved" (kitty, §Unicode placeholders): the cell rectangle is the layout's
+own, so nothing has to be estimated.
+
+| | |
+|---|---|
+| the cells | `WallPanels`' `fit.cellRect` - the same rectangle `WallLayout` gave the picture, which is also the caption's parent cell (§6.6) |
+| the pixels | **quality only.** With placeholders the capture is asked for at one reported pixel per cell (`--dpr` overrides); a big pane's full device resolution would blow a terminal's image budget, and a refused image used to read as "the picture is smaller" |
+| the pixel path | `--no-placeholders`. There the image *must* be asked for in device pixels, so `PaneGeometry.dpr` is 2 when the terminal answered in points |
+| the probe | once at startup: a 1×1 image transmitted with `q=2` (silent) and placed as a placeholder with `q=0`. `OK` → placeholders, `E…` or no answer → the pixel path. One log line says which, because a terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells |
+| one snapshot | `PaneGeometry` - grid, cell, dpr, source - is measured once at start and once per resize. The layout, every capture size and the mouse mapping all read *it*; nothing else may measure the terminal |
+
+The geometry has exactly one direction: **cells → pixels**. The old code fitted in pixels, rounded to cells, then
+derived pixels again (`originX/originY`, `pixelWidth/Height`, a per-tick `ioctl`, a mutable fallback cell); the two
+roundings could disagree, and every "the box is right but the picture is not" report was one of those disagreements.
+
 ## 7. Entering is today's code path
 
 `focus(window)` is today's `--window` (pid-targeted injection, alive-window fallback, backdrop refusal);

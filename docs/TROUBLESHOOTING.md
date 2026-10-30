@@ -270,6 +270,31 @@ so the two spellings of F1–F4 cannot disagree; the parser decision and the tab
 
 ## 4. ScreenCaptureKit & permissions
 
+### 23e. The picture fills part of its box / sits in the top-left corner
+
+Two ways to place an image on a kitty terminal, and only one of them is right: **cells** (`U=1` unicode
+placeholders, the default) and **pixels** (`--no-placeholders`).
+
+1. Run with `--debug` and read the two lines krd logs at startup:
+
+   ```
+   krd: wall cell 8x16 px, measured from the terminal (CSI 16t+14t) (not device pixels) - 137x44 cells, 2x pictures
+   krd: the terminal answered a U=1 placeholder: pictures are fitted into their cells
+   ```
+
+   * `the terminal answered a U=1 placeholder` → the pictures are placed by cells. If they are still wrong, the box
+     is wrong, not the transport: check the layout (`krd --wall --pane 137x44 --mock ...`) rather than the graphics.
+   * `refused U=1` / `did not answer the U=1 probe` → the wall is on the pixel path, where the picture's size depends
+     on `dpr`: a picture that is too small means the terminal draws it 1:1 in device pixels while krd asked for fewer
+     (`--dpr 2` widens it). A picture that *shrinks* when `--dpr` goes up is the terminal refusing the image for size
+     (kitty's byte budget with `q=2` suppresses the error): lower `--dpr`.
+
+2. Anchor at the top-left with the rest of the box empty is the signature of **1:1 drawing of an image that is
+   smaller than its box** - never of a wrong `c`/`r` (a placement with the wrong `c`/`r` on a terminal that scales
+   fills the box it was given, just at an odd shape).
+
+3. `--placeholders` / `--no-placeholders` force either path, which is how a terminal is compared against itself.
+
 ### 23. One frame, then the stream stops forever
 
 **Cause.** `SCStreamConfiguration.queueDepth = 1` stalls the stream on this macOS generation: the

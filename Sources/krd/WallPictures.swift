@@ -8,19 +8,16 @@ import krdcore
 /// that), so there is no dedupe, no cache and no stream to keep alive — measured at 92 ms for a
 /// whole wall's four panels (design §12, P0).
 enum WallPictures {
-    /// Device pixels per *reported* pixel for the captures below.
+    /// The capture is asked for at exactly the panel's own size, never above `maxSide` on either
+    /// axis: ScreenCaptureKit clamps a bigger request silently, and an image that no longer matches
+    /// `s=`/`v=` would be worse than a soft one.
     ///
-    /// The fit measures its box in the terminal's own units (`CSI 16t`), and a terminal may report
-    /// those in points while drawing an image one device pixel per image pixel: Rex answers 8x16 for
-    /// a cell that is 16.7x32.7 device pixels, so a picture sized to the box arrived at half its
-    /// width, anchored top-left, and the rest of the identical box showed the terminal's background.
-    /// Measured on the wall's own bytes: 1075x672 px in a 135x41 cell box (design §6.6).
-    static var pixelScale: Double = 1
-
-    /// The capture is asked for at `contentWidth x contentHeight` * `pixelScale`, never above
-    /// `maxSide` on either axis: ScreenCaptureKit clamps a bigger request silently, and an image that
-    /// no longer matches `s=`/`v=` would be worse than a soft one.
+    /// There used to be a `pixelScale` here - "the terminal said 8x16 but draws device pixels, so
+    /// multiply by 2" - and it was the last place in the wall where a picture's size came from a
+    /// guess rather than from the layout. The scale now belongs to the *plan* (`PaneGeometry`'s
+    /// quality factor), so the panel's `fit.contentWidth` is already the size to capture at.
     static let maxSide = 4096.0
+
     struct Picture {
         let panel: WallPanel
         /// The picture itself, **RGBA**, exactly `fit.contentWidth x fit.contentHeight`: no bars,
@@ -58,8 +55,8 @@ enum WallPictures {
                 // The picture is asked for in the pixels it will be drawn at, not in the box's
                 // reported pixels: see `pixelScale`. Both axes share one factor, so the aspect the
                 // fit chose is untouched.
-                var wantW = Double(panel.fit.contentWidth) * Self.pixelScale
-                var wantH = Double(panel.fit.contentHeight) * Self.pixelScale
+                var wantW = Double(panel.fit.contentWidth)
+                var wantH = Double(panel.fit.contentHeight)
                 let shrink = min(1, Self.maxSide / max(wantW, wantH))
                 wantW *= shrink
                 wantH *= shrink
