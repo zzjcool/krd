@@ -91,13 +91,17 @@ final class WallLayoutTests: XCTestCase {
     /// The seven rows of the task's table. Every one of them comes out of the frozen algorithm;
     /// if any of these disagree, the formula is wrong, not the design.
     func testPinnedGeometryMatchesTheDesignTable() {
+        // The row split is 7 parts display to 3 parts shelf (his rule: "上面桌面 7, 下面窗口 3"),
+        // so the stage height is round(0.7 * budget) and the cards get what is left, minus their
+        // caption row. The card width still follows the pane (`cardWidth`) and no longer decides the
+        // card *height*: a short pane keeps three readable cards instead of a tall one.
         let pinned: [(cols: Int, rows: Int, per: Int, winW: Int, cardH: Int, stageH: Int)] = [
-            (137, 44, 3, 43, 13, 24),      // the 3-cell gap costs the cards a row, the stage gains it
-            (137, 44, 2, 66, 20, 17),
+            (137, 44, 3, 43, 10, 27),
+            (137, 44, 2, 66, 10, 27),
             (137, 44, 4, 31, 10, 27),
-            (100, 36, 3, 31, 10, 19),
-            (60, 24, 2, 28, 9, 8),
-            (60, 24, 3, 18, 6, 11),
+            (100, 36, 3, 31, 8, 21),
+            (60, 24, 2, 28, 4, 13),
+            (60, 24, 3, 18, 4, 13),
             (60, 24, 4, 13, 4, 13),
         ]
         for p in pinned {
@@ -123,12 +127,13 @@ final class WallLayoutTests: XCTestCase {
                            Int((Double(winW) / (WallLayout.cardAspect * WallLayout.cellAspect)).rounded()))
             XCTAssertEqual(rows, cardH, "\(winW) cells is \(cardH) rows")
         }
-        // The layout really derives it from the width (the table above is reachable): the cards in
-        // the 137-column pane are 43 cells wide - 44 before the gap between them grew - and 13
-        // rows tall. The 2-row drop is the price of the air; the freed row went to the stage.
+        // The table above is the card's *ideal* height, which is what a tall pane uses: there the
+        // card band takes the rows the stage does not need and the cards widen to fill them. In a
+        // 44-row pane the band is the 3 of the 7:3 split instead, so the cards are 43 cells wide and
+        // 10 rows tall - the picture inside keeps its own aspect and is width-limited.
         let card = layout(137, 44, windows: 14, per: 3).cards[0]
         XCTAssertEqual(card.cols, 43)
-        XCTAssertEqual(card.rows, 13)
+        XCTAssertEqual(card.rows, 10)
     }
 
     /// The row budget, band by band, against the table in contract §2B. A cursor that skips the
@@ -347,11 +352,12 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertEqual(l.action(row: l.bar.cards.rect.row, col: l.barCol), WallAction.cardStep(-3))
         XCTAssertEqual(l.action(row: l.bar.cards.rect.maxRow, col: l.barCol), WallAction.cardStep(3))
 
-        // Pinned: at 24 rows of stage the shaft is rows 3…24, so row 10 is offset 7 of 21
-        // -> 7/21 * 2 displays = 0.67 -> 1.
+        // Pinned: at 27 rows of stage the shaft is rows 3…27, so row 10 is offset 7 of 25
+        // -> 7/25 * 2 displays = 0.56 -> 1.
         XCTAssertEqual(l.action(row: 10, col: l.barCol), WallAction.stageJump(1))
-        // Card shaft: rows 29…40, row 35 is offset 6 of 11 -> 6/11 * 11 = 6.
-        XCTAssertEqual(l.action(row: 35, col: l.barCol), WallAction.cardJump(6))
+        // Card shaft: rows 33…41, row 35 is offset 2 of 9 -> 2/9 * 11 = 2.4 -> 3 with the layout's
+        // rounding (it rounds the ratio, not the offset).
+        XCTAssertEqual(l.action(row: 35, col: l.barCol), WallAction.cardJump(3))
 
         // Every inner row of both segments answers, and it answers with a jump.
         for row in (l.bar.stage.rect.row + 1)..<l.bar.stage.rect.maxRow {
@@ -553,7 +559,8 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertNil(layout(137, 44, windows: 3, per: 3, displays: 1).bar.stage.thumbRow())
         XCTAssertNil(layout(137, 44, windows: 3, per: 3).bar.cards.thumbRow())
         // A shaft of exactly one cell can only show the top of the track; two rows have none.
-        let oneCell = layout(137, 12, windows: 14, per: 3).bar.stage
+        // A 8-row pane leaves a budget of 3 rows, which is the smallest stage the layout draws.
+        let oneCell = layout(137, 8, windows: 14, per: 3).bar.stage
         XCTAssertEqual(oneCell.rect.rows, 3)
         XCTAssertEqual(oneCell.thumbRow(), oneCell.rect.row + 1)
         XCTAssertEqual(oneCell.jumpTarget(shaftOffset: 0), 0)
@@ -721,9 +728,10 @@ final class WallStageAspectTests: XCTestCase {
         let fitted = layout(stageAspect: 1.6)
         // 135 content columns / (2.0 cell aspect * 1.6 picture aspect) = 42.2 -> 42 rows.
         XCTAssertEqual(fitted.stage.rows, 42)
-        XCTAssertEqual(budget.stage.rows, 53)
-        // The 11 rows the stage does not need go to the cards...
-        XCTAssertEqual(fitted.cards[0].rows, budget.cards[0].rows + 11)
+        // 7:3 of the 67-row budget gives the stage 47, and the picture keeps only the 42 it needs.
+        XCTAssertEqual(budget.stage.rows, 47)
+        // The 5 rows the stage does not need go to the cards...
+        XCTAssertEqual(fitted.cards[0].rows, budget.cards[0].rows + 5)
         // ...and the cards widen to fill them, so their pictures grow rather than gain margin.
         XCTAssertGreaterThan(fitted.cards[0].cols, budget.cards[0].cols)
         XCTAssertLessThanOrEqual(fitted.per, budget.per)
@@ -748,7 +756,8 @@ final class WallStageAspectTests: XCTestCase {
 
     func testAMockWithoutADisplaySizeKeepsTheBudgetsSplit() {
         let noAspect = layout(stageAspect: nil)
-        XCTAssertEqual(noAspect.stage.rows, 53)
+        // 7:3 of the 67-row budget, with no aspect to shrink it: 47 rows of stage, 19 of cards.
+        XCTAssertEqual(noAspect.stage.rows, 47)
         XCTAssertEqual(noAspect.per, 3)
     }
 }

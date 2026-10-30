@@ -219,13 +219,6 @@ public struct WallLayout: Equatable {
         while perEff > 1 && cardWidth(content, perEff, gap: gap) < minCardCols { perEff -= 1 }
         let winW = max(1, cardWidth(content, perEff, gap: gap))
 
-        // Height follows from the width, so a card keeps its shape at any pane size: 44 cells ->
-        // 44 / (1.62 * 2) = 13.6 -> 14 rows, which is the height the mockup was measured with.
-        func cardHeight(forWidth w: Int) -> Int {
-            max(minCardRows, Int((Double(w) / (cardAspect * cellAspect)).rounded()))
-        }
-        let idealCardH = cardHeight(forWidth: winW)
-
         // The fixed rows: header, stage caption, (divider), band header, blank, footer.
         //
         // The divider is one dim rule between the stage block and the card section. Without it the
@@ -238,16 +231,28 @@ public struct WallLayout: Equatable {
         // painter draws nothing.
         let wantsDivider = rows >= 20
         let budget = max(0, rows - (wantsDivider ? 6 : 5))
-        // Shrink order is cards first, then the stage, then drop the cards entirely (design §6.5).
-        // -1 is the card caption row.
-        var cardH = min(idealCardH, max(0, budget - minStageRows - 1))
-        if cardH < minCardRows { cardH = 0 }   // no in-between: an undrawable band is no band
-        var stageH = max(0, budget - (cardH > 0 ? cardH + 1 : 0))
-        // Nothing to put in the band: the full budget goes to the stage instead of leaving an
-        // empty strip that reads like a layout bug.
+        // **Seven rows of display to three rows of shelf** (design §6.5, his rule: "上面桌面 7,
+        // 下面窗口 3"). The stage is the hero of this screen, and the old split gave it whatever the
+        // cards did not want: on a 240x44 pane that was 14 rows for the display against 23 for the
+        // cards, so the desktop arrived as a small picture in the middle of an empty wall. The card
+        // band's own caption row is counted inside its three parts, and a band that cannot reach
+        // `minCardRows` is dropped - its rows go to the stage rather than showing a 2-row strip.
+        var stageH: Int
+        var cardH: Int
         if windows == 0 {
-            cardH = 0
+            // Nothing to put in the band: the full budget goes to the stage instead of leaving an
+            // empty strip that reads like a layout bug.
             stageH = max(0, budget)
+            cardH = 0
+        } else {
+            stageH = max(minStageRows, Int((Double(budget) * 0.7).rounded()))
+            stageH = min(stageH, budget)
+            cardH = budget - stageH - 1   // -1 is the card caption row
+            if cardH < minCardRows {
+                // no in-between: an undrawable band is no band
+                cardH = 0
+                stageH = budget
+            }
         }
         // The stage band is what its picture needs, not what the budget happens to leave over, and
         // the rows it does not need go to the cards - which are widened so their pictures grow into

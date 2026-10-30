@@ -189,11 +189,11 @@ final class WallCanvasTests: XCTestCase {
                       "rows outside card 1 were repainted: \(touched.sorted())")
         // And the two rows that actually changed: the title line inside the box, the caption.
         // The block of three lines is centred in the interior (the phase-1 mask is centred in its
-        // rect), so in the 13-row card of the 137x44 golden — an 11-row interior — it starts on the
-        // fifth interior row: app at `row + 5`, title at `row + 6`, size at `row + 7`. Top alignment
-        // would have made the title `row + 2`, which is no longer where the painter puts it.
-        XCTAssertEqual(card.rows, 13, "this test reasons about the 13-row card of the 137x44 golden")
-        XCTAssertEqual(touched, Set([card.row + 6, layout.cardCaptions[1].row]))
+        // rect), so the title sits on the second line of that block. Derived from the card's own
+        // height rather than pinned: the 137x44 golden's card is 10 rows tall since the 7:3 split.
+        let interior = card.rows - 2
+        let blockTop = card.row + 1 + max(0, (interior - 3) / 2)
+        XCTAssertEqual(touched, Set([blockTop + 1, layout.cardCaptions[1].row]))
         XCTAssertFalse(bytes.contains(0x0A))
     }
 
@@ -446,27 +446,28 @@ final class WallCanvasTests: XCTestCase {
         let symbols = WallSymbols.emoji
         let canvas = WallCanvas(symbols: symbols)
 
-        // The common card: 43x13, i.e. an 11-row interior for three lines. 11 - 3 = 8, so the block
-        // starts four rows down and app / title / size land on the fifth, sixth and seventh
-        // interior row — four blank rows above it and four below.
+        // The common card: 43 wide and as tall as the 7:3 split leaves (10 rows at 137x44, 13 in
+        // the design's own table). The block is centred in the interior, so its top follows from
+        // `card.rows` rather than from a pinned row number.
         let wide = makeLayout(fixtureState(), cols: 137, rows: 44, model)
         let lines = canvas.lines(cols: 137, rows: 44, model: model, layout: wide, focus: nil)
         let card = wide.cards[0]
         XCTAssertEqual(card.cols, 43)
-        XCTAssertEqual(card.rows, 13)
-        XCTAssertTrue(cardInterior(lines, row: card.row + 5, card)
+        let interior = card.rows - 2
+        let blockTop = card.row + 1 + max(0, (interior - 3) / 2)
+        XCTAssertTrue(cardInterior(lines, row: blockTop, card)
                         .hasPrefix("\(symbols.window) Brave Browser"),
                       "the app line leads the block, at the block's left edge")
-        XCTAssertTrue(cardInterior(lines, row: card.row + 6, card).hasPrefix("「沒有人知道"),
+        XCTAssertTrue(cardInterior(lines, row: blockTop + 1, card).hasPrefix("「沒有人知道"),
                       "the title is the block's second line")
-        XCTAssertTrue(cardInterior(lines, row: card.row + 7, card)
+        XCTAssertTrue(cardInterior(lines, row: blockTop + 2, card)
                         .hasPrefix("1452\(symbols.times)1050"),
                       "the size is the block's third line")
-        for row in (card.row + 1)...(card.row + 4) {
+        for row in (card.row + 1)..<(max(blockTop, card.row + 1)) {
             XCTAssertEqual(cardInterior(lines, row: row, card), blankInterior(card),
                            "row \(row) is above the centred block and has to be empty")
         }
-        for row in (card.row + 8)...(card.maxRow - 1) {
+        for row in (blockTop + 3)..<(max(card.maxRow, blockTop + 3)) {
             XCTAssertEqual(cardInterior(lines, row: row, card), blankInterior(card),
                            "row \(row) is below the centred block and has to be empty")
         }
@@ -474,7 +475,11 @@ final class WallCanvasTests: XCTestCase {
         // No room to centre: a 4-row card (2 interior rows) still starts at the top, and a 3-row
         // card (1 interior row) draws only the app line. Both are today's behaviour, kept on
         // purpose — the mask has to fill the short frame, not float in it.
-        for (rows, cardH, shown) in [(13, 4, 2), (12, 3, 1)] {
+        //
+        // 22 and 18 rows are the smallest panes that still have a card band at all: the 7:3 split
+        // gives the stage round(0.7 * budget) rows, a band under `minCardRows` is dropped, and its
+        // rows go to the stage instead.
+        for (rows, cardH, shown) in [(22, 4, 2), (18, 3, 1)] {
             let small = makeLayout(fixtureState(), cols: 60, rows: rows, model)
             let smallLines = canvas.lines(cols: 60, rows: rows, model: model, layout: small,
                                           focus: nil)
