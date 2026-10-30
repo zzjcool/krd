@@ -18,10 +18,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var previous: [UInt8]?
     /// Matches ScreenWriter.format; set before start().
     var format: krdcore.PixelFormat = .rgb
-    /// Draw the pointer into the captured frame. Off means the picture shows a bare desktop:
-    /// the mirrored cursor is redundant (the pane already follows the local pointer) and every
-    /// mouse move would otherwise dirty the tiles under it.
-    var showsCursor = true
+    /// Draw the pointer into the captured frame. Off by default: the mirrored cursor is redundant
+    /// (the pane already follows the local pointer) and every mouse move would otherwise dirty the
+    /// tiles under it. `--cursor` turns it on.
+    var showsCursor = false
 
     private(set) var framesDelivered = 0
     private(set) var framesSkipped = 0

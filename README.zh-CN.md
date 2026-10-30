@@ -50,7 +50,7 @@ krd --zoom 3 --zoom-at 200,300   # ……以某个全局屏幕点为焦点
 krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
-krd --no-cursor              # 画面里不画指针，鼠标移动也就不会再弄脏瓦片
+krd --cursor                 # 把目标端的指针画进画面（默认不画：画了之后鼠标每动一下都会弄脏瓦片）
 krd --debug                  # 统计写日志文件，不会打到画面上
 krd --format rgba            # 终端不认 f=24 时退回 f=32
 krd --bench                  # 在合成帧上给编码器计时，不需要终端

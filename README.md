@@ -52,7 +52,8 @@ krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global scree
 krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
 krd --display 1 --fps 30
 krd --no-input               # watch only
-krd --no-cursor              # no pointer in the picture, and a moving mouse stops dirtying tiles
+krd --cursor                 # draw the target's pointer into the picture (default: hidden —
+                             # a drawn pointer dirties tiles every time the mouse moves)
 krd --debug                  # stats to a log file, never to the screen
 krd --format rgba            # fall back to f=32 if the terminal rejects f=24
 krd --bench                  # time the encoder on synthetic frames, no terminal needed
