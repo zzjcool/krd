@@ -988,6 +988,23 @@ final class Desk {
 
     // MARK: the wall (--wall)
 
+    /// Ask the terminal for its cell size again and adopt the answer when the pty still reports no
+    /// pixel size (which is the ssh case, and the one where krd has nothing else to go on).
+    ///
+    /// Called from the resize handler, so a pane that is resized after the first paint (or whose
+    /// first answer timed out) ends up with the geometry the terminal actually has rather than with
+    /// the one guessed at startup.
+    private func remeasureWallCell() {
+        guard options.cell == nil, options.pane == nil else { return }
+        let pane = TermGeometry.read()
+        guard pane.pixelWidth == 0 || pane.pixelHeight == 0 else { return }
+        guard let measured = TermGeometry.query(timeoutMs: 500) else { return }
+        TermGeometry.fallbackCell = measured.cellSize
+        Log.write("krd: wall cell re-measured on resize: "
+                  + "\(Int(measured.cellSize.w))x\(Int(measured.cellSize.h)) px "
+                  + "(\(TermGeometry.lastAnswer.label))\n")
+    }
+
     /// Start the landing screen: alternate screen, resize handler, input, one enumeration and a
     /// 1 s tick. No capturer, no tile grid, no chrome rows — the wall owns every cell.
     private func runWall() {
@@ -2344,6 +2361,11 @@ final class Desk {
         // previous grid (the next draw is a full repaint at the new width) and the model is re-read.
         // The guard below would no-op here — a wall session has no filter and no mock.
         if wallState != nil {
+            // Re-*measure*, not just re-fit. The cell size was asked once at startup, and a terminal
+            // that answered late (or was still laying the pane out) left the wall fitting every
+            // picture to a guess for the rest of the session - "没有响应式". A resize is exactly the
+            // moment the terminal has a fresh answer to give, and it is where a font change lands.
+            remeasureWallCell()
             wallCanvas?.invalidate()
             refreshWall(force: true)
             return
