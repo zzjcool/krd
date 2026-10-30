@@ -38,6 +38,12 @@ jobs:
             echo "Tests/ does not exist yet -- skipping swift test"
           fi
 
+      # The escape decoder is an oracle: it turns the bytes krd writes back into the picture a
+      # terminal would draw. Nothing else in CI can see a picture, so a decoder that drifts silently
+      # would turn every visual claim in this repo into a guess. It needs no screen and no permission.
+      - name: Escape stream decoder
+        run: python3 agent/tests/test_vt.py
+
       - name: Build universal binary (arm64 + x86_64)
         run: swift build -c release --arch arm64 --arch x86_64
 
