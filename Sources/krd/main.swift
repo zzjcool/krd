@@ -1005,6 +1005,20 @@ final class Desk {
         for panel in panels {
             paints.mark(slot: panel.slot, failures[panel.slot] == nil ? .picture : .mask)
         }
+        // A frame with no pictures and a *reason* says the reason once, in the footer: four boxes
+        // reading "no picture" answer "what", not "why".
+        //
+        // Two reasons, in this order. `Terminal.app` first, because it is the stronger statement -
+        // it cannot draw a picture whatever the user grants. Then the grant: every panel denied is a
+        // situation, not four independent misses, and repainting will not change it.
+        if pictures.isEmpty, !panels.isEmpty {
+            let program = ProcessInfo.processInfo.environment["TERM_PROGRAM"]
+            if program == "Apple_Terminal" {
+                paints.notice = .terminalCannotShowPictures(terminal: "Terminal")
+            } else if panels.allSatisfy({ denied($0.slot, failures) }) {
+                paints.notice = .screenRecordingDenied(terminal: program)
+            }
+        }
         writer.writeChrome(canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
                                        layout: layout, focus: state.focus,
                                        cellW: pane.cellW, cellH: pane.cellH, paints: paints))
@@ -1024,6 +1038,16 @@ final class Desk {
                              format: .rgba, sync: writer.perTileSync)
         }
         writer.endFrame()
+    }
+
+    /// Is this slot's failure specifically "the grant is missing"?
+    ///
+    /// `denied` also covers a user who declined the prompt, which is the same fix from the reader's
+    /// side, so both are reported the same way. Anything else (a window that closed, a payload that
+    /// would not compress) is that one slot's problem and stays a mask.
+    private func denied(_ slot: Int, _ failures: [Int: PanelCaptureError]) -> Bool {
+        if case .denied = failures[slot] { return true }
+        return false
     }
 
     /// The one seam the capture phase replaces (contract §5.1, design §8).

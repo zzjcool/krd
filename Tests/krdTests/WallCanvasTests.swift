@@ -873,3 +873,51 @@ final class WallCanvasTests: XCTestCase {
     }
 }
 
+
+/// Four boxes saying "no picture" are not an answer to "why is my wall empty": when every panel
+/// failed for want of the Screen Recording grant, the footer says so instead of how to click.
+/// In the same file as `WallCanvasTests` on purpose: the fixture model and `makeLayout` are
+/// private to it, and a second copy of them would be a second thing to keep in step.
+extension WallCanvasTests {
+    func testTheFooterNamesTheTerminalThatNeedsTheGrant() {
+        let canvas = WallCanvas(symbols: .emoji)
+        let model = model()
+        let layout = makeLayout(fixtureState(), cols: 137, rows: 44, model)
+        var paints = WallSlotPaints()
+        for slot in 0...3 { paints.mark(slot: slot, .mask) }
+        paints.notice = .screenRecordingDenied(terminal: "Apple_Terminal")
+        let lines = canvas.lines(cols: 137, rows: 44, model: model, layout: layout, focus: nil,
+                                 paints: paints)
+        let footer = lines[layout.footerRow - 1]   // footerRow is 1-based
+        XCTAssertTrue(footer.contains("grant Screen Recording to Terminal"), footer)
+        XCTAssertFalse(footer.contains("click a card"), "the notice replaces the hint, not adds to it")
+    }
+
+    func testATerminalThatCannotDrawPicturesIsToldWhichOnesCan() {
+        let notice = WallNotice.terminalCannotShowPictures(terminal: "Terminal")
+        let text = notice.text(bullet: "-", dash: " - ")
+        XCTAssertEqual(text, "- Terminal cannot draw pictures - use rex, Ghostty, kitty or WezTerm")
+        // The *diagnosis* has to fit on the narrowest real pane (60 columns, 58 cells of content)
+        // even when the list of alternatives is truncated after it.
+        let diagnosis = "- Terminal cannot draw pictures"
+        XCTAssertLessThan(diagnosis.count, 44)
+        XCTAssertTrue(text.hasPrefix(diagnosis + " - use "), text)
+    }
+
+    func testAnUnknownTerminalGetsTheGenericSentence() {
+        let notice = WallNotice.screenRecordingDenied(terminal: nil)
+        XCTAssertEqual(notice.text(bullet: "-", dash: " - "),
+                       "- no picture - grant Screen Recording to your terminal")
+        // A named one keeps its own name: iTerm and friends are what the grant is actually given to.
+        XCTAssertEqual(WallNotice.screenRecordingDenied(terminal: "WezTerm").text(bullet: "-", dash: " - "),
+                       "- no picture - grant Screen Recording to WezTerm")
+    }
+
+    func testWithoutANoticeTheFooterStillExplainsTheClick() {
+        let canvas = WallCanvas(symbols: .emoji)
+        let model = model()
+        let layout = makeLayout(fixtureState(), cols: 137, rows: 44, model)
+        let lines = canvas.lines(cols: 137, rows: 44, model: model, layout: layout, focus: nil)
+        XCTAssertTrue(lines[layout.footerRow - 1].contains("click a card"))
+    }
+}

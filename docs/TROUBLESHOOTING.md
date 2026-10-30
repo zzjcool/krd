@@ -26,6 +26,15 @@ and with `q=2` the error is invisible, so all you see is black.
 **Fix.** Compress with the system libz: `compress2()` via the `CZlib` module, level 5
 (`Render.swift`). Never `COMPRESSION_ZLIB` for this protocol.
 
+### 1a. The wall's footer says `Terminal cannot draw pictures`
+
+**Cause.** You are running krd inside `Terminal.app`. It has no kitty graphics protocol and never
+will, so nothing krd sends can become a picture - the wall is text and empty boxes, and no grant or
+flag changes that. krd recognises this case (`TERM_PROGRAM=Apple_Terminal`) and says so in its own
+footer, because the alternative is a screen of "no picture" with no explanation.
+**Fix.** Use a terminal that speaks the protocol: rex, Ghostty, kitty or WezTerm. From another Mac,
+`ssh -t user@host krd` (the `-t` is required, or the pane has no tty at all).
+
 ### 1b. Black or garbled tiles on a terminal that used to work (0.1.2+)
 
 **Cause.** Since 0.1.2 the wire format is `f=24` (RGB) instead of `f=32` (RGBA): the desktop is
@@ -266,6 +275,15 @@ so the two spellings of F1–F4 cannot disagree; the parser decision and the tab
 **Cause.** `SCStreamConfiguration.queueDepth = 1` stalls the stream on this macOS generation: the
 first frame is delivered, then no more callbacks arrive and nothing is logged.
 **Fix.** `queueDepth = 3` (`Capture.swift`).
+
+### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
+
+**Cause.** macOS grants Screen Recording per *responsible* application. When krd is started from a
+terminal, the grant belongs to that terminal (Terminal, WezTerm, iTerm, Ghostty) - not to krd, so
+"add krd" in System Settings does nothing. Without it `SCScreenshotManager` fails with `-3801`
+(`userDeclined`) for every panel, which the wall draws as a mask.
+**Fix.** System Settings → Privacy & Security → Screen Recording → enable the terminal you run krd
+in, then restart that terminal. `krd --list` prints windows once the grant is there.
 
 ### 24. The stream dies silently
 

@@ -25,6 +25,14 @@ KRD_DUMP=/tmp/d.bin krd …        # 把发出的每个字节存下来，离线�
 **对策。** 用系统 libz 的 `compress2()`（`CZlib` 模块，level 5，见 `Render.swift`）。这个协议下永远
 不要用 `COMPRESSION_ZLIB`。
 
+### 1a. 墙的页脚写着 `Terminal cannot draw pictures`
+
+**原因。** 你在 `Terminal.app` 里跑 krd。它不支持 kitty 图形协议，以后也不会，所以 krd 发出去的东西
+不可能变成图片——墙只剩文字和空框，任何权限或参数都改不了这件事。krd 认得出这种情况
+（`TERM_PROGRAM=Apple_Terminal`），直接在自己的页脚里说出来，否则就是满屏「no picture」加零解释。
+**解决。** 换一个支持协议的终端：rex、Ghostty、kitty、WezTerm。从另一台机器跑就用
+`ssh -t user@host krd`（`-t` 不能省，否则根本没有 tty）。
+
 ### 1b. 以前正常的终端上出现黑块或花屏（0.1.2+）
 
 **原因。** 从 0.1.2 起线上格式是 `f=24`（RGB）而不是 `f=32`（RGBA）：桌面不透明，alpha 字节是纯开销
@@ -239,6 +247,14 @@ Alt-`G`，后面全变成文字。
 **根因。** 这一代 macOS 上 `SCStreamConfiguration.queueDepth = 1` 会把流卡死：第一帧送到了，之后没有
 任何回调，也不打日志。
 **对策。** `queueDepth = 3`（`Capture.swift`）。
+
+### 23b. 每块面板都是 `no picture`，页脚让你去给屏幕录制权限
+
+**原因。** macOS 的屏幕录制权限是发给「负责的应用」的。krd 从终端里启动时，这个权限属于那个终端
+（Terminal、WezTerm、iTerm、Ghostty），不属于 krd——在系统设置里「加 krd」没有用。没有权限时
+`SCScreenshotManager` 对每块面板都返回 `-3801`（`userDeclined`），墙就画成遮罩。
+**解决。** 系统设置 → 隐私与安全性 → 屏幕录制 → 勾上你运行 krd 的那个终端，然后重启该终端。
+有权限之后 `krd --list` 就能列出窗口。
 
 ### 24. 流无声无息地死了
 

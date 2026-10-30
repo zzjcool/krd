@@ -99,6 +99,10 @@ enum WallSlotPaint: Equatable {
 struct WallSlotPaints: Equatable {
     var stage: WallSlotPaint = .placeholder
     var cards: [WallSlotPaint] = []
+    /// Something the reader has to know about *this* frame, said in the footer instead of the
+    /// click hint. One reason exists today and it is the one that cost the most time to diagnose:
+    /// four boxes saying "no picture" are not an answer to "why is my wall empty".
+    var notice: WallNotice? = nil
 
     func card(_ slot: Int) -> WallSlotPaint {
         cards.indices.contains(slot) ? cards[slot] : .placeholder
@@ -110,6 +114,32 @@ struct WallSlotPaints: Equatable {
         } else {
             while cards.count < slot { cards.append(.placeholder) }
             cards[slot - 1] = paint
+        }
+    }
+}
+
+/// Why a frame has no pictures, in the words the footer has room for.
+enum WallNotice: Equatable {
+    /// The terminal cannot draw a picture at all: `Terminal.app` has no kitty graphics protocol and
+    /// never will (README: "the terminal must speak the kitty graphics protocol"). No grant and no
+    /// repaint can help, so the footer names the terminals that can. This is a hard-coded fact about
+    /// one terminal rather than a probe - krd does not ask a terminal what it supports, and the
+    /// alternative here is an empty wall with no explanation.
+    case terminalCannotShowPictures(terminal: String)
+    /// Every panel in the frame failed with `denied`: the terminal app krd runs under has not been
+    /// granted Screen Recording. `terminal` is `TERM_PROGRAM` when the terminal says (Terminal
+    /// writes `Apple_Terminal`), because "grant it to this app" is only actionable with a name.
+    case screenRecordingDenied(terminal: String?)
+
+    /// The footer sentence, ASCII-safe apart from the leading bullet (which the symbol table owns).
+    func text(bullet: String, dash: String) -> String {
+        switch self {
+        case let .terminalCannotShowPictures(terminal):
+            return "\(bullet) \(terminal) cannot draw pictures\(dash)use rex, Ghostty, kitty "
+                + "or WezTerm"
+        case let .screenRecordingDenied(terminal):
+            let name = terminal.map { $0 == "Apple_Terminal" ? "Terminal" : $0 } ?? "your terminal"
+            return "\(bullet) no picture\(dash)grant Screen Recording to \(name)"
         }
     }
 }
@@ -379,7 +409,7 @@ final class WallCanvas {
         drawBand(&grid, model: model, layout: layout)
         drawCards(&grid, model: model, layout: layout, paints: paints)
         drawCardCaptions(&grid, model: model, layout: layout)
-        drawFooter(&grid, model: model, layout: layout, focus: focus)
+        drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice)
         drawBar(&grid, layout: layout)
         return grid.cells
     }
@@ -573,14 +603,17 @@ final class WallCanvas {
     /// The footer: how many panels there are (right, right-aligned) and what a click does here
     /// (left). After a pick it becomes the way back, which in phase 1 is the whole of "entered".
     private func drawFooter(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                            focus: WallState.Focus?) {
+                            focus: WallState.Focus?, notice: WallNotice? = nil) {
         let content = min(layout.contentCols, grid.cols)
         let budget = drawTail(&grid, row: layout.footerRow, content: content,
                               "\(1 + layout.cards.count) panels", .dim)
         let lead: String
         switch focus {
         case nil:
-            lead = "\(symbols.bullet) click a card\(symbols.dot)wheel or the right bar scrolls"
+            // A frame with something to report says that instead of how to click: the reader's
+            // question at that moment is "why is this empty", not "what does a click do".
+            lead = notice?.text(bullet: symbols.bullet, dash: symbols.dash)
+                ?? "\(symbols.bullet) click a card\(symbols.dot)wheel or the right bar scrolls"
         case .display(let i):
             let name = model.displays.indices.contains(i) ? model.displays[i].name : "no display"
             lead = "\(symbols.back) \(symbols.display) back\(symbols.dot)picked \(name)"
