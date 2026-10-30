@@ -288,8 +288,9 @@ final class WallCanvas {
     /// The paint, as bytes ready for `ScreenWriter.writeChrome`. Never contains `\n`, never ends a
     /// run on `(rows, cols)`, and is empty when nothing changed since the last call.
     func draw(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
-              focus: WallState.Focus?) -> [UInt8] {
-        let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus)
+              focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20) -> [UInt8] {
+        let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
+                          cellW: cellW, cellH: cellH)
         return render(cells, cols: cols, rows: rows)
     }
 
@@ -300,8 +301,9 @@ final class WallCanvas {
     /// painter does not draw. It does not touch the diff state: calling it between two draws must
     /// not turn the second draw into a full repaint.
     func lines(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
-               focus: WallState.Focus?) -> [String] {
-        let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus)
+               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20) -> [String] {
+        let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
+                          cellW: cellW, cellH: cellH)
         var out: [String] = []
         out.reserveCapacity(max(0, rows))
         for y in 0..<max(0, rows) {
@@ -310,17 +312,41 @@ final class WallCanvas {
         return out
     }
 
+    /// The largest rect inside `rect` whose pixel aspect is `aspect` (design §6.6): the picture is
+    /// **fitted, never cropped**, and the cells it does not cover keep the picture's dominant colour
+    /// once the capture phase lands. Pure, and shared with the capture path so the picture cannot
+    /// drift away from the placeholder that was drawn before it arrived.
+    static func fittedRect(aspect: Double, inside rect: CellRect,
+                           cellW: Double, cellH: Double) -> CellRect {
+        guard !rect.isEmpty, aspect > 0, cellW > 0, cellH > 0 else { return rect }
+        let availW = Double(rect.cols) * cellW
+        let availH = Double(rect.rows) * cellH
+        var w = rect.cols
+        var h = rect.rows
+        if availW / availH > aspect {
+            // The band is wider than the picture: height is the constraint (a rotated display).
+            w = Int((availH * aspect / cellW).rounded())
+        } else {
+            h = Int((availW / aspect / cellH).rounded())
+        }
+        w = max(1, min(rect.cols, w))
+        h = max(1, min(rect.rows, h))
+        return CellRect(col: rect.col + (rect.cols - w) / 2,
+                        row: rect.row + (rect.rows - h) / 2,
+                        cols: w, rows: h)
+    }
+
     // MARK: painting
 
     private func build(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
-                       focus: WallState.Focus?) -> [Cell] {
+                       focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
         // Order matters only where two elements share a row: the footer and the band header draw
         // their left-hand text first and the right-aligned tail second, so the tail always wins the
         // cells it needs if a degenerate pane makes them collide.
         drawHeader(&grid, model: model, layout: layout)
-        drawStage(&grid, model: model, layout: layout)
+        drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH)
         drawStageCaption(&grid, model: model, layout: layout)
         drawBand(&grid, model: model, layout: layout)
         drawCards(&grid, model: model, layout: layout)
@@ -346,11 +372,18 @@ final class WallCanvas {
     /// The stage. Phase 1 has no picture, so the panel's rectangle is a dim box with the display
     /// centred in it — the contract's stand-in for the §4 mask, deliberately occupying exactly the
     /// rect the picture will occupy in P2, so nothing moves when it appears.
-    private func drawStage(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
-        let rect = layout.stage
-        guard !rect.isEmpty else { return }
+    private func drawStage(_ grid: inout Grid, model: WallModel, layout: WallLayout,
+                           cellW: Double, cellH: Double) {
+        guard !layout.stage.isEmpty else { return }
         let shown = model.displays.indices.contains(layout.stageStart)
             ? model.displays[layout.stageStart] : nil
+        // Keep the display's own proportions: a 16:10 panel drawn into a 2.8:1 band was the
+        // "wrong-looking wall" in review. The cells the picture does not cover are where its
+        // dominant colour goes when the capture lands.
+        let rect = shown.map {
+            Self.fittedRect(aspect: Double($0.width) / Double(max(1, $0.height)),
+                            inside: layout.stage, cellW: cellW, cellH: cellH)
+        } ?? layout.stage
         let label = shown.map { "\($0.name) \(symbols.dash) \($0.width)\(symbols.times)\($0.height)" }
             ?? "no display"
         // The middle row is the same expression for a box (any `rows >= 3`) and for the "too short

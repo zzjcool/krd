@@ -793,5 +793,34 @@ final class WallCanvasTests: XCTestCase {
         }
         return out
     }
+
+    /// Design §6.6: the picture keeps its own proportions. A band that is wider than the panel gets
+    /// a narrower box centred in it, and a rotated panel gets a shorter one — the box never grows
+    /// past either edge, which is also the rect the capture path will fill.
+    func testTheStageBoxKeepsTheDisplaysProportions() {
+        let band = CellRect(col: 1, row: 1, cols: 135, rows: 24)
+        // 16:10 landscape in a 2.9:1 band (17x33 cells): height-bound, 75 wide at 17x33.
+        let land = WallCanvas.fittedRect(aspect: 1920.0 / 1200.0, inside: band,
+                                        cellW: 17, cellH: 33)
+        XCTAssertEqual(land.rows, 24)
+        XCTAssertEqual(land.cols, 75)
+        XCTAssertEqual(land.col, 1 + (135 - 75) / 2)
+        // 9:16 portrait in the same band: still height-bound, just a narrow box centred in it —
+        // the picture is not squashed to fill the width.
+        let port = WallCanvas.fittedRect(aspect: 1200.0 / 1920.0, inside: band,
+                                        cellW: 17, cellH: 33)
+        XCTAssertEqual(port.cols, 29)
+        XCTAssertEqual(port.rows, 24)
+        XCTAssertEqual(port.col, 1 + (135 - 29) / 2)
+        // A band narrower than the picture: now the width is the constraint and the box is short.
+        let narrow = WallCanvas.fittedRect(aspect: 1.6, inside: CellRect(col: 0, row: 0, cols: 20, rows: 40),
+                                          cellW: 17, cellH: 33)
+        XCTAssertEqual(narrow.cols, 20)
+        XCTAssertEqual(narrow.rows, 6)
+        XCTAssertEqual(narrow.row, (40 - 6) / 2)
+        // Nothing to go on: the band itself, so a display with no known size still draws.
+        XCTAssertEqual(WallCanvas.fittedRect(aspect: 0, inside: band, cellW: 17, cellH: 33), band)
+        XCTAssertEqual(WallCanvas.fittedRect(aspect: 1.6, inside: band, cellW: 0, cellH: 0), band)
+    }
 }
 

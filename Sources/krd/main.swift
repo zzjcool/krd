@@ -427,7 +427,7 @@ final class Desk {
     private var wallTimer: DispatchSourceTimer?
     /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
     /// answer to "would the wall look different?" — the 1 s tick emits nothing while both match.
-    private var wallPane: (cols: Int, rows: Int)?
+    private var wallPane: (cols: Int, rows: Int, cellW: Double, cellH: Double)?
     private var pipeSamples: [Double] = []
     private var targetLabel = "-"
     private var shareable: SCShareableContent?
@@ -776,10 +776,12 @@ final class Desk {
 
     /// The pane the wall draws into: the tty's size, with `--pane` honoured the way the bench and
     /// the mock path honour it (how a wrong-looking wall gets reproduced at an exact size).
-    private func wallGeometry() -> (cols: Int, rows: Int) {
+    private func wallGeometry() -> (cols: Int, rows: Int, cellW: Double, cellH: Double) {
         var geometry = TermGeometry.read()
         if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
-        return (cols: max(1, geometry.cols), rows: max(1, geometry.rows))
+        let cell = geometry.cellSize
+        return (cols: max(1, geometry.cols), rows: max(1, geometry.rows),
+                cellW: cell.w, cellH: cell.h)
     }
 
     /// Re-enumerate the world and repaint — but only when the wall would actually look different:
@@ -790,7 +792,8 @@ final class Desk {
         let pane = wallGeometry()
         let model = WallSource.model()
         guard force || model != wallModel || pane.cols != wallPane?.cols
-                || pane.rows != wallPane?.rows else { return }
+                || pane.rows != wallPane?.rows || pane.cellW != wallPane?.cellW
+                || pane.cellH != wallPane?.cellH else { return }
         wallModel = model
         wallPane = pane
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
@@ -820,7 +823,8 @@ final class Desk {
                                   displays: wallModel.displays.count,
                                   windows: wallModel.windows.count)
         writer.writeChrome(canvas.draw(cols: pane.cols, rows: pane.rows, model: wallModel,
-                                       layout: layout, focus: state.focus))
+                                       layout: layout, focus: state.focus,
+                                       cellW: pane.cellW, cellH: pane.cellH))
     }
 
     /// The one seam the capture phase replaces (contract §5.1, design §8).

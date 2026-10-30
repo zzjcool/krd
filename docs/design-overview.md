@@ -12,7 +12,7 @@ English | [简体中文](design-overview.zh-CN.md)
 ▪ krd    7 windows · 3 displays · most recently used first       ╷
 ┌────────────────────────────────────────────────────────┐   ▲
 │                                                        │   █
-│        main display: one panel filling the stage        │   │
+│     main display: fitted, bars in its dominant colour   │   │
 │                                                        │   │
 └────────────────────────────────────────────────────────┘   ▼
 🖥 Built-in — 1512×982 · main · 1/3                          ╵
@@ -131,15 +131,31 @@ Top to bottom: header 1 row → stage (`stageH + 1` caption) → card band heade
   default emoji presentation and terminals generally draw it narrow. The earlier revision called it wide; that
   was wrong.
 
-## 6.6 How a display fills the stage
+## 6.6 How a display and a window fit their cells
+
+**Fit, always: keep the aspect, never crop, never stretch.** The picture shrinks to the largest size that fits
+its cells, and the cells left over are painted in the **dominant colour of that picture** - so the bars are part
+of the picture, not a black hole.
 
 | case | handling |
 |---|---|
-| landscape (16:9 / 16:10 / 1.54) | **fill the width, crop the bottom, anchor top** - 0.57 of the content survives and the menu bar always does |
-| portrait (1200×1920) | filling the width would keep only 0.23 → **fill the height, centre horizontally**, black on both sides |
-| the rule | `surviving fraction = display aspect / stage aspect`; crop only when `>= 0.5`, otherwise centre |
+| landscape (16:10 / 1.54) | the height fills all 24 rows and the width is ~75 cells centred (137×44 at 17×33 cells); 30 cells of dominant colour on each side |
+| portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
+| window card | the card rect **never changes** (44×14 cells at 137×44); the picture fits inside at the window's own aspect, the rest is dominant colour - a 980×620 window leaves almost none, a 760×900 one leaves bars |
+| the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |
 | capture | **only the one on stage**: three displays + three windows = 4 panels, the same cost as a single display |
+
+Why not cover: cover throws content away, and the display's own shape *is* information - no menu bar, no Dock, and
+the reader cannot tell which display they are looking at. Fitting costs only the bars, and once the bars carry the
+dominant colour they read as part of the picture.
+
+How to find the dominant colour: downsample to ~8×8, quantise each channel to 5 bits, histogram, take the fullest
+bucket; ties go to the one nearest the picture's mean. 64 samples, one pass per picture, cached until the picture
+changes.
+
+Why a window's aspect must not reshape its card: **the layout being fixed** is the whole value of this screen - if
+cards resized to their windows, the second click would miss.
 
 Give up a panel rather than show an 8-cell-wide thumbnail. One at a time plus scrolling is the only arrangement
 where "each one is legible" and "the cost is bounded" are both true.

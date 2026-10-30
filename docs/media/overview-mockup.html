@@ -56,9 +56,10 @@
   .cap:hover{background:#d7dae3;color:#08090c}
   .cards{display:flex;justify-content:flex-start;gap:0;align-items:flex-end}
   .band{display:flex;align-items:stretch;gap:0;overflow:hidden}
-  /* cover: fill the band, crop whatever hangs over — anchored top so the menu bar survives */
-  .cover{position:absolute;inset:0;overflow:hidden;background:#05070c}
-  .cover>i{position:absolute;left:50%;top:0;transform:translateX(-50%);display:block}
+  /* fit: the picture keeps its own proportions at every size; the band it does not cover is
+     painted with the picture's dominant colour, so the bars read as part of the picture */
+  .fit{position:absolute;inset:0;display:grid;place-items:center;overflow:hidden}
+  .fit>i{position:relative;display:block;overflow:hidden}
   /* the scroll control: one column, as tall as the pane, split into one segment per shelf */
   .wall{position:relative;overflow:hidden;flex:0 0 auto}
   .sbar{flex:0 0 var(--cellw);width:var(--cellw);background:#0a0d13;border-left:1px solid #1b2130;
@@ -207,7 +208,10 @@
     { app:"Figma",    title:"krd overview",          size:"1512×940",  kind:"browser" },
     { app:"Chrome",   title:"localhost:3000",        size:"1420×980",  kind:"browser" },
     { app:"iTerm2",   title:"bench — python3",       size:"860×540",   kind:"terminal" },
-  ];
+  ].map(w => {
+    const [ww, hh] = w.size.split("×").map(Number);
+    return { ...w, aspect: ww / hh };
+  });
   // order: the menu-bar display first, then left to right — the way the desk is arranged
   const DISPLAYS = [
     { name:"内建显示器",        w:1512, h:982,  main:true },
@@ -277,13 +281,29 @@
 
   const picHTML = c => c.kind === "window" ? winHTML(c.id + 2, c.appKind) : deskHTML(c.id + 2, c.portrait);
 
+  // What a dominant-colour pass over a real capture returns: the wallpaper's base for a display,
+  // the app's chrome for a window. The letterbox is filled with it (design §6.6).
+  const DOMINANT = { terminal:"#0b0e13", finder:"#1b2028", chat:"#12161f", music:"#1a1414",
+                     editor:"#12161d", browser:"#101318", display:"#141d31" };
+  const dominant = c => DOMINANT[c.kind === "display" ? "display" : c.appKind] || "#101318";
+
+  // The largest box of `aspect` that fits inside w x h: never cropped, never stretched.
+  const fitIn = (w, h, aspect) => {
+    let iw = w, ih = w / aspect;
+    if (ih > h) { ih = h; iw = h * aspect; }
+    return { iw: Math.max(1, Math.round(iw)), ih: Math.max(1, Math.round(ih)) };
+  };
+
   // a window card: fit, a mask if the capture failed — always the same rectangle
   function cardHTML(c, wCells, hCells) {
     const w = wCells * state.cellw, h = hCells * state.cellh;
-    const body = state.fail
-      ? `<div class="mask"><span>${hCells >= 5 ? `👁 ${esc(c.name)}<br>${wCells}×${hCells} 格` : "👁"}</span></div>`
-      : picHTML(c);
-    return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">${body}</div>`;
+    if (state.fail) {
+      return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">
+        <div class="mask"><span>${hCells >= 5 ? `👁 ${esc(c.name)}<br>${wCells}×${hCells} 格` : "👁"}</span></div></div>`;
+    }
+    const { iw, ih } = fitIn(w, h, c.aspect || 1.62);
+    return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px;background:${dominant(c)}">
+      <div class="fit"><i style="width:${iw}px;height:${ih}px">${picHTML(c)}</i></div></div>`;
   }
 
   // a display fills the whole shelf: cover, anchored to the top (the menu bar stays)
@@ -293,15 +313,11 @@
       return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">
         <div class="mask"><span>👁 ${esc(c.name)}<br>${c.sub}</span></div></div>`;
     }
-    // fill the width and crop the bottom, unless that would throw away more than half the display
-    // (a rotated 1200x1920 keeps only a quarter) — then fill the height and centre it instead
-    const picAspect = c.aspect, bandAspect = w / h;
-    const keepIfWidth = picAspect / bandAspect;                 // fraction of the height that survives
-    const fillWidth = keepIfWidth >= 0.5;
-    const iw = fillWidth ? w : h * picAspect;
-    const ih = fillWidth ? w / picAspect : h;
-    return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">
-      <div class="cover"><i style="width:${iw}px;height:${ih}px">${picHTML(c)}</i></div></div>`;
+    // Fit, never crop: a 16:10 panel in a wide band gets a narrower picture centred in it, and a
+    // rotated 1200x1920 gets a tall one — the leftover band is the picture's dominant colour.
+    const { iw, ih } = fitIn(w, h, c.aspect || 1.54);
+    return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px;background:${dominant(c)}">
+      <div class="fit"><i style="width:${iw}px;height:${ih}px">${picHTML(c)}</i></div></div>`;
   }
 
   const capHTML = (c, wCells) =>
@@ -414,7 +430,7 @@
     pane.innerHTML = `<div class="wall" style="width:${Math.round(L.content * cw)}px;height:${state.rows * ch}px">${h}</div>`
       + barHTML(L, ch);
     wire();
-    foot.textContent = `wall: 显示器 ${ds + 1}/${dispList().length}（${L.content}×${L.mainH} 格，cover 铺满）· ` +
+    foot.textContent = `wall: 显示器 ${ds + 1}/${dispList().length}（${L.content}×${L.mainH} 格，fit 保比例，空处填主色）· ` +
       `卡片 ${L.winW}×${L.winRows} 格 × ${state.per} · 窗口 ${s + 1}–${e} / ${state.wins} · ` +
       `总用 ${L.usedRows} / ${state.rows} 行 · 每次只拍 ${1 + Math.min(state.per, state.wins)} 块`;
   }
