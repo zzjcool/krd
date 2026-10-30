@@ -476,8 +476,9 @@ krd: capture stopped (SCStream 3805: Failed during stream due to application con
 **不会放大**——它把窗口 1:1 画在左上角，剩下补黑（1024×678 的窗口放进 70×24 的 pane，实测 31.8% 是黑的）。
 指针映射又铺满整个补了黑的盒子，于是画面右边缘附近的点击会被送到左边约 143 pt 之外。
 
-现在帧尺寸 = 源按 `min(boxW/srcW, boxH/srcH, 1)` 缩放后的像素，落脚格子框是 `ceil`，锚在 pane 左上；
-没铺满的格子留给终端自己的背景，点在那些格子上会被**忽略**而不是猜一个点投出去。`--debug` 会说清是哪种情况：
+现在帧尺寸 = 源按 `min(boxW/srcW, boxH/srcH, 1)` 缩放后的像素，落脚格子框按 pane 能容纳的最大尺寸算
+（`ceil`，锚在 pane 左上，由终端把帧拉进这些格子）；源的宽高比没占满的格子留给终端背景，点在那里会被**忽略**
+而不是猜一个点投出去。`--debug` 会说清是哪种情况：
 
 ```
 krd: source 1024x678 pt -> 1024x678 px in 61x21 cells (the source is smaller than the pane box:

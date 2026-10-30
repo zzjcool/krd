@@ -2,14 +2,14 @@ import XCTest
 @testable import krd
 @testable import krdcore
 
-/// The pointer has to use the same rect as the placement (issue #69).
+/// The pointer must be mapped against where the picture is, not against the capture (issue #71).
 ///
-/// This is the half of the bug that fails silently: the picture shrank to fit the window, but the
-/// mapping kept spreading the pointer across the whole pane, so a click near the right edge of the
-/// picture landed ~143 pt to its left. Building the viewport from the grid's *placement* box (not the
-/// pane) is what keeps the two in step, and it is one line that nothing else would catch.
+/// The picture is placed in `paneCols x paneRows` cells -- which is not the frame's pixel size when
+/// the terminal upscales (`fit > 1`) or when `--scale` sends fewer pixels -- and it is not the whole
+/// pane either when the source's aspect leaves a band. `Viewport` is built from the placement, so a
+/// click inside the picture lands where it looks and a click in the band is outside it.
 final class FitViewportTests: XCTestCase {
-    private let window = CGRect(x: 358, y: 229, width: 1024, height: 678)   // the reported Safari window
+    private let window = CGRect(x: 381, y: 277, width: 1024, height: 678)   // the reported window
 
     private func viewport(cols: Int, rows: Int, cellW: Double = 17, cellH: Double = 33,
                           scale: Double = 1) -> (Viewport, TileGrid) {
@@ -21,60 +21,57 @@ final class FitViewportTests: XCTestCase {
         return (viewport, grid)
     }
 
-    func testTheRightEdgeOfThePictureMapsToTheRightEdgeOfTheWindow() {
-        let (viewport, grid) = viewport(cols: 70, rows: 24)
-        XCTAssertEqual(grid.paneCols, 61)
-        // The far corner of the *picture* is the far corner of the window, not 143 pt short of it.
-        let corner = viewport.point(forPixel: viewport.pixelWidth, viewport.pixelHeight)
-        XCTAssertEqual(corner.x, window.maxX, accuracy: 0.5)
-        XCTAssertEqual(corner.y, window.maxY, accuracy: 0.5)
-        let centre = viewport.point(forPixel: viewport.pixelWidth / 2, viewport.pixelHeight / 2)
-        XCTAssertEqual(centre.x, window.midX, accuracy: 1)
-        XCTAssertEqual(centre.y, window.midY, accuracy: 1)
-    }
-
-    /// The old mapping was built from the pane box: same picture, pointer spread over 1190 px instead
-    /// of 1037. This is that mistake, spelled out, so the test would fail if it came back.
-    func testMappingAcrossThePaneBoxWouldMissByThePadding() {
-        let (correct, _) = viewport(cols: 70, rows: 24)
-        let paneBox = Viewport(pixelWidth: 70 * 17, pixelHeight: 24 * 33,
-                               cols: 70, rows: 24, sourceRect: window)
-        // The picture is 1024 px wide but the box is 1190, so the padded mapping sends the right
-        // edge of the picture to 1024/1190 of the way across: 143 pt short, which is the number the
-        // user reported as "clicking does not land where you click".
-        let px = 1024
-        XCTAssertEqual(correct.point(forPixel: 1037, 300).x, window.maxX, accuracy: 0.5,
-                       "the picture's own box edge is the window's right edge")
-        let wrong = paneBox.point(forPixel: px, 300).x
-        XCTAssertEqual(window.maxX - wrong, 143, accuracy: 1, "the ~143 pt the user measured")
-    }
-
-    func testClicksLeftOfThePictureAreOutsideTheViewport() {
-        let (viewport, _) = viewport(cols: 88, rows: 30)
-        XCTAssertTrue(viewport.contains(pixel: 0, 0))
-        XCTAssertTrue(viewport.contains(pixel: viewport.pixelWidth - 1, viewport.pixelHeight - 1))
-        // The leftover cells are the terminal's, not the window's: a click there must be ignored
-        // rather than posted to a guessed point.
-        XCTAssertFalse(viewport.contains(pixel: viewport.pixelWidth + 1, 100))
-        XCTAssertFalse(viewport.contains(pixel: 100, viewport.pixelHeight + 1))
-        XCTAssertFalse(viewport.contains(cell: viewport.cols + 1, 10))
-        XCTAssertFalse(viewport.contains(cell: 10, viewport.rows + 1))
-    }
-
-    /// `--scale` must not move the pointer, and the fit must not either: the two are independent
-    /// (the cell box is the same at 1 and 0.5, the image is not).
-    func testMappingIsTheSameAtEveryScaleAndFollowsTheFit() {
-        let (full, fullGrid) = viewport(cols: 70, rows: 24, scale: 1)
-        let (half, halfGrid) = viewport(cols: 70, rows: 24, scale: 0.5)
-        XCTAssertEqual(fullGrid.paneCols, halfGrid.paneCols)
-        XCTAssertNotEqual(fullGrid.pixelW, halfGrid.pixelW)
-        for pixel in [(0, 0), (300, 200), (1036, 692)] {
-            XCTAssertEqual(full.point(forPixel: pixel.0, pixel.1),
-                           half.point(forPixel: pixel.0, pixel.1), "pixel \(pixel)")
+    func testTheCornersOfThePlacementAreTheCornersOfTheWindow() {
+        for scale in [1.0, 0.5, 0.25] {
+            let (viewport, grid) = viewport(cols: 70, rows: 24, scale: scale)
+            XCTAssertEqual(grid.paneCols, 70, "scale \(scale)")
+            XCTAssertEqual(viewport.point(forPixel: viewport.pixelWidth, viewport.pixelHeight),
+                           CGPoint(x: window.maxX, y: window.maxY), "scale \(scale)")
+            XCTAssertEqual(viewport.point(forPixel: 0, 0), CGPoint(x: window.minX, y: window.minY),
+                           "scale \(scale)")
         }
     }
 
-    /// A cell click (no SGR-Pixels mode) also lands inside the picture, not in the padding.
+    /// The old failure mode, kept as a test: mapping against the *frame* (1024 px) instead of the
+    /// placement (1190 px) shrinks every click towards the top-left, and the eye reads that as
+    /// "the click lands to the left of where I clicked".
+    func testMappingAgainstTheFrameInsteadOfThePlacementWouldDrift() {
+        let (correct, grid) = viewport(cols: 70, rows: 24)
+        let frame = Viewport(pixelWidth: grid.pixelW, pixelHeight: grid.pixelH,
+                             cols: grid.paneCols, rows: grid.paneRows, sourceRect: window)
+        let px = 1000                                   // most of the way across the placement
+        let right = correct.point(forPixel: px, 400).x
+        XCTAssertEqual(right, 381 + 1000.0 / 1190 * 1024, accuracy: 1)
+        let wrong = frame.point(forPixel: px, 400).x
+        XCTAssertGreaterThan(abs(wrong - right), 100,
+                             "the frame-sized mapping is off by ~139 pt near the right edge")
+    }
+
+    func testClicksInTheAspectBandAreOutsideTheViewport() {
+        // A wide, short pane: the picture keeps the window's aspect, so 47 columns are the terminal's.
+        let (viewport, grid) = viewport(cols: 88, rows: 14)
+        XCTAssertEqual(grid.paneCols, 41)
+        XCTAssertTrue(viewport.contains(pixel: viewport.pixelWidth - 1, viewport.pixelHeight - 1))
+        XCTAssertFalse(viewport.contains(pixel: viewport.pixelWidth + 1, 100),
+                       "one pixel past the picture is not the window")
+        XCTAssertFalse(viewport.contains(pixel: 100, viewport.pixelHeight + 1))
+        XCTAssertFalse(viewport.contains(cell: 42, 5))
+        XCTAssertTrue(viewport.contains(cell: 41, 14))
+    }
+
+    /// `--scale` must not move the pointer: fewer pixels, same placement, same mapping.
+    func testTheMappingIsTheSameAtEveryScale() {
+        let (full, _) = viewport(cols: 70, rows: 24, scale: 1)
+        for scale in [0.5, 0.25] {
+            let (small, _) = viewport(cols: 70, rows: 24, scale: scale)
+            for pixel in [(0, 0), (595, 396), (1189, 791)] {
+                XCTAssertEqual(full.point(forPixel: pixel.0, pixel.1),
+                               small.point(forPixel: pixel.0, pixel.1), "\(pixel) at \(scale)")
+            }
+        }
+    }
+
+    /// A cell click (no SGR-Pixels mode) also lands inside the picture.
     func testCellClicksStayInsideTheWindow() {
         let (viewport, grid) = viewport(cols: 70, rows: 24)
         for cell in [(1, 1), (grid.paneCols / 2, grid.paneRows / 2), (grid.paneCols, grid.paneRows)] {

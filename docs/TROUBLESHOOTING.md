@@ -561,9 +561,10 @@ and pads the rest with black (31.8 % of the frame in a 70×24 pane on a 1024×67
 was mapped across the whole padded box, so a click near the right edge of the picture was sent ~143 pt
 to its left.
 
-The frame is now the source at `min(boxW/srcW, boxH/srcH, 1)` px, placed in `ceil` cells anchored at
-the pane's top-left; the cells it does not reach are the terminal's own background, and a click there
-is ignored instead of guessed. `--debug` says which case you are in:
+The frame is now the source at `min(boxW/srcW, boxH/srcH, 1)` px, placed as large as the pane allows
+(`ceil` cells, anchored at the pane's top-left — the terminal upscales the frame into them); cells the
+source's aspect leaves over are the terminal's own background, and a click there is ignored instead of
+guessed. `--debug` says which case you are in:
 
 ```
 krd: source 1024x678 pt -> 1024x678 px in 61x21 cells (the source is smaller than the pane box:

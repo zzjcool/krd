@@ -145,9 +145,11 @@ window felt unoperable.
 
 The rule now:
 
-- `f = min(boxW / srcW, boxH / srcH, 1)` — never ask for more pixels than the source has, and never
-  upscale beyond the pane either;
-- the frame is `src × f`, which has the source's aspect by construction, so there is nothing to pad;
+- `f = min(boxW / srcW, boxH / srcH)` — the picture is as large as the pane allows (see the next
+  section for why `f` is not clamped at 1) while the *capture* stays `min(f, 1)`, because asking for
+  more pixels than the source has is what gets padded;
+- the frame is `src × min(f, 1)`, which has the source's aspect by construction, so there is nothing
+  to pad;
 - the placement box is `c = ceil(pxW / cellW)`, `r = ceil(pxH / cellH)`, anchored at the pane's
   top-left; the cells it does not reach are left to the terminal's background (krd does not paint
   them);
@@ -184,18 +186,45 @@ ignore them silently), so the mirrored window could not be clicked at all. Mouse
 the global tap while the mirrored window is the one on top at the pointer, and through the pid only
 when it is covered (issue #17's case).
 
+## Where the picture goes: `fit` vs `--scale` (issue #71)
+
+Two independent decisions, one each:
+
+- **`fit = min(boxW/srcW, boxH/srcH)`** is how large the picture is *on screen*, relative to the
+  source's own points. It **may exceed 1**: a 1024x678 window in an 88x30 pane (1496x990 px) is drawn
+  at 1.46x and fills the pane. That enlargement costs no bytes — the terminal does it.
+- **captured pixels = `srcW × min(fit, 1) × --scale`** is how many pixels we *send*. Never more than
+  the source has (ScreenCaptureKit pads a box that is too large instead of upscaling it, #69, and a
+  display mirror must not start capturing more because the pane grew), and `--scale` only ever takes
+  pixels away.
+
+So `--scale` buys bandwidth and nothing else. At `--scale 0.5` the frame is half as wide *in the same
+cells* — measured 512x339 px in 61x21 cells, with the placement bytes identical to scale 1 — and the
+terminal stretches it back by 2x. `--debug` prints that stretch factor, because it is the number that
+explains why a low scale looks soft:
+
+```
+krd: source 1024x678 pt -> 512x339 px in 61x21 cells (scale 0.5)
+     (the terminal stretches x2.04: 512x339 px in 61x21 cells)
+```
+
+The pointer is mapped against the **placement** — the cell box the picture occupies — because that is
+what an SGR-Pixels coordinate addresses. When the source's aspect leaves cells over (a wide pane for
+a tall window), those cells stay the terminal's and a click there is ignored instead of being mapped
+into the window.
+
 ## Capture scale: `--scale` (issue #60)
 
 `--scale 0.5` asks the capturer for half as many pixels in each direction (`SCStreamConfiguration.
-width/height` = the fitted source size × the scale) and lets the terminal upscale the image back
+width/height` = the source × `min(fit, 1)` × the scale) and lets the terminal upscale the image back
 into the same cell box. Nothing else moves:
 
 - the **crop** (`sourceRect`) is unchanged — this is not zoom;
 - the **placement box** (`c=8,r=4` per tile, the same cells) is unchanged, so the picture still fills
   the pane exactly: `--record` gives 1020×627 raw frames at scale 1 and 510×314 at 0.5, while the
   escape stream carries `c=8,r=4` placements and 136×132 / 68×66 px images in the two runs;
-- the **pointer mapping** is unchanged, because SGR-Pixels coordinates are the *pane's* grid, not the
-  image's. Clicked at the same terminal pixel, TextEdit's caret lands at the same offset at both
+- the **pointer mapping** is unchanged, because SGR-Pixels coordinates address the *placement* (the
+  cell box the picture occupies), not the image's pixels. Clicked at the same terminal pixel, TextEdit's caret lands at the same offset at both
   scales (86 and 948 for two points), and a deliberately doubled pixel lands somewhere else;
 
 The cost is resolution: at 0.5 a 13-point glyph is described by half as many pixels per side, so text
