@@ -33,8 +33,18 @@ enum DisplayWidth {
 
     /// Cut to at most `cells` columns without splitting a wide glyph, ending in an ellipsis when
     /// anything was dropped.
+    ///
+    /// Control characters are replaced with spaces first. Every caller is painting **a string the
+    /// user does not control** -- a window title comes from whatever app owns the window -- and a
+    /// title containing `\n` scrolls the grid the wall is positioned on, while one containing
+    /// `ESC` could move the cursor or emit its own escape sequence (issue: the wall's "no newline"
+    /// contract only held for text that had no newline).
     static func truncate(_ s: String, to cells: Int) -> String {
         guard cells > 0 else { return "" }
+        let s = String(s.map { ch -> Character in
+            let printable = ch.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F }
+            return printable ? ch : " "
+        })
         var out = ""
         var used = 0
         var truncated = false
