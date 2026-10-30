@@ -643,17 +643,17 @@ final class StatsJSONWriter {
     func write(tiles: Int, dirty: Int, kb: Int, mbps: Double, zlibMs: Double, writeMs: Double,
                writeMaxMs: Double, writeOver5: Int, px: (Int, Int), cells: (Int, Int),
                delivered: Int, skipped: Int, callbacks: Int, idle: Int, bad: Int,
-               pipeMs: Double) {
+               pipeMs: Double, late: Int = 0, frames: Int = 0, scale: Double = 1) {
         guard let handle else { return }
         let line = String(
             format: "{\"t\":%.2f,\"tiles\":%d,\"dirty\":%d,\"kb\":%d,\"mbps\":%.3f,"
                 + "\"zlib_ms\":%.2f,\"write_ms\":%.2f,\"write_max_ms\":%.2f,\"write_over5\":%d,"
                 + "\"px\":[%d,%d],\"cells\":[%d,%d],"
                 + "\"delivered\":%d,\"skipped\":%d,\"callbacks\":%d,\"idle\":%d,\"bad\":%d,"
-                + "\"pipe_ms\":%.2f}\n",
+                + "\"pipe_ms\":%.2f,\"late\":%d,\"frames\":%d,\"scale\":%.3f}\n",
             (benchNowMs() - started) / 1000.0, tiles, dirty, kb, mbps, zlibMs, writeMs,
             writeMaxMs, writeOver5, px.0, px.1, cells.0, cells.1,
-            delivered, skipped, callbacks, idle, bad, pipeMs)
+            delivered, skipped, callbacks, idle, bad, pipeMs, late, frames, scale)
         handle.write(Data(line.utf8))
     }
 }

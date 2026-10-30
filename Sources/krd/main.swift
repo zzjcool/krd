@@ -20,6 +20,7 @@ struct Options {
     /// the resolution in each direction, upscaled by the terminal into the same cell box. It changes
     /// the *output* size only -- the crop (`sourceRect`) and the input mapping stay as they are.
     var scale = 1.0
+    var scaleAuto = false
     var scaleError: String? = nil
     var noInput = false
     var noQuantise = false
@@ -98,8 +99,9 @@ func usage() -> String {
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
       --log <path>        write diagnostics to a file instead of over the picture
-      --scale <f>         capture f (0 < f <= 1) of the pane's pixels per side and let the terminal
-                          upscale: 0.5 is a quarter of the bytes and visibly softer text (issue #60)
+      --scale <f|auto>    capture f (0 < f <= 1) of the pane's pixels per side and let the terminal
+                          upscale: 0.5 is a quarter of the bytes and visibly softer text (issue #60);
+                          'auto' starts at 1 and steps down while the pipe is behind (issue #64)
       --full-frame        disable tiling, always resend the whole frame
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
@@ -184,7 +186,9 @@ func parseArguments() -> Options {
         case "--scale":
             // The parser does not throw; an unparsable value is carried to `run()` instead of
             // silently meaning "1", because a typo here doubles the bytes on the wire.
-            if let value = Double(args[safe: i + 1] ?? ""), value.isFinite, value > 0, value <= 1 {
+            if (args[safe: i + 1] ?? "").lowercased() == "auto" {
+                options.scaleAuto = true
+            } else if let value = Double(args[safe: i + 1] ?? ""), value.isFinite, value > 0, value <= 1 {
                 options.scale = value
             } else {
                 options.scaleError = "--scale takes a fraction of the pane's pixels, "
@@ -343,6 +347,13 @@ final class Desk {
     private var zoomFocus: CGPoint = .zero
     /// 1 for the synthetic paths (bench/selftest/replay), `--zoom` for a live capture.
     private var zoomScale = 1.0
+    /// The scale in force right now. With `--scale auto` the governor moves this; otherwise it is
+    /// `options.scale` and never changes (issue #64).
+    private var effectiveScale = 1.0
+    private var governor = ScaleGovernor()
+    /// Frames and late frames since the last stats tick, for the `late` column.
+    private var framesSinceTick = 0
+    private var lateSinceTick = 0
     private var geometry: TermGeometry?
     private var captureRestarting = false
     private var restartPending = false
@@ -452,8 +463,13 @@ final class Desk {
         // The selftest is a byte contract about framing, not about resolution: it always captures
         // at the pane's own pixel size, so `--scale` next to it is a usage error rather than a
         // silent change of the sha256 people compare against.
-        if options.selftest && options.scale != 1 {
+        if options.selftest && (options.scale != 1 || options.scaleAuto) {
             throw DeskError.message("--selftest always captures at scale 1; drop --scale")
+        }
+        // `auto` is a reaction to a live write side: the synthetic paths have no pipe, so a scale
+        // that could move under them would make their numbers depend on the machine running them.
+        if options.scaleAuto && (options.bench || options.replay != nil) {
+            throw DeskError.message("--scale auto needs a live capture; --bench and --replay stay at scale 1")
         }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
         if let dir = options.replay, options.bench {
@@ -612,6 +628,7 @@ final class Desk {
         self.filter = filter
         self.geometry = geometry
         zoomScale = options.zoom > 1 ? options.zoom : 1
+        effectiveScale = options.scale
         configureSource(rect: sourceRect)
         self.shareable = content
         targetLabel = target.reason
@@ -718,7 +735,8 @@ final class Desk {
                    ? " (zoom \(zoomScale) of \(Int(fullRect.width))x\(Int(fullRect.height)) centred \(Int(crop.midX)),\(Int(crop.midY)))"
                    : "")
                 + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells"
-                + (options.scale < 1 ? " (scale \(options.scale))" : "")
+                + (options.scaleAuto ? " (scale auto, \(ScaleGovernor.show(effectiveScale)))"
+                   : options.scale < 1 ? " (scale \(ScaleGovernor.show(options.scale)))" : "")
                 + ", \(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
             Log.write(message)
         }
@@ -1271,6 +1289,42 @@ final class Desk {
         return filterRect(for: crop)
     }
 
+    // MARK: adaptive scale (issue #64)
+
+    /// One frame's worth of backpressure, from the frame path.
+    ///
+    /// "Late" is the causal version of "the link is losing": the *write* took longer than the
+    /// interval the frame had to fit in (`1000/fps`). Two reasons it is `write_ms` and not the whole
+    /// pipeline or the encoder: a slow encoder on a fast link is a different problem (and #26's
+    /// answer to it is a cheaper encoder, not fewer pixels), while a full pty is where a frame
+    /// actually sits — #26 measured 619 ms per write on a 20 MB/s link. Using the whole frame's
+    /// duration instead would also call a *content-limited* stream late: a photo repaint that only
+    /// happens twice a second takes longer than 50 ms to encode on any machine.
+    ///
+    /// Called on the frame thread, which is serial, so the governor needs no lock of its own.
+    private func noteFrame(writeMs: Double) {
+        guard options.scaleAuto else { return }
+        framesSinceTick += 1
+        let late = writeMs > 1000.0 / Double(max(options.fps, 1))
+        if late { lateSinceTick += 1 }
+        let now = benchNowMs() / 1000.0
+        if let change = governor.observe(at: now, late: late) {
+            DispatchQueue.main.async { [weak self] in self?.applyScaleChange(change) }
+        } else {
+            governor.settle(at: now)
+        }
+    }
+
+    /// Step the capture resolution in place: the same `updateSource` a pan uses (#57), so the stream
+    /// is not torn down and the terminal never loses its picture (issue #64).
+    private func applyScaleChange(_ change: ScaleGovernor.Change) {
+        guard options.scaleAuto, let geometry, change.to != effectiveScale else { return }
+        effectiveScale = change.to
+        applyLayout(geometry: geometry)
+        Log.write("krd: \(change.line)\n")
+        panCapture()
+    }
+
     private func applyLayout(geometry: TermGeometry) {
         let crop = Viewport.crop(full: fullRect, scale: zoomScale, focus: zoomFocus)
         let aspect = crop.width / max(crop.height, 1)
@@ -1284,7 +1338,7 @@ final class Desk {
         }
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
-                                   bpp: writer.format.bytesPerPixel, scale: options.scale)
+                                   bpp: writer.format.bytesPerPixel, scale: effectiveScale)
         if chromeEnabled {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
@@ -1441,6 +1495,7 @@ final class Desk {
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
         framesHandled += 1
+        let emittedBefore = writer.framesEmitted
 
         // A window mirror whose very first frame is essentially all black is almost certainly a
         // compositing layer that slipped past the layer test, not an app (issue #24). One line,
@@ -1463,7 +1518,13 @@ final class Desk {
         }
         // capture callback -> last byte out: the number that is actually felt (Q4 in
         // docs/BENCHMARK.md). `defer` so every early return is measured too.
-        defer { lastPipeMs = benchNowMs() - started }
+        defer {
+            lastPipeMs = benchNowMs() - started
+            // A deduped frame writes nothing, so it says nothing about the pipe (issue #64).
+            if writer.framesEmitted != emittedBefore {
+                noteFrame(writeMs: writer.lastWriteMs)
+            }
+        }
         guard let grid = currentGrid() else { return }
         guard width == grid.pixelW, height == grid.pixelH else {
             if !reportedFrameMismatch {
@@ -1591,8 +1652,13 @@ final class Desk {
             let layout = self.currentGrid()
             let tiles = frames - lastFrames
             let mbps = Double(bytes - lastBytes) / 1_048_576.0
+            // Frames the write side could not keep up with, since the previous tick (issue #64).
+            let late = self.lateSinceTick
+            let seen = self.framesSinceTick
+            self.lateSinceTick = 0
+            self.framesSinceTick = 0
             let line = String(
-                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f max=%.0f over5=%d]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d pipe=%.1f\n",
+                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f max=%.0f over5=%d]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d pipe=%.1f late=%d/%d\n",
                 tiles,
                 self.lastDirtyCount,
                 writer.lastFrameBytes / 1024,
@@ -1602,7 +1668,7 @@ final class Desk {
                 layout?.paneCols ?? 0, layout?.paneRows ?? 0,
                 capturer.framesDelivered, capturer.framesSkipped, capturer.callbacks,
                 capturer.idleFrames, capturer.badFrames,
-                self.lastPipeMs
+                self.lastPipeMs, late, frames
             )
             Log.write(line)
             statsJSON?.write(tiles: tiles, dirty: self.lastDirtyCount, kb: writer.lastFrameBytes / 1024,
@@ -1612,7 +1678,8 @@ final class Desk {
                              cells: (layout?.paneCols ?? 0, layout?.paneRows ?? 0),
                              delivered: capturer.framesDelivered, skipped: capturer.framesSkipped,
                              callbacks: capturer.callbacks, idle: capturer.idleFrames,
-                             bad: capturer.badFrames, pipeMs: self.lastPipeMs)
+                             bad: capturer.badFrames, pipeMs: self.lastPipeMs,
+                             late: late, frames: seen, scale: self.effectiveScale)
             writer.resetWriteStats()
             lastBytes = bytes
             lastFrames = frames
