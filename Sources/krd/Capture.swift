@@ -33,6 +33,15 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Called with (pixels, width, height) for every visually changed frame.
     var onFrame: (([UInt8], Int, Int) -> Void)?
 
+    /// How old the frame already was when ScreenCaptureKit handed it over: `callback − PTS`, in ms.
+    ///
+    /// This is the half of the delay that used to be invisible. `pipe` (see `Desk.noteFrame`) starts
+    /// at this callback, so a slow *capture* — the compositor waiting for a frame, a display waking
+    /// up, a window being re-shot — was billed to our encoder. `-1` means "not measured": the mock
+    /// and replay paths have no presentation timestamp, and the panel prints `—` rather than a
+    /// confident zero (issue #52).
+    public private(set) var lastCapMs = -1.0
+
     /// The stream died on its own (the window server dropped the connection, `-3805`, or the
     /// display was reconfigured under it). Without this the process keeps running, keeps writing
     /// stats, and leaves the last frame on screen forever -- a 30-minute soak found exactly that
@@ -131,6 +140,17 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
+        // Measured at the top, before the copy: this is "how long did the frame sit around before we
+        // saw it", and everything after this line is `pipe`'s business. ScreenCaptureKit timestamps
+        // in host time, which is the same base as `benchNowMs()` (uptime, no sleep).
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let ptsSeconds = pts.isValid ? CMTimeGetSeconds(pts) : .nan
+        if ptsSeconds.isFinite, ptsSeconds > 0 {
+            let age = benchNowMs() - ptsSeconds * 1000
+            lastCapMs = age.isFinite && age >= 0 && age < 60_000 ? age : -1
+        } else {
+            lastCapMs = -1
+        }
         callbacks += 1
         // The frame's state lives in the buffer's *sample attachments*, not in `CMGetAttachment`:
         // that call has never returned anything here, so `?? 0` silently turned every frame into

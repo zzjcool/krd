@@ -647,6 +647,8 @@ final class Desk {
     private var chromeMetrics = ChromeMetrics()
     private var chromeGeometry: ChromeGeometry?
     private var chromeTimer: DispatchSourceTimer?
+    /// The single 1 Hz tick that samples rates and feeds the panel, the log line and the JSON.
+    private var diagnosticsTimer: DispatchSourceTimer?
     private var chromeDirty = true
     private var chromeSampleBytes = 0
     private var chromeSampleQueue = 0
@@ -693,7 +695,17 @@ final class Desk {
     /// zlib level for a wall panel. Level 6 would spend ~3x the CPU to save a few percent on a
     /// picture that is only encoded when the desk changes (design §12: no frame loop to pay for).
     private static let wallPanelLevel = 3
-    private var pipeSamples: [Double] = []
+    /// Recent timings, newest captured each second. Percentiles rather than averages: a stutter is a
+    /// p99, and the mean is exactly what hides one (see `Series`).
+    private var capSeries = Series()
+    private var pipeSeries = Series()
+    private var zlibSeries = Series()
+    private var writeSeries = Series()
+    /// The one rate definition (`Rates`), sampled by the diagnostics timer and read by both
+    /// renderers, so the panel and `--stats-json` cannot disagree about what `tiles/s` means.
+    private var lastRates = Rates()
+    private var rateCounters = Rates.Counters()
+    private var rateSampleAt = Double(0)
     private var targetLabel = "-"
     private var shareable: SCShareableContent?
     private var mock: MockDesktop?
@@ -889,8 +901,9 @@ final class Desk {
             writer.beginSession()
             startChrome()
             installSignalCleanup()
+            installReportHandler()
             installResizeHandler()
-            if options.debug || options.statsJSON != nil { startStats() }
+            startDiagnostics()
             startInput()
             let mock = MockDesktop(width: layout.pixelW, height: layout.pixelH, bpp: layout.bpp,
                                    fps: options.fps) { [weak self] pixels, width, height in
@@ -1033,9 +1046,10 @@ final class Desk {
         writer.clear()
         startChrome()
         installSignalCleanup()
+        installReportHandler()
         installResizeHandler()
         installDisplayChangeHandler()
-        if options.debug || options.statsJSON != nil { startStats() }
+        startDiagnostics()
 
         try await capturer.start(filter: filter, sourceRect: cropForFilter(),
                                  width: layout.pixelW, height: layout.pixelH, fps: options.fps)
@@ -2636,55 +2650,148 @@ final class Desk {
 
     private var signalSources: [DispatchSourceSignal] = []
 
-    private func startStats() {
-        let writer = self.writer
-        let capturer = self.capturer
+    /// `kill -USR1` cycles the panel (the same cycle `Tab` does), `kill -USR2` writes the report
+    /// bundle. Both exist so a session that is *stuck* can be inspected without touching the
+    /// terminal that has no room left for text (issue #52).
+    private func installReportHandler() {
+        signal(SIGUSR1, SIG_IGN)
+        let cycle = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        cycle.setEventHandler { [weak self] in
+            guard let self, self.chromeAvailable else { return }
+            let all = ChromePanel.allCases
+            let index = all.firstIndex(of: self.chromeState.panel ?? .stats) ?? 0
+            self.chromeState.panel = all[(index + 1) % all.count]
+            self.chromeDirty = true
+            self.drawChrome()
+        }
+        cycle.resume()
+        signalSources.append(cycle)
+
+        signal(SIGUSR2, SIG_IGN)
+        let report = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        report.setEventHandler { [weak self] in self?.writeReport() }
+        report.resume()
+        signalSources.append(report)
+    }
+
+    /// One attachable file: what the numbers are now, where each series has been, the switches that
+    /// were on, and the tail of the log. `ssh host pkill -USR2 krd` is the whole workflow, so the
+    /// path is fixed rather than per-pid.
+    func writeReport() {
+        // Fresh numbers: the report may be asked for between ticks, or in a mode that never sampled.
+        sampleRates()
+        sampleChrome()
+        let m = chromeMetrics
+        let verdict: String
+        if m.capMs < 0 {
+            verdict = "capture age not measured (mock/replay, or no frame yet) — \(Int(m.pipeMs)) ms is all we do with a frame"
+        } else if m.capP99Ms > m.pipeP99Ms * 2 {
+            verdict = "the *capture* is the delay: cap p99 \(Int(m.capP99Ms)) ms vs pipe p99 \(Int(m.pipeP99Ms)) ms"
+        } else if m.pipeP99Ms > m.capP99Ms * 2 {
+            verdict = "our *write* path is the delay: pipe p99 \(Int(m.pipeP99Ms)) ms vs cap p99 \(Int(m.capP99Ms)) ms"
+        } else {
+            verdict = "both halves are of the same order: cap p99 \(Int(m.capP99Ms)) ms, pipe p99 \(Int(m.pipeP99Ms)) ms"
+        }
+
+        func series(_ name: String, _ s: Series, decimals: Int = 1) -> String {
+            guard !s.isEmpty else { return "\(name): (no samples)\n" }
+            let values = s.all.map { String(format: "%.\(decimals)f", $0) }.joined(separator: " ")
+            return String(format: "%@: n=%d p50=%.1f p99=%.1f max=%.1f\n  %@\n",
+                          name, s.count, s.percentile(0.5), s.percentile(0.99), s.max, values)
+        }
+
+        var out = ""
+        out += "krd \(krdVersion) report\n"
+        out += "pid \(getpid())  \(ISO8601DateFormatter().string(from: Date()))  host \(Host.current().localizedName ?? "-")\n"
+        out += "\n== the question\n\(verdict)\n"
+        out += "cap = ScreenCaptureKit callback − PTS; pipe = callback → last byte written; e2e = cap + pipe.\n"
+        out += "\n== now\n"
+        out += "target \(m.target)\(m.title.isEmpty ? "" : " (\(m.title))")\n"
+        out += "frame \(Series.show(m.e2eMs)) ms (cap \(m.capLabel) + pipe \(Series.show(m.pipeMs)))"
+            + ", p99 cap \(m.capP99Label) pipe \(Series.show(m.pipeP99Ms))"
+            + ", input \(Series.show(m.inputMs)) ms\n"
+        out += String(format: "geometry %dx%d px, %dx%d cells of %gx%g (%@), scale %.3g%@\n",
+                      m.pxW, m.pxH, m.cellsW, m.cellsH, m.cellW, m.cellH, m.geometrySource,
+                      m.scale, m.scaleAuto ? " auto" : "")
+        out += "encoder \(m.format), q\(m.quality) \(m.qualityLabel), sync \(m.sync) q=\(m.quiet), tiles \(m.tileSpec)\n"
+        out += String(format: "rates %.2f fps of %d, capture %.1f/s, %d tiles/s, %.2f MB/s, %d KB/frame, skipped %.0f/s idle %.0f/s\n",
+                      m.fps, m.fpsTarget, m.captureFps, m.tilesPerSec, m.mbps, m.kbPerFrame,
+                      m.skippedPerSec, m.idlePerSec)
+        out += String(format: "counters frames %d, delivered %d, skipped %d, idle %d, bad %d, callbacks %d\n",
+                      m.framesTotal, m.delivered, m.skipped, m.idle, m.bad, m.callbacks)
+        out += "switches \(m.envSwitches)\n"
+        out += "input \(m.inputActive ? "active" : "off")\(m.dryRun ? ", dry-run" : ""), cursor \(m.cursorDrawn ? "drawn" : "hidden")\n"
+        out += "log \(m.logPath)\n"
+        if !m.recording.isEmpty { out += "recording \(m.recording)\n" }
+        out += "\n== series (oldest first)\n"
+        out += series("cap", capSeries)
+        out += series("pipe", pipeSeries)
+        out += series("zlib", zlibSeries, decimals: 2)
+        out += series("write", writeSeries, decimals: 2)
+        out += series("input", inputSeriesSnapshot())
+        out += "\n== last \(Log.recentLines.count) log lines\n"
+        out += Log.recentLines.joined(separator: "\n") + "\n"
+
+        let target = NSTemporaryDirectory() + "krd-report.txt"
+        do {
+            try out.write(toFile: target, atomically: true, encoding: .utf8)
+            Log.write("krd: report written to \(target) — \(verdict)\n")
+        } catch {
+            Log.write("krd: could not write the report to \(target): \(error)\n")
+        }
+    }
+
+    /// The input series lives in `InputReader` (it is measured where the bytes are read), but the
+    /// report wants it next to the others.
+    private func inputSeriesSnapshot() -> Series { input?.inputSamples ?? Series() }
+
+    /// The one 1 Hz diagnostics tick: sample once, then feed every consumer from that snapshot --
+    /// the panel, the `--debug` line and `--stats-json`.
+    ///
+    /// One timer rather than one per renderer, because rates are *deltas over an interval*: two
+    /// timers sampling the same counters would each see half the interval and print half the rate.
+    private func startDiagnostics() {
         let statsJSON = StatsJSONWriter(path: options.statsJSON)
-        var lastBytes = 0
-        var lastFrames = 0
+        sampleRates()
+        sampleChrome()
+        if chromeAvailable { drawChrome() }
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            let bytes = writer.totalBytes
-            let frames = writer.framesEmitted
-            let layout = self.currentGrid()
-            let tiles = frames - lastFrames
-            let mbps = Double(bytes - lastBytes) / 1_048_576.0
-            // Frames the write side could not keep up with, since the previous tick (issue #64).
-            let late = self.lateSinceTick
-            let seen = self.framesSinceTick
-            self.lateSinceTick = 0
-            self.framesSinceTick = 0
-            let line = String(
-                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f max=%.0f over5=%d]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d pipe=%.1f late=%d/%d\n",
-                tiles,
-                self.lastDirtyCount,
-                writer.lastFrameBytes / 1024,
-                mbps,
-                writer.lastCompressMs, writer.lastWriteMs, writer.writeMaxMs, writer.writeOver5Ms,
-                layout?.pixelW ?? 0, layout?.pixelH ?? 0,
-                layout?.paneCols ?? 0, layout?.paneRows ?? 0,
-                capturer.framesDelivered, capturer.framesSkipped, capturer.callbacks,
-                capturer.idleFrames, capturer.badFrames,
-                self.lastPipeMs, late, frames
-            )
-            Log.write(line)
-            statsJSON?.write(tiles: tiles, dirty: self.lastDirtyCount, kb: writer.lastFrameBytes / 1024,
-                             mbps: mbps, zlibMs: writer.lastCompressMs, writeMs: writer.lastWriteMs,
-                             writeMaxMs: writer.writeMaxMs, writeOver5: writer.writeOver5Ms,
-                             px: (layout?.pixelW ?? 0, layout?.pixelH ?? 0),
-                             cells: (layout?.paneCols ?? 0, layout?.paneRows ?? 0),
-                             delivered: capturer.framesDelivered, skipped: capturer.framesSkipped,
-                             callbacks: capturer.callbacks, idle: capturer.idleFrames,
-                             bad: capturer.badFrames, pipeMs: self.lastPipeMs,
-                             late: late, frames: seen, scale: self.effectiveScale)
-            writer.resetWriteStats()
-            lastBytes = bytes
-            lastFrames = frames
+            self.sampleRates()
+            self.sampleChrome()
+            if self.chromeAvailable { self.drawChrome() }
+            self.emitDiagnostics(json: statsJSON)
         }
         timer.resume()
-        statsTimer = timer
+        diagnosticsTimer = timer
+    }
+
+    /// The `--debug` line and `--stats-json`, both read from the panel's own metrics: one schema,
+    /// two renderers (issue #52's acceptance test).
+    private func emitDiagnostics(json: StatsJSONWriter?) {
+        let m = chromeMetrics
+        // Frames the write side could not keep up with, since the previous tick (issue #64).
+        let late = lateSinceTick
+        let seen = framesSinceTick
+        lateSinceTick = 0
+        framesSinceTick = 0
+        if options.debug {
+            let line = String(
+                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  "
+                    + "ms[cap=%.1f pipe=%.1f(p99 %.1f) zlib=%.0f write=%.0f max=%.0f over5=%d]  "
+                    + "%dx%d px %dx%d cells  delivered=%d/s skipped=%d/s idle=%d/s bad=%d  "
+                    + "input=%.1f late=%d/%d\n",
+                m.tilesPerSec, m.dirty, m.kbPerFrame, m.mbps,
+                m.capMs, m.pipeMs, m.pipeP99Ms, m.zlibMs, m.writeMs, m.writeMaxMs, m.writeOver5,
+                m.pxW, m.pxH, m.cellsW, m.cellsH,
+                Int(m.captureFps.rounded()), Int(m.skippedPerSec.rounded()),
+                Int(m.idlePerSec.rounded()), m.bad, m.inputMs, late, seen)
+            Log.write(line)
+        }
+        json?.write(m, late: late, frames: seen)
+        writer.resetWriteStats()
     }
 
     // MARK: TUI layer
@@ -2698,15 +2805,27 @@ final class Desk {
 
         sampleChrome()
         drawChrome()
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.sampleChrome()
-            self.drawChrome()
+        // No timer here: `startDiagnostics()` samples once a second and draws the panel from that
+        // same snapshot. Two timers meant two sets of deltas, and "tiles/s" printed by the panel was
+        // not the one printed by `--debug` (issue #52).
+    }
+
+    /// Turn the counters into rates, once per tick, from one snapshot pair.
+    ///
+    /// Called only by `startDiagnostics()`: two callers would consume the deltas twice and halve
+    /// every rate in the process.
+    @discardableResult
+    private func sampleRates() -> Rates {
+        let now = benchNowMs() / 1000.0
+        let current = Rates.Counters(frames: framesHandled, delivered: capturer.framesDelivered,
+                                     tiles: writer.framesEmitted, bytes: writer.totalBytes,
+                                     skipped: capturer.framesSkipped, idle: capturer.idleFrames)
+        if rateSampleAt > 0 {
+            lastRates = Rates(previous: rateCounters, current: current, seconds: now - rateSampleAt)
         }
-        timer.resume()
-        chromeTimer = timer
+        rateCounters = current
+        rateSampleAt = now
+        return lastRates
     }
 
     /// Fill `chromeMetrics` from the same counters the `--debug` line prints, plus the rates
@@ -2728,21 +2847,26 @@ final class Desk {
         m.version = krdVersion
         m.target = targetLabel
         m.fpsTarget = options.qualityAuto ? effectiveFps : options.fps
-        m.fps = Double(framesHandled - chromeSampleFrames) / elapsed
+        // Rates come from `sampleRates()`, which owns the one definition of what `fps`, `tiles/s`,
+        // `MB/s` and the two starvation rates mean (issue #52).
+        m.fps = lastRates.fps
+        m.captureFps = lastRates.captureFps
+        m.mbps = lastRates.mbps
+        m.skippedPerSec = lastRates.skippedPerSec
+        m.idlePerSec = lastRates.idlePerSec
         m.scale = effectiveScale
         m.scaleAuto = options.scaleAuto
-        m.captureFps = Double(capturer.framesDelivered - chromeSampleDelivered) / elapsed
         chromeSampleFrames = framesHandled
         chromeSampleDelivered = capturer.framesDelivered
-        m.mbps = Double(dBytes) / 1_048_576.0 / elapsed
         m.kbPerFrame = writer.lastFrameBytes / 1024
         m.quality = writer.quality.value
         m.qualityLabel = writer.quality.label
         m.quantisedTiles = writer.quantisedTiles
         m.skippedTiles = writer.skippedTiles
-        m.tilesPerSec = Int(Double(dTiles) / elapsed)
+        m.tilesPerSec = Int(lastRates.tilesPerSec.rounded())
         m.dirty = lastDirtyCount
         m.tilesTotal = layout?.count ?? 0
+        m.framesTotal = framesHandled
         m.clock = krdClock.string(from: now)
         let queue = ptyQueueBytes()
         m.queueBytes = queue
@@ -2753,13 +2877,21 @@ final class Desk {
             chromeSampleQueue = queue
         }
         m.queueMs = queue > 0 && m.mbps > 0.01 ? Double(queue) / (m.mbps * 1_048_576) * 1000 : 0
+        // The split: `cap` is how old the frame already was when ScreenCaptureKit handed it over,
+        // `pipe` is everything we do with it until the last byte is out. `e2e` is their sum, and it
+        // is the only number that answers "was it the capture or the write" (issue #52).
+        let capNow = capturer.lastCapMs
+        if capNow >= 0 { capSeries.add(capNow) } else { capSeries = Series() }
+        pipeSeries.add(lastPipeMs)
+        zlibSeries.add(writer.lastCompressMs)
+        writeSeries.add(writer.lastWriteMs)
+        m.capMs = capNow
+        m.capP99Ms = capSeries.isEmpty ? -1 : capSeries.percentile(0.99)
         m.pipeMs = lastPipeMs
-        pipeSamples.append(lastPipeMs)
-        if pipeSamples.count > 300 { pipeSamples.removeFirst(pipeSamples.count - 300) }
-        m.pipeP99Ms = pipeSamples.max() ?? 0
-        m.capMs = -1                       // not measured yet: splitting it needs PTS (#52)
-        m.e2eMs = lastPipeMs
+        m.pipeP99Ms = pipeSeries.isEmpty ? 0 : pipeSeries.percentile(0.99)
+        m.e2eMs = capNow >= 0 ? capNow + lastPipeMs : lastPipeMs
         m.zlibMs = writer.lastCompressMs
+        m.zlibP99Ms = zlibSeries.isEmpty ? 0 : zlibSeries.percentile(0.99)
         m.writeMs = writer.lastWriteMs
         m.writeMaxMs = writer.writeMaxMs
         m.writeOver5 = writer.writeOver5Ms
@@ -2778,6 +2910,8 @@ final class Desk {
         m.sync = writer.syncLabel
         m.quiet = writer.quietLabel
         m.inputActive = input != nil
+        m.inputMs = input?.lastInputMs ?? 0
+        m.inputP99Ms = input?.inputP99Ms ?? 0
         m.dryRun = options.dryRun
         m.cursorDrawn = options.drawsCursor
         m.logPath = Log.path ?? "-"
@@ -3045,6 +3179,8 @@ final class Desk {
         }
         chromeTimer?.cancel()
         chromeTimer = nil
+        diagnosticsTimer?.cancel()
+        diagnosticsTimer = nil
         // The wall's 1 s tick holds the desk (and the model) alive: without this, a torn-down wall
         // keeps enumerating the window server and painting into a session that is already gone.
         wallTimer?.cancel()

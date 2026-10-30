@@ -229,7 +229,7 @@ picture) or the parser dropped it.
 [ARCHITECTURE §9](ARCHITECTURE.md#9-diagnostics-wiring)):
 
 ```
-stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0 max=3 over5=0]  2329x1452 px 137x44 cells  cap=120/4/124 idle=3 bad=0 pipe=4.1
+stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[cap=49.2 pipe=1.5(p99 6.0) zlib=1 write=0 max=3 over5=0]  2329x1452 px 137x44 cells  delivered=120/s skipped=4/s idle=3/s bad=0  input=0.4 late=0/20
 ```
 
 Reading it: `tiles/s 0` and `dirty 0` for several seconds = nothing changed (or nothing arrives);

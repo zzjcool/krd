@@ -177,8 +177,11 @@ The static-screen invariant is asserted there, not observed: `wire.py --assert-z
 
 ### L3 — soak (`--stats-json`)
 
-`startStats()` already built every field; `--stats-json <path>` writes them as one NDJSON line per
-second, plus `write_max_ms`, `write_over5`, `pipe_ms`. `bench/soak-report.py` turns the file into
+`startDiagnostics()` already built every field; `--stats-json <path>` writes them as one NDJSON line
+per second, plus `write_max_ms`, `write_over5`, and since issue #52 the `cap`/`pipe` split
+(`cap_ms`, `pipe_ms`, their p99s, `e2e_ms`) and the input timing (`input_ms`). A session that is too
+slow to read in a terminal can also be dumped with `kill -USR2 <krd>` — see
+[ARCHITECTURE](ARCHITECTURE.md) §"The report bundle". `bench/soak-report.py` turns the file into
 percentiles and a verdict ("the terminal is behind; lower --fps or use --tile 16x8"). Not in CI: no
 stable machine, no screen to capture.
 

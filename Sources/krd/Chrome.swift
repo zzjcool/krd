@@ -1,4 +1,5 @@
 import Foundation
+import krdcore
 
 /// The TUI layer: a status bar and a set of panels drawn on the rows the layout reserves for
 /// chrome. This is the `--dev` surface, and it is deliberately a separate layer: nothing below
@@ -68,6 +69,14 @@ struct ChromeState {
     var toast: String? = nil
 }
 
+extension ChromeMetrics {
+    /// `40.2`, or `—` when the capture age was not measured (`capMs < 0`, which is what the mock and
+    /// replay paths report). Negative cannot be formatted as a number anywhere: it would read as
+    /// "very fast capture" instead of "we do not know".
+    var capLabel: String { capMs < 0 ? "—" : Series.show(capMs) }
+    var capP99Label: String { capMs < 0 ? "—" : Series.show(capP99Ms) }
+}
+
 /// One second of numbers: the same counters the `--debug` stats line prints, plus the rates it
 /// only implies and the switches that are otherwise invisible.
 struct ChromeMetrics {
@@ -83,13 +92,27 @@ struct ChromeMetrics {
     var scale = 1.0
     var scaleAuto = false
     var captureFps = 0.0
+    /// How often the capturer skipped / reported an unchanged screen, per second. A starved capture
+    /// (nothing delivered at all) is otherwise indistinguishable from a fast one in the panel.
+    var skippedPerSec = 0.0
+    var idlePerSec = 0.0
     var mbps = 0.0
     var kbPerFrame = 0
     var tilesPerSec = 0
     var dirty = 0
     var tilesTotal = 0
+    /// Frames drawn since the session began (a counter, unlike `fps`).
+    var framesTotal = 0
+    /// Age of the frame at ScreenCaptureKit's callback (`callback − PTS`), and our own share of the
+    /// delay (`callback → last byte written`). `e2eMs` is their sum. `capMs < 0` = not measured
+    /// (mock, replay), which the panel shows as `cap —` rather than as a confident zero.
     var capMs = 0.0
+    var capP99Ms = 0.0
     var pipeMs = 0.0
+    /// `parse → CGEvent.post` for the last key or click: the only input number that says whether the
+    /// typing lag is ours or the network's.
+    var inputMs = 0.0
+    var inputP99Ms = 0.0
     /// Bytes sitting in the pty's own output buffer (`TIOCOUTQ`), -1 = not available.
     ///
     /// Not a lag meter: the buffer is ~1 KB and sshd drains it immediately into its *userspace*
@@ -108,6 +131,7 @@ struct ChromeMetrics {
     var pipeP99Ms = 0.0
     var e2eMs = 0.0
     var zlibMs = 0.0
+    var zlibP99Ms = 0.0
     /// `--quality` as it stands, and the bit depth it allows: "80" and "5-6-5", or "100 lossless".
     var quality = 80
     var qualityLabel = "5-6-5"
@@ -359,7 +383,9 @@ final class Chrome {
         // which is the moment it has to be noticed.
         let scale: Seg = ("\(String(format: "%.2g", m.scale))×", m.scaleAuto ? .accent : .warn, "scale")
         let bw: Seg = ("\(String(format: "%.1f", m.mbps)) MB/s", .plain, "stats")
-        let lat: Seg = (cols >= 84 ? "pipe \(Int(m.e2eMs)) ms" : "\(Int(m.e2eMs)) ms", latStyle, "stats")
+        // `frame`, not `pipe`: since #52 this number is cap + pipe, and the bar must not call all of
+        // it ours -- at 10 fps the capture half is ~50 ms on its own.
+        let lat: Seg = (cols >= 84 ? "frame \(Int(m.e2eMs)) ms" : "\(Int(m.e2eMs)) ms", latStyle, "stats")
         let menu: Seg = (prefix ? "^\\ … " : "^\\ menu ", .dim, "help")
         let scaled = m.scale < 0.999
         switch cols {
@@ -422,14 +448,17 @@ final class Chrome {
             line(1, "frames", String(format: "%.1f / %d fps", m.fps, m.fpsTarget),
                  String(format: "capture %.1f/s · dirty %d/%d tiles", m.captureFps, m.dirty, m.tilesTotal),
                  m.fpsTarget > 0 && m.fps < Double(m.fpsTarget) * 0.85 ? .warn : .plain)
-            let cap = m.capMs < 0 ? "cap —" : String(format: "cap %.0f", m.capMs)
-            line(2, "pipe (ours)", "\(Int(m.e2eMs)) ms",
-                 String(format: "%@ · max %.0f · capture→write, no network", cap, m.pipeP99Ms))
+            // The split that answers "was it the capture or the write" (issue #52).
+            let cap = m.capMs < 0 ? "cap — (no PTS)"
+                : String(format: "cap %.0f p99 %.0f", m.capMs, m.capP99Ms)
+            line(2, "frame", "\(Int(m.e2eMs)) ms",
+                 String(format: "%@ · pipe %.0f p99 %.0f", cap, m.pipeMs, m.pipeP99Ms))
             line(3, "encoder", String(format: "zlib %.1f ms", m.zlibMs),
                  String(format: "write %.1f max %.1f over5 %d · q%d %@",
                         m.writeMs, m.writeMaxMs, m.writeOver5, m.quality, m.qualityLabel))
-            line(4, "capture", "\(m.callbacks)/s callbacks",
-                 "delivered \(m.delivered) · skipped \(m.skipped) · idle \(m.idle) · bad \(m.bad)")
+            line(4, "capture", String(format: "%.1f/s frames", m.captureFps),
+                 String(format: "skipped %.0f/s · idle %.0f/s · bad %d · total %d/%d/%d",
+                        m.skippedPerSec, m.idlePerSec, m.bad, m.delivered, m.skipped, m.idle))
             line(5, "geometry", "\(m.pxW)×\(m.pxH) px",
                  "\(m.cellsW)×\(m.cellsH) cells · cell \(Int(m.cellW))×\(Int(m.cellH)) · \(m.geometrySource)"
                  + " · scale \(String(format: "%.2g", m.scale))×"
@@ -453,8 +482,10 @@ final class Chrome {
                 text(17, y + 10, spark(m.latencyHistory, width: max(8, w - 20)), .warn)
             }
             if inside > 11 {
-                line(11, "input", m.inputActive ? "active" : "off",
-                     m.dryRun ? "dry-run: parsed, never posted" : "CGEvent posting")
+                line(11, "input",
+                     m.inputActive ? String(format: "%.1f ms", m.inputMs) : "off",
+                     m.dryRun ? "dry-run: parsed, never posted"
+                         : String(format: "p99 %.1f · parse → CGEvent.post", m.inputP99Ms))
             }
             if inside > 12 {
                 line(12, "cursor", m.cursorDrawn ? "drawn into the picture (--cursor)" : "hidden (the default)")
