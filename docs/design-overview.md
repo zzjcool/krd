@@ -127,8 +127,20 @@ it says where a section ends, which a blank row does not. It is also the first t
 20 rows there is no divider (`dividerRow` is empty) because in a pane that short a row of rule is
 worth less than a row of picture.
 
+**Seven rows of display to three of shelf.** `stageH = round(0.7 × budget)` and the card band takes
+`budget - stageH - 1` (the -1 is the band's own caption row), where `budget = rows - 6`, or `rows - 5`
+in a pane too short for the divider. A band that cannot reach `minCardRows` is dropped and its rows go
+to the stage instead of showing a two-row strip. Before this the cards took their ideal height first
+and the stage got the leftovers: on a 240×44 pane that was 23 rows of cards against 14 rows of
+display, so the desktop arrived as a small picture in the middle of an empty wall ("桌面缩在一角，其余
+全黑"). On top of the split the stage's aspect still caps it - a taller pane hands the rows a 16:10
+picture cannot use back to the cards, which widen into them (137×73: 42 + 24).
+
 - Content width `content = cols - 2` (bar plus padding); `winW = floor((content - (per-1)) / per)` -
-  137 columns / 3 → 43 cells, and the card's height follows from its width at a 1.62 aspect (→ 13 rows).
+  137 columns / 3 → 43 cells. The band's *height* comes from the 7:3 split (10 rows at 137×44), so the
+  card is a box, not a shape: the picture inside keeps its own aspect and is usually width-limited
+  there. `idealCardH = winW / (1.62 × cellAspect)` is the height a *tall* band reaches, and by then the
+  cards have widened (fewer per page) so their pictures grow with the box.
 - Between two cards: `cardGap = max(1, content / 45)` cells - 3 at 137 columns, 1 on a 60-column pane. One
   cell was the first version and read as the cards touching; the gap scales with the width because air on a
   narrow pane is paid for with a card (`per` drops from 4 to 3 at 60 columns if the gap is 3). At 137 columns
