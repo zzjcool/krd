@@ -165,10 +165,11 @@ func usage() -> String {
                           50 is 4-4-4 for everything. Values in between round down to the next
                           rung (79 is 80). Bit depth is the axis: on a photograph 70 costs 1.48x
                           and 50 costs 1.69x less than 100 (docs/ENCODING.md). Only the mirror
-                          path encodes pixels, so the wall and --full-frame ignore it. 'auto'
-                          spends colour first (80 -> 70 -> 50), then frame rate (20 -> 15 -> 10),
-                          and only then lets --scale auto take resolution
-      --no-quantise       same as --quality 100
+                          path encodes pixels, so the wall and --full-frame ignore it. 'auto' is
+                          the default: it spends colour first (80 -> 70 -> 50), then frame rate
+                          (20 -> 15 -> 10), and only then lets --scale auto take resolution.
+                          Give a number to pin it (--quality 80 is then exactly the old behaviour)
+      --no-quantise       same as --quality 100 (pinned, no ladder)
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
@@ -239,6 +240,17 @@ func adaptiveScaleRefusal(bench: Bool, selftest: Bool, recording: Bool, replay: 
         return "--record captures at scale 1 (a frame size that changes mid-file has no marker)"
     }
     if replay { return "--replay captures at scale 1 (adaptive scaling reacts to a live pipe)" }
+    return nil
+}
+
+/// The same four paths must not let the quality ladder adapt either: they either have no live pipe to
+/// react to, or they write bytes a later run compares against. Kept separate from the scale refusal
+/// because the two levers can be pinned independently.
+func adaptiveQualityRefusal(bench: Bool, selftest: Bool, recording: Bool, replay: Bool) -> String? {
+    if bench { return "--bench runs at --quality 80 (the ladder reacts to a live pipe)" }
+    if selftest { return "--selftest runs at --quality 80 (its sha256 is a byte contract)" }
+    if recording { return "--record runs at --quality 80 (a bit depth that changes mid-file has no marker)" }
+    if replay { return "--replay runs at --quality 80 (the ladder reacts to a live pipe)" }
     return nil
 }
 
@@ -714,15 +726,32 @@ final class Desk {
         // still printing a hash. Reported the way the other usage errors are (`--ime`, `--symbols`),
         // not thrown: a thrown error here reaches only the log, and a usage error the user cannot
         // see is a usage error that will be reported as "the hash changed".
-        if options.selftest && options.quality.isLossy && options.qualityPinned {
+        // `--quality 80` is the default and therefore the hash everyone already has; anything else
+        // that can quantise -- including `auto`, which is a moving target -- would change it.
+        let pinnedLossy = options.qualityPinned
+            && (options.qualityAuto || (options.quality.isLossy && options.quality != .default))
+        if options.selftest && pinnedLossy {
             FileHandle.standardError.write(
-                Data("krd: --selftest checks a lossless byte contract; use --quality 100\n".utf8))
+                Data("krd: --selftest checks a lossless byte contract; drop --quality or use --quality 100\n".utf8))
             exit(2)
         }
         // Adaptive scaling is the default, but these four paths must not have it: they either have no
         // pipe to measure, or they write something a later run reads back. Pin them to 1 and say why,
         // because a scale that moves under a recording leaves frames whose sizes differ with nothing
         // in the file to mark it.
+        // Colour before resolution, by default. `--scale auto` has always been the default (issue
+        // #64), so leaving the quality ladder opt-in meant a plain `krd` on a slow link took the
+        // *worst* lever first -- softer text -- and never tried the cheap one. `--quality <n>` and
+        // `--no-quantise` pin it, which is also how "exactly as before" is spelled now.
+        if !options.qualityPinned {
+            options.qualityAuto = true
+            if let why = adaptiveQualityRefusal(bench: options.bench, selftest: options.selftest,
+                                                recording: options.record != nil,
+                                                replay: options.replay != nil) {
+                options.qualityAuto = false
+                Log.write("krd: \(why)\n")
+            }
+        }
         if options.scaleAuto,
            let why = adaptiveScaleRefusal(bench: options.bench, selftest: options.selftest,
                                           recording: options.record != nil, replay: options.replay != nil) {

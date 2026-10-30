@@ -69,6 +69,24 @@ final class ScaleModeTests: XCTestCase {
         }
     }
 
+    /// The quality ladder is on by default now, and is refused by the same four paths -- otherwise a
+    /// bench run would measure whichever rung the last link happened to leave it on.
+    func testReproduciblePathsRefuseToWalkTheQualityLadder() {
+        let paths: [(String, () -> String?)] = [
+            ("--bench", { adaptiveQualityRefusal(bench: true, selftest: false, recording: false, replay: false) }),
+            ("--selftest", { adaptiveQualityRefusal(bench: false, selftest: true, recording: false, replay: false) }),
+            ("--record", { adaptiveQualityRefusal(bench: false, selftest: false, recording: true, replay: false) }),
+            ("--replay", { adaptiveQualityRefusal(bench: false, selftest: false, recording: false, replay: true) }),
+        ]
+        for (name, note) in paths {
+            let line = note()
+            XCTAssertNotNil(line, "\(name) must pin the quality")
+            XCTAssertTrue(line!.contains("--quality 80"), "\(name): \(line!)")
+        }
+        XCTAssertNil(adaptiveQualityRefusal(bench: false, selftest: false, recording: false, replay: false),
+                     "and must stay quiet for a live mirror")
+    }
+
     func testALiveSessionMayAdapt() {
         XCTAssertNil(adaptiveScaleRefusal(bench: false, selftest: false, recording: false, replay: false),
                      "the whole point of the default: a live capture reacts to the pipe")

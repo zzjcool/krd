@@ -157,9 +157,14 @@ immediately. Huffman-only also broke the ladder's ordering: with every symbol co
 
 ### `--quality auto`: spend colour, then frames, and resolution last
 
-A user who does not want to think about any of this asks for `auto`, and the ladder is walked by the
-same kind of governor that already handles resolution (#64), from the same signal — whether a frame
-was written before the next one was ready:
+`auto` is the **default** for a live mirror, because the alternative was worse than it looked: `--scale
+auto` has been the default since #64, so a plain `krd` on a slow link took resolution first — the worst
+lever for text — and never tried the cheap one. `--quality <n>` (and `--no-quantise`) pin the ladder,
+which is also how "exactly the behaviour of the last release" is spelled now; `--bench`, `--selftest`,
+`--record` and `--replay` never walk it, for the same reason they never adapt the scale.
+
+The ladder is walked by the same kind of governor that already handles resolution, from the same
+signal — whether a frame was written before the next one was ready:
 
     quality 80 -> 70 -> 50, then fps 20 -> 15 -> 10, then (and only then) --scale auto takes pixels
 
