@@ -84,14 +84,22 @@ public struct TileGrid {
     /// `area` is the cell rectangle the picture may use - the pane minus whatever chrome owns
     /// (`top`/`left` are 1-based, `cols`/`rows` the size). Omitted (or equal to the pane) it is the
     /// pane itself and the block lands at `(1, 1)`, which is every caller that predates centring.
+    ///
+    /// `fillsCells` is the transport's promise, not a layout preference: true means "this transport
+    /// cannot stretch an image into cells it is not already the size of", which is what a unicode
+    /// placeholder grid does (it draws one image pixel per device pixel, design §6.9). The frame is
+    /// then the cell box and `scale` cannot take pixels away from it - a tile narrower than its
+    /// cells is a column of background at that tile's right edge (issue #86). `--scale`'s promise is
+    /// kept by sending the picture as pixel placements instead (`Desk.scaleNeedsPixelPlacements`).
     public static func make(paneCols: Int, paneRows: Int, cellW: Double, cellH: Double,
                             aspect: Double, tileCols: Int, tileRows: Int,
-                            bpp: Int = 3, scale: Double = 1,
+                            bpp: Int = 3, scale: Double = 1, fillsCells: Bool = false,
                             source: CGSize = CGSize(width: 0, height: 0),
                             area: (top: Int, left: Int, cols: Int, rows: Int)? = nil) -> TileGrid {
         // Anything outside (0, 1] is "no scaling": a negative or absurd scale would ask for a
         // zero-pixel stream, which ScreenCaptureKit refuses.
-        let captureScale = (scale.isFinite && scale > 0 && scale <= 1) ? scale : 1
+        let requestedScale = (scale.isFinite && scale > 0 && scale <= 1) ? scale : 1
+        let captureScale = fillsCells ? 1 : requestedScale
         // Largest cell rectangle with the source aspect that fits the pane.
         var cols = paneCols
         var rows = Int((Double(cols) * cellW / aspect / cellH).rounded())
@@ -109,15 +117,14 @@ public struct TileGrid {
         //
         //  * how big the picture is *on screen* is `fit`, relative to the source's own points -- as
         //    large as the pane allows, which may mean the terminal draws it larger than the source;
-        //  * how many pixels we *capture* is `min(fit, 1) x scale` -- never more than the source has
-        //    (ScreenCaptureKit pads instead of upscaling, issue #69, and a display mirror must not
-        //    grow with the pane), and `--scale` only ever takes pixels away.
+        //  * how many pixels the frame *has* is cells x cell x `captureScale` (below), which is what
+        //    the capturer is asked for -- never the source's own count, because ScreenCaptureKit
+        //    pads instead of upscaling (issue #69) and a display mirror must not grow with the pane.
         //
         // So `--scale` buys bandwidth, not screen size: at 0.5 the frame is half as many pixels in
-        // the same cells, and the terminal stretches it back.
+        // the same cells, and a terminal that scales stretches it back.
         let known = source.width >= 2 && source.height >= 2
         let fit = known ? min(Double(boxW) / source.width, Double(boxH) / source.height) : 1
-        let capture = known ? min(fit, 1) * captureScale : captureScale
         let fittedW = max(2, Int((known ? source.width * fit : Double(boxW)).rounded()))
         let fittedH = max(2, Int((known ? source.height * fit : Double(boxH)).rounded()))
         // `ceil` because a partly used cell still has to be covered; anchored at the pane's
@@ -138,11 +145,12 @@ public struct TileGrid {
             // **Cells decide the frame's pixels**, from the *final* cell rect (the fit above may
             // have shrunk `cols`/`rows`), the same rule the wall uses for its panels. A terminal
             // that draws an image one image pixel per device pixel - Rex does - cannot stretch a
-            // frame that is a few percent narrower than its cells into them, and the proportional
-            // tile split then leaves that difference behind as a seam at every tile row: measured
-            // as nine black lines across a 117x38-cell display page (a 1920x1200 frame on a
-            // 1989x1254 cell box). `--scale` still takes pixels away on purpose, and a terminal
-            // that scales stretches the smaller frame back.
+            // frame that is a few percent narrower than its cells into them, and the tile split
+            // then leaves that difference behind as a seam at every tile: measured as nine black
+            // lines across a 117x38-cell display page (a 1920x1200 frame on a 1989x1254 cell box),
+            // and as 14 vertical ones when the frame was a proportional slice rather than the cells
+            // (issue #86). `fillsCells` makes `--scale` the one remaining way to be short, and only
+            // on a transport that scales (a terminal stretches the smaller frame back).
             pixelW: max(2, Int((Double(cols) * cellW * captureScale).rounded())),
             pixelH: max(2, Int((Double(rows) * cellH * captureScale).rounded())),
             bpp: bpp, scale: captureScale,
@@ -153,19 +161,42 @@ public struct TileGrid {
     }
 
     /// Pixel rect of tile at grid position (tx, ty); edge tiles are smaller.
+    ///
+    /// The pixels are the tile's **own cell box**, at the capture scale: `round(i x cell x scale)` at
+    /// both edges, which is the same arithmetic `make` uses for `pixelW`/`pixelH`. Two things follow
+    /// from that, and both are load-bearing: the widths add up to the frame exactly (no gap, no
+    /// overlap, nothing dropped by `extract`), *and* every tile's image is the size of the cells its
+    /// placement covers - which is what a terminal that draws one image pixel per device pixel needs,
+    /// because it has no way to stretch the difference (issue #86).
+    ///
+    /// It used to be a proportional slice of `pixelW` (`i / cols x pixelW`). That agrees with the
+    /// cell box only while `pixelW` is exactly `cols x cellW` - true for an integer cell at full
+    /// scale, false for a fractional cell, where the agreement was off by a rounding. The rest of a
+    /// `--scale` frame's shortfall was `captureScale` in `make` and is still there when the caller
+    /// keeps `fillsCells` off; it is `fillsCells` that pins the frame to the cell box.
+    ///
+    /// The one precondition is that a cell is at least one pixel at the capture scale. A `--scale`
+    /// small enough to put several cells inside one pixel would round two edges of a tile onto the
+    /// same column, so the edges are clamped into the frame: nothing is ever read past it, and the
+    /// cost of that corner is a one-pixel overlap rather than an out-of-bounds `memcpy`.
     public func rect(_ tx: Int, _ ty: Int) -> (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int) {
         let cx = min(tileCols, paneCols - tx * tileCols)
         let cy = min(tileRows, paneRows - ty * tileRows)
         // Pixel rects follow the capture scale; the cell box does not (`col/row/cols/rows` below).
-        // The pixels are split in proportion to the cells, not by `cells x cellW`, because the image
-        // is not necessarily the size of its cell box (issue #69: a 1024-px window in 61 cells of
-        // 17 px is 1037 px of box). Proportional splitting keeps every tile within ~1 % of its box
-        // instead of squeezing the last column. When the image *is* the box the two agree.
-        let x0 = Int((Double(tx * tileCols) / Double(max(paneCols, 1)) * Double(pixelW)).rounded())
-        let y0 = Int((Double(ty * tileRows) / Double(max(paneRows, 1)) * Double(pixelH)).rounded())
-        let x1 = Int((Double(tx * tileCols + cx) / Double(max(paneCols, 1)) * Double(pixelW)).rounded())
-        let y1 = Int((Double(ty * tileRows + cy) / Double(max(paneRows, 1)) * Double(pixelH)).rounded())
-        return (x0, y0, max(1, x1 - x0), max(1, y1 - y0),
+        let pitchX = cellW * scale
+        let pitchY = cellH * scale
+        let x1Cells = tx * tileCols + cx
+        let y1Cells = ty * tileRows + cy
+        let x0 = min(Int((Double(tx * tileCols) * pitchX).rounded()), max(0, pixelW - 1))
+        let y0 = min(Int((Double(ty * tileRows) * pitchY).rounded()), max(0, pixelH - 1))
+        // The last row/column ends at the frame, not at `round(cells x pitch)`: those differ only
+        // when `make` floored a degenerate frame at 2 px, and the remainder belongs to the last tile
+        // so that the tiles still partition the frame.
+        let x1 = min(max(x0 + 1, x1Cells == paneCols ? pixelW
+                           : Int((Double(x1Cells) * pitchX).rounded())), pixelW)
+        let y1 = min(max(y0 + 1, y1Cells == paneRows ? pixelH
+                           : Int((Double(y1Cells) * pitchY).rounded())), pixelH)
+        return (x0, y0, x1 - x0, y1 - y0,
                 originCol + tx * tileCols, originRow + ty * tileRows, cx, cy)
     }
 
