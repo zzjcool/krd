@@ -49,8 +49,10 @@ krd --window Safari          # 只镜像一个窗口（背板窗口会被拒绝�
 krd --zoom 2                 # 看一半的屏幕、按两倍密度显示（在采集端裁剪）
 krd --zoom 3 --zoom-at 200,300   # ……以某个全局屏幕点为焦点
 krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
+# 采集缩放默认是自适应的：链路跟得上就是 1，跟不上降到 0.5/0.25，于是慢链路保持 20 fps
+# 而不是冻住。--scale 1 钉死不动，--scale 0.5 固定半分辨率。
+krd --scale 1                # 永不自适应：始终用 pane 自己的像素
 krd --scale 0.5              # 每边只采一半像素，交给终端放大：彩色重内容少 4 倍字节，文字明显变糊
-krd --scale auto             # ……或者让 krd 在链路跟不上时自己降到 0.5/0.25
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
 krd --no-quantise           # 保持严格无损（照片类画面字节数约 2.3 倍）

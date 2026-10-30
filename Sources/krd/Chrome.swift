@@ -78,6 +78,10 @@ struct ChromeMetrics {
     var title = ""
     var fpsTarget = 20
     var fps = 0.0
+    /// The capture scale in effect, and whether it is allowed to move (issue #73: the default is
+    /// adaptive, so a resolution that changes on its own has to be visible).
+    var scale = 1.0
+    var scaleAuto = false
     var captureFps = 0.0
     var mbps = 0.0
     var kbPerFrame = 0
@@ -345,14 +349,20 @@ final class Chrome {
         let sep: Seg = ("  │  ", .dim, "")
         let target: Seg = (" \(m.target) ", .bright, "target")
         let fps: Seg = ("\(String(format: "%.1f", m.fps))/\(m.fpsTarget) fps", fpsStyle, "fps")
+        // Only when it is not 1: the segment then appears exactly when the picture changed quality,
+        // which is the moment it has to be noticed.
+        let scale: Seg = ("\(String(format: "%.2g", m.scale))×", m.scaleAuto ? .accent : .warn, "scale")
         let bw: Seg = ("\(String(format: "%.1f", m.mbps)) MB/s", .plain, "stats")
         let lat: Seg = (cols >= 84 ? "pipe \(Int(m.e2eMs)) ms" : "\(Int(m.e2eMs)) ms", latStyle, "stats")
         let menu: Seg = (prefix ? "^\\ … " : "^\\ menu ", .dim, "help")
+        let scaled = m.scale < 0.999
         switch cols {
-        case 84...: return [target, sep, fps, sep, bw, sep, lat, sep, menu]
-        case 46...: return [fps, sep, bw, sep, lat, sep, menu]
-        case 30...: return [fps, sep, lat, sep, menu]
-        case 20...: return [fps, sep, lat]
+        case 84...: return scaled ? [target, sep, fps, sep, scale, sep, bw, sep, lat, sep, menu]
+                                 : [target, sep, fps, sep, bw, sep, lat, sep, menu]
+        case 46...: return scaled ? [fps, sep, scale, sep, bw, sep, lat, sep, menu]
+                                 : [fps, sep, bw, sep, lat, sep, menu]
+        case 30...: return scaled ? [fps, sep, scale, sep, lat, sep, menu] : [fps, sep, lat, sep, menu]
+        case 20...: return scaled ? [fps, sep, scale, sep, lat] : [fps, sep, lat]
         default: return [(String(format: "%.0f", m.fps), fpsStyle, "fps")]
         }
     }
@@ -414,7 +424,10 @@ final class Chrome {
             line(4, "capture", "\(m.callbacks)/s callbacks",
                  "delivered \(m.delivered) · skipped \(m.skipped) · idle \(m.idle) · bad \(m.bad)")
             line(5, "geometry", "\(m.pxW)×\(m.pxH) px",
-                 "\(m.cellsW)×\(m.cellsH) cells · cell \(Int(m.cellW))×\(Int(m.cellH)) · \(m.geometrySource)")
+                 "\(m.cellsW)×\(m.cellsH) cells · cell \(Int(m.cellW))×\(Int(m.cellH)) · \(m.geometrySource)"
+                 + " · scale \(String(format: "%.2g", m.scale))×"
+                 + (m.scaleAuto ? " (auto)" : ""),
+                 m.scale < 0.999 && m.scaleAuto ? .warn : .plain)
             line(6, "wire", m.format, "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells")
             if m.queueBytes >= 0 {
                 line(7, "pty buffer", "\(m.queueBytes) B",

@@ -147,8 +147,8 @@ def report(log, stats, started, phases):
             changes.append(line.strip())
         if "restarting the capture stream" in line or "capture stream stopped" in line:
             restarts += 1
-    print("| t | drain MB/s | capture px | scale | late | fps | MB/s |")
-    print("|---:|---:|---|---:|---:|---:|---:|")
+    print("| t | drain MB/s | capture px | scale | late | fps | tiles/s | MB/s |")
+    print("|---:|---:|---|---:|---:|---:|---:|---:|")
     phase_end, index = 0.0, 0
     for row in rows:
         while index < len(phases) and row["t"] > phase_end + phases[index][0]:
@@ -158,9 +158,11 @@ def report(log, stats, started, phases):
         late = row.get("late", 0)
         frames = row.get("frames", 0)
         share = ("%d%%" % (100 * late / frames)) if frames else "-"
-        print("| %.0f | %.1f | %dx%d | %s | %s (%d/%d) | %d | %.2f |"
+        # `frames` is what the writer emitted in that second, i.e. the frame rate the viewer sees;
+        # `tiles` is separate work. This used to print tiles under an "fps" heading (issue #73).
+        print("| %.0f | %.1f | %dx%d | %s | %s (%d/%d) | %d | %d | %.2f |"
               % (row["t"], rate, row["px"][0], row["px"][1], row.get("scale", 1),
-                 share, late, frames, row["tiles"], row["mbps"]))
+                 share, late, frames, frames, row["tiles"], row["mbps"]))
     print()
     for line in changes:
         print(line)
@@ -175,6 +177,7 @@ def main():
     parser.add_argument("--rates", default="1.5,40", help="drain rates in MB/s, one per phase")
     parser.add_argument("--seconds", default="40,40", help="seconds per phase")
     parser.add_argument("--extra", default="", help="extra krd flags")
+    parser.add_argument("--scale", default="", help="pass --scale <this>: 'auto', '1', '0.5' ...")
     parser.add_argument("--pane", default="60x24", help="pane size in cells (default 60x24)")
     parser.add_argument("--click", default="", help="click this terminal pixel mid-run, e.g. 160,87")
     parser.add_argument("--click-after", type=float, default=18.0,
@@ -187,7 +190,11 @@ def main():
     rates = [float(v) * 1e6 for v in args.rates.split(",")]
     seconds = [float(v) for v in args.seconds.split(",")]
     phases = list(zip(seconds, rates))
-    flags = ["--scale", "auto", "--debug", "--fps", "20"] + args.extra.split()
+    # No --scale here: whatever krd's default is, is what gets measured (issue #73). Say
+    # `--scale auto` or `--scale 1` to compare against it.
+    flags = ["--debug", "--fps", "20"] + args.extra.split()
+    if args.scale:
+        flags += ["--scale", args.scale]
     log = os.path.join(args.work, "krd.log")
     stats = os.path.join(args.work, "stats.jsonl")
     started, elapsed, total = run(args.binary, flags, phases, os.path.join(args.work, "stream.bin"),
