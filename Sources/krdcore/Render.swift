@@ -48,6 +48,9 @@ public final class ScreenWriter {
     /// payload, and the picture never waits for a UI tick (it is one uncontended lock).
     private let writeLock = NSRecursiveLock()
 
+    /// `--no-quantise`: keep the encoder lossless. Photos then cost ~2.3x the wire bytes (issue #59).
+    public var quantiseEnabled = true
+
     public private(set) var framesEmitted = 0
     public private(set) var lastFrameBytes = 0
     /// Bytes that actually left the process for the last frame (escapes + base64 + headers).
@@ -90,13 +93,19 @@ public final class ScreenWriter {
 
     /// Called when the grid (and therefore the tile count) changes.
     public func resize(tiles: Int) {
-        if tiles != levels.count { levels = LevelPolicy(tiles: tiles) }
+        if tiles != levels.count { levels = LevelPolicy(tiles: tiles, allowsQuantise: quantiseEnabled) }
     }
 
     public func level(for index: Int) -> Int { levels.level(for: index) }
+    /// Level + quantise, the two decisions the tile loop needs per tile.
+    public func plan(for index: Int) -> LevelPolicy.Plan { levels.plan(for: index) }
+    /// How many tiles are being quantised right now (tests and the stats line).
+    public var quantisedTiles: Int { levels.quantisedCount }
     /// The tile loop compresses in parallel and reports the wall time once.
     public func addCompressTime(_ ms: Double) { lastCompressMs += ms }
-    public func observe(index: Int, ratio: Double) { levels.observe(index: index, ratio: ratio) }
+    public func observe(index: Int, ratio: Double, quantisedIn: Bool = false) {
+        levels.observe(index: index, ratio: ratio, quantisedIn: quantisedIn)
+    }
 
     // MARK: session
 
@@ -274,18 +283,33 @@ public final class ScreenWriter {
     /// by a predictor that costs ~10 µs against the ~800 µs zlib would spend on the tile. Learning
     /// this by compressing and hoping (a probe) would send up to a frame of uncompressed text after
     /// every photo, which is megabytes on the wire.
-    public static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int) -> CompressedTile? {
+    public static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int,
+                               quantise: Bool = false) -> CompressedTile? {
         guard !pixels.isEmpty else { return nil }
-        let level = level > 0 ? level : (looksCompressible(pixels, rect: rect) ? 1 : 0)
-        if level == 0 {
-            return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
+        var pixels = pixels
+        var quantised = false
+        if level <= 0 {
+            // Two ways out of "zlib bought nothing last frame": the content became compressible
+            // again (lossless, issue #53), or it stayed incompressible long enough to quantise
+            // (issue #59). The predictor is what tells them apart, and it costs ~10 µs.
+            if quantise, !looksCompressible(pixels, rect: rect) {
+                pixels = quantise565(pixels, bytesPerPixel: max(3, pixels.count / max(1, rect.w * rect.h)))
+                quantised = true
+            } else if !looksCompressible(pixels, rect: rect) {
+                return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
+            }
+            // else: content is compressible after all -> fall through and compress losslessly
         }
-        guard let payload = zlibCompress(pixels, level: level), !payload.isEmpty else { return nil }
+        let level = level > 0 ? level : 1
+        guard let payload = zlibCompress(pixels, level: level, huffmanOnly: quantised),
+              !payload.isEmpty else { return nil }
         let ratio = Double(payload.count) / Double(pixels.count)
         if payload.count >= pixels.count {
-            return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
+            return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1,
+                                  isCompressed: false, isQuantised: quantised)
         }
-        return CompressedTile(index: index, rect: rect, payload: payload, ratio: ratio)
+        return CompressedTile(index: index, rect: rect, payload: payload, ratio: ratio,
+                              isQuantised: quantised)
     }
 
     /// Would zlib find anything here? One pass, comparing every byte with the same channel of the
@@ -310,6 +334,28 @@ public final class ScreenWriter {
         }
         guard compared > 0 else { return true }
         return Double(smooth) / Double(compared) > 0.5
+    }
+
+    /// 5-6-5 colour with bit replication, still 3 bytes per pixel (issue #59).
+    ///
+    /// The terminal is told nothing new: it receives an ordinary `f=24` image. What changes is that
+    /// the low 3/2/3 bits are gone, so zlib finally has repeats to point at — hash noise compresses
+    /// 1.29x and a photo 2.3x, where lossless zlib managed 1.00x. Cost: ~37 dB PSNR, visible as
+    /// banding on smooth ramps (docs/ENCODING.md).
+    public static func quantise565(_ pixels: [UInt8], bytesPerPixel bpp: Int = 3) -> [UInt8] {
+        guard bpp >= 3 else { return pixels }
+        var out = pixels
+        var i = 0
+        while i + 2 < out.count {
+            let r = out[i] >> 3
+            out[i] = (r << 3) | (r >> 2)          // 5 bits, replicated into the low 3
+            let g = out[i + 1] >> 2
+            out[i + 1] = (g << 2) | (g >> 4)      // 6 bits, replicated into the low 2
+            let b = out[i + 2] >> 3
+            out[i + 2] = (b << 3) | (b >> 2)
+            i += bpp
+        }
+        return out
     }
 
     /// Turn an already compressed tile into escapes. Single-threaded: the order of the tiles
@@ -512,8 +558,9 @@ public final class ScreenWriter {
 
 /// RFC1950 zlib via system libz -- exactly what the protocol's `o=z` requires.
 /// (Apple's COMPRESSION_ZLIB emits *raw* DEFLATE, which the terminal rejects.)
-public func zlibCompress(_ input: [UInt8], level: Int = 5) -> [UInt8]? {
+public func zlibCompress(_ input: [UInt8], level: Int = 5, huffmanOnly: Bool = false) -> [UInt8]? {
     guard !input.isEmpty else { return nil }
+    if huffmanOnly { return zlibCompressHuffmanOnly(input) }
     var capacity = compressBound(uLong(input.count))
     var out = [UInt8](repeating: 0, count: Int(capacity))
     let status = input.withUnsafeBufferPointer { src -> Int32 in
@@ -523,5 +570,30 @@ public func zlibCompress(_ input: [UInt8], level: Int = 5) -> [UInt8]? {
     }
     guard status == Z_OK else { return nil }
     out.removeSubrange(Int(capacity)...)
+    return out
+}
+
+/// `Z_HUFFMAN_ONLY`: one pass over the input, one Huffman table, no match search (issue #59).
+///
+/// Quantised pixels are noise with a 32- or 64-symbol alphabet: there is nothing to match, so the
+/// entropy coder is the whole win, and skipping deflate's hash chains is most of the cost. Measured
+/// on the `photo` case: same 1.29x, a fraction of the time.
+private func zlibCompressHuffmanOnly(_ input: [UInt8]) -> [UInt8]? {
+    var stream = z_stream()
+    guard deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15, 8, Z_HUFFMAN_ONLY,
+                        ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { return nil }
+    defer { deflateEnd(&stream) }
+    var out = [UInt8](repeating: 0, count: Int(compressBound(uLong(input.count))))
+    let status = input.withUnsafeBufferPointer { src -> Int32 in
+        out.withUnsafeMutableBufferPointer { dst -> Int32 in
+            stream.next_in = UnsafeMutablePointer(mutating: src.baseAddress)
+            stream.avail_in = uInt(src.count)
+            stream.next_out = dst.baseAddress
+            stream.avail_out = uInt(dst.count)
+            return deflate(&stream, Z_FINISH)
+        }
+    }
+    guard status == Z_STREAM_END else { return nil }
+    out.removeSubrange(Int(stream.total_out)...)
     return out
 }

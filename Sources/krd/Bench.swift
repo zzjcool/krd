@@ -384,7 +384,7 @@ enum Bench {
                     tiles = 0
                 } else {
                     let rects = dirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
-                    let levels = dirty.map { writer.level(for: $0) }
+                    let plans = dirty.map { writer.plan(for: $0) }
 
                     // What the live path does: compress the dirty tiles on all cores.
                     var packed = [CompressedTile?](repeating: nil, count: dirty.count)
@@ -394,7 +394,8 @@ enum Bench {
                         DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
                             let pixels = layout.extract(px, rect: rects[i])
                             base[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
-                                                            pixels: pixels, level: levels[i])
+                                                            pixels: pixels, level: plans[i].level,
+                                                            quantise: plans[i].quantise)
                         }
                     }
                     parallelMsRound = benchNowMs() - parallelStart
@@ -403,7 +404,8 @@ enum Bench {
                     withUnsafeMutablePointer(to: &timing) { timingPtr in
                         for case let tile? in packed {
                             writer.emit(tile, sync: writer.perTileSync, timing: timingPtr)
-                            writer.observe(index: tile.index, ratio: tile.ratio)
+                            writer.observe(index: tile.index, ratio: tile.ratio,
+                                           quantisedIn: tile.isQuantised)
                         }
                     }
                     b64 = timing.base64Ms
@@ -430,7 +432,7 @@ enum Bench {
             // timer cannot add up per-tile costs without a lock.
             if serial, !lastDirty.isEmpty {
                 let rects = lastDirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
-                let levels = lastDirty.map { writer.level(for: $0) }
+                let plans = lastDirty.map { writer.plan(for: $0) }
                 var best = Double.infinity, bestExtract = 0.0, bestZlib = 0.0
                 for _ in 0..<3 {
                     var extract = 0.0, zlib = 0.0
@@ -440,7 +442,7 @@ enum Bench {
                         let pixels = layout.extract(lastFrame, rect: rects[i])
                         let t1 = benchNowMs()
                         _ = ScreenWriter.compress(index: lastDirty[i], rect: rects[i],
-                                                  pixels: pixels, level: levels[i])
+                                                  pixels: pixels, level: plans[i].level, quantise: plans[i].quantise)
                         let t2 = benchNowMs()
                         extract += t1 - t0; zlib += t2 - t1
                     }

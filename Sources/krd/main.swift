@@ -17,6 +17,7 @@ struct Options {
     /// Pan the crop when the pointer reaches the edge of the picture (`--zoom-follow`).
     var zoomFollow = false
     var noInput = false
+    var noQuantise = false
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
     /// anything that is not plain ASCII.
@@ -96,6 +97,7 @@ func usage() -> String {
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
       --no-input          view only, do not inject events
+      --no-quantise       never drop colour precision (default: incompressible tiles go 5-6-5)
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
@@ -206,6 +208,7 @@ func parseArguments() -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
+        case "--no-quantise": options.noQuantise = true
         case "--cursor": options.drawsCursor = true
         case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
@@ -418,6 +421,8 @@ final class Desk {
     }
 
     func run() async throws {
+        // Before any branch: --bench, --selftest and the live path all go through this writer.
+        writer.quantiseEnabled = !options.noQuantise
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
@@ -1484,10 +1489,10 @@ final class Desk {
             DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
                 let index = dirty[i]
                 let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
-                let level = writer.level(for: index)
+                let plan = writer.plan(for: index)
                 base[i] = ScreenWriter.compress(index: index, rect: rect,
                                                 pixels: grid.extract(pixels, rect: rect),
-                                                level: level)
+                                                level: plan.level, quantise: plan.quantise)
             }
         }
         writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
@@ -1495,7 +1500,7 @@ final class Desk {
         // Assembly stays serial: the escapes must reach the pty in a deterministic order.
         for case let tile? in packed {
             writer.emit(tile, sync: writer.perTileSync)
-            writer.observe(index: tile.index, ratio: tile.ratio)
+            writer.observe(index: tile.index, ratio: tile.ratio, quantisedIn: tile.isQuantised)
         }
         writer.endFrame()
     }

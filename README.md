@@ -52,6 +52,7 @@ krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global scree
 krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
 krd --display 1 --fps 30
 krd --no-input               # watch only
+krd --no-quantise           # keep the encoder lossless (photos cost ~2.3x the bytes)
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture

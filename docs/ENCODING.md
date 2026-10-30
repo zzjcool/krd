@@ -75,6 +75,37 @@ per-image escape header and zlib loses the cross-tile context it had at 16×8. F
 on resize, reconnect and the first frame, so this trades a rare +30 % for a −67 % on the path that
 runs 20 times per second while typing. `--tile 16x8` is still one flag away.
 
+### Dropping the low bits so zlib has something to find (issue #59)
+
+A photograph on screen is noise to zlib: 5-6-5 has no matches, so `o=z` bought ~1.00× on it. That is
+the case where the encoder used to send the pixels raw. Quantising first changes what zlib *sees*:
+each channel keeps 5/6/5 bits, so every byte comes from a 32- or 64-symbol alphabet, and the
+entropy coder alone reaches **1.29×** on hash noise and **2.3×** on a real photograph. The wire
+format does not change — the terminal still receives `f=24` with 3 bytes per pixel, it just receives
+fewer of them, and it needs no new feature for that.
+
+The decision is per tile and content-adaptive, using the ratio `LevelPolicy` already computes: a tile
+whose lossless attempt bought nothing for **two consecutive frames** is quantised before zlib, and a
+tile whose ratio drops back into compressible territory (or whose pixels start to look compressible)
+returns to lossless on the next frame. Text and UI never reach the quantiser: their ratio is ~0.1.
+
+Measured with `krd --bench --json --rounds 10`, three alternating runs, medians (`photo` = hash
+noise, the worst case; layout as reported in the JSON `config`, 66 tiles):
+
+| | wire | encode p50 |
+|---|---:|---:|
+| skip zlib (issue #53, today's `main`) | 4,755,012 B | 3.20 ms |
+| **5-6-5 then Huffman-only zlib (this)** | **3,686,632 B (−22.5 %)** | **6.03 ms** |
+
+`drag` (noise, but only part of the screen) moves with it: 1,198,117 → 1,105,258 B (−7.8 %),
+2.70 → 2.80 ms. Text/UI/gradient are byte-identical, and their p50 does not move.
+
+The cost is 36.5 dB PSNR: banding on smooth ramps, invisible on photographs and video. `--no-quantise`
+keeps the encoder strictly lossless and gets the `photo` case back to the skip-zlib numbers. The
+trade is only worth taking because bytes, not CPU, are what limits a photo screen: at 20 fps the
+lossless path asks for ~95 MB/s against a local pty that tops out at 103.6 MB/s
+([research-photo-bandwidth](research-photo-bandwidth.md) §0).
+
 ## Why these levers and not others
 
 **zlib level per tile (issue #3).** One level for the whole frame is always wrong: text compresses
