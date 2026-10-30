@@ -153,7 +153,7 @@ the whole frame (re-capture + re-place). Measured in a pty, 137x44 -> 100x30: th
 ### 13b. `krd` opens a screen of pictures instead of the desktop
 
 **Cause.** Since phase 4 that *is* `krd`: the landing screen (design `design-overview.md` §2) shows one
-display on stage and the three most recently used windows below, as pictures, refreshed when the desk
+display on stage and the most recently used windows below, as pictures, refreshed when the desk
 changes. Nothing forwards input in that mode - it is a landing screen, not a mirror.
 **Fix.** Ask for the mirror explicitly: `krd --mirror` (the whole display at `--fps`), or
 `krd --window <query>` for one window (that flag implies the mirror, because naming a window to mirror

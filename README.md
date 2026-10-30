@@ -44,7 +44,7 @@ Everything is explained in [docs/DEPLOY.md](docs/DEPLOY.md); the script itself i
 ## Use
 
 ```bash
-krd                          # the landing screen: the display on top, the three most recent windows
+krd                          # the landing screen: the display on top, the most recent windows
                              # below, both scrolling on the right bar (the wall)
 krd --mirror --fps 20        # the whole display as one picture, the old default
 krd --list                   # displays and windows; backdrop entries are marked
