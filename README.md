@@ -172,7 +172,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 ## The mascot
 
 <p align="center">
-  <img src="docs/media/mascot.png" alt="krd's mascot: a hermit crab drawn in the terminal" width="760">
+  <img src="docs/media/mascot.png" alt="krd's mascot: a hermit crab drawn in the terminal" width="680">
 </p>
 
 **A hermit crab** — and not just because it was the cutest sketch on the page.

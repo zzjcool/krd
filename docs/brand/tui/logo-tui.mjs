@@ -7,6 +7,7 @@
  *   node logo-tui.mjs                    交互（1-4 换 · s 单屏 · q 退出）
  *   node logo-tui.mjs --dump             打到 stdout
  *   node logo-tui.mjs --shot out.html    存成 HTML 截图
+ *   node logo-tui.mjs --png out.png      只画蟹，直接写 PNG（README 那张图）
  *
  * 零依赖，Node 18+。
  */
@@ -539,6 +540,79 @@ if (shot) {
     ? PEEK.map((_, i) => loadingScreen(cols, rows, i))          // 整份分镜
     : only.flatMap(a => [screen(a, 'solid', cols, rows), screen(a, 'plain', cols, rows)]);
   writeFileSync(shot, page(frames.map(pre).join(''), 'KRD · mascot lab'));
+  process.exit(0);
+}
+
+/* ------------------------------------------------- 只画蟹，不出卡片 --png -- */
+/* README 里那张图要的是**蟹本身**，不是卡片：标题、右边那段说明、底下那行快捷键都是卡片的
+   排版（宽了就左右排、窄了就上下排），不属于吉祥物。所以这里只画画面框里的那只蟹。
+   画面框本来就是 `raster()` 的正方形点阵（solid() 一格 = 上下两点），这里把它按 --scale
+   展开成实心方块直接写 PNG —— 用 node:zlib，仍然零依赖。
+   为什么不用 --shot 再截屏：截图会带上字体、窗口边距和屏幕 DPR，换台机器就是另一张图，
+   而一张没法复现的二进制没法 review。这条命令在哪台机器上都出同一张图：
+     node docs/brand/tui/logo-tui.mjs --png docs/media/mascot.png --animal hermit --trim
+   --dots 72 就是卡片画面框画蟹用的那个点阵边长；--scale 20 让一个点正好是 README 里
+   width="680" 的 1/10 —— 2 倍屏上一个点 20×20 个设备像素，浏览器不用重采样。
+   --trim 裁到蟹自己的墨边（四周留 1 个点）：造型在 96×96 里留了头高，画面框顶部 20% 是空的，
+   在白底 README 里就是一条黑边；裁掉留白才是「只有蟹」。 */
+if (argv.includes('--png')) {
+  const { writeFileSync } = await import('node:fs');
+  const { deflateSync } = await import('node:zlib');
+  const out = arg('--png', null);
+  if (typeof out !== 'string') { process.stdout.write('--png 要给一个文件名\n'); process.exit(1); }
+  const int = (name, def, lo) => { const n = Math.round(Number(arg(name, def))); return Number.isFinite(n) && n >= lo ? n : def; };
+  const dots = int('--dots', 72, 8), scale = int('--scale', 20, 1);   // NaN 会让 Buffer.alloc 抛栈
+  const r = raster(ANIMALS[idx], dots, dots);
+  /* --trim：裁到蟹的墨边，四周留 1 个点（贴边的造型留不出，理由见上面的块注释） */
+  let x0 = 0, y0 = 0, w = dots, h = dots;
+  const trimmed = argv.includes('--trim');
+  if (trimmed) {
+    let minx = dots, miny = dots, maxx = -1, maxy = -1;
+    for (let y = 0; y < dots; y++) for (let x = 0; x < dots; x++) {
+      const i = (y * dots + x) * 4;
+      if (r.px[i] || r.px[i + 1] || r.px[i + 2]) {
+        if (x < minx) minx = x; if (x > maxx) maxx = x;
+        if (y < miny) miny = y; if (y > maxy) maxy = y;
+      }
+    }
+    x0 = Math.max(0, minx - 1); y0 = Math.max(0, miny - 1);
+    w = Math.min(dots, maxx + 2) - x0; h = Math.min(dots, maxy + 2) - y0;
+    if (maxx < 0) { x0 = 0; y0 = 0; w = dots; h = dots; }     // 一点造型都没有：别裁成负数
+  }
+  const W = w * scale, H = h * scale;
+  const crc = (() => {
+    const t = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    return buf => { let c = 0xffffffff; for (const b of buf) c = t[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  })();
+  const chunk = (type, body) => {
+    const head = Buffer.alloc(4); head.writeUInt32BE(body.length);
+    const name = Buffer.from(type, 'latin1'), tail = Buffer.alloc(4);
+    tail.writeUInt32BE(crc(Buffer.concat([name, body])));
+    return Buffer.concat([head, name, body, tail]);
+  };
+  /* 没有形状覆盖的点在 raster() 里还是 0,0,0 —— 画面框的底色因此是纯黑，跟卡片里一致 */
+  const raw = Buffer.alloc((W * 3 + 1) * H);
+  let p = 0;
+  for (let y = y0; y < y0 + h; y++) {
+    const line = Buffer.alloc(W * 3);
+    for (let x = x0; x < x0 + w; x++) {
+      const i = (y * dots + x) * 4, o = (x - x0) * scale * 3;
+      for (let k = 0; k < scale; k++) {
+        line[o + k * 3] = r.px[i]; line[o + k * 3 + 1] = r.px[i + 1]; line[o + k * 3 + 2] = r.px[i + 2];
+      }
+    }
+    for (let k = 0; k < scale; k++) { raw[p++] = 0; line.copy(raw, p); p += W * 3; }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4); ihdr[8] = 8; ihdr[9] = 2;   // 8-bit RGB，无 alpha
+  writeFileSync(out, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]));
+  process.stdout.write(`${out}: ${W}×${H} px = ${w}×${h} dots × ${scale} px · ${ANIMALS[idx].en} only` +
+    `${trimmed ? ` · dots ${x0}..${x0 + w - 1} × ${y0}..${y0 + h - 1} of ${dots}` : ''}\n`);
   process.exit(0);
 }
 

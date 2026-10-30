@@ -148,7 +148,7 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 ## 吉祥物
 
 <p align="center">
-  <img src="docs/media/mascot.png" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="760">
+  <img src="docs/media/mascot.png" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="680">
 </p>
 
 **一只寄居蟹** —— 不只是因为它在那几版草稿里最可爱。
