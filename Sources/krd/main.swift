@@ -333,8 +333,18 @@ final class Desk {
     /// Last `callbacks` count and when it last moved: a stream that stops delivering frames
     /// without calling `didStopWithError` is the failure this catches (issue #44).
     private var frameWatchdog: DispatchSourceTimer?
+    /// Serialises in-place pans: `updateConfiguration` calls must not overlap, and a pan that
+    /// arrives while one is in flight is folded into the next.
+    private var panInFlight = false
+    private var panPending = false
+    /// The reason carried over to a restart that had to queue behind another one.
+    private var pendingRestartReason: String?
     private var lastSeenCallbacks = 0
     private var lastFrameAt = Date()
+    /// Set when krd asks the stream for a frame (a pan, a restart): the frame is then *owed*.
+    private var expectFrameBy: Date?
+    /// How long a frame we asked for may take. The probe measured p50 42 ms, max 67 ms end to end.
+    private let FRAME_TIMEOUT: Double = 3
     /// When the in-flight restart started, so a restart that never returns cannot gate the
     /// watchdog forever (see `Capturer.stop`).
     private var restartStartedAt = Date()
@@ -854,23 +864,24 @@ final class Desk {
         }
     }
 
-    /// Restart the stream when frames stop arriving *without* an error.
+    /// Two different kinds of silence, and only one of them is a failure.
     ///
-    /// `didStopWithError` is the loud failure; this is the quiet one, and the 30-minute soak hit
-    /// both (issue #44): after recovering from `-3805` the replacement stream delivered 75 frames
-    /// and then went silent for the rest of the run, with krd alive and every counter flat. Silent
-    /// is worse than dead, because nothing looks wrong.
+    /// **Expected frame.** When krd asks the stream for something -- a pan (`updateSource`), a
+    /// restart -- a frame is owed. If none arrives within `FRAME_TIMEOUT`, the stream is not doing
+    /// what it was told: restart it. This is precise, because krd knows what it asked for.
     ///
-    /// A static screen is not silence: ScreenCaptureKit sends `.idle` frames on every
-    /// `minimumFrameInterval` (measured 16/s on a still desktop here), and krd counts each callback
-    /// before deciding it is idle. So "no callback for 15 s" means the stream, not the content.
-    /// `KRD_STREAM_WATCHDOG=<seconds>` changes the limit, 0 turns it off.
+    /// **Long silence.** "No frames at all" looks like a dead stream, and in the #44 soak it was
+    /// (after `-3805` the replacement stream went quiet). But on a still desktop ScreenCaptureKit
+    /// sends *nothing*: measured with `probe/zoom_update_probe.swift` on macOS 26.6, 0 frames in a
+    /// 1 s window while the screen sat still, and the same in a 10-minute soak (56 s gaps between
+    /// sweeps). So a silence rule that assumes idle frames exist restarts a perfectly healthy stream
+    /// -- the first version of this did exactly that, three times in five minutes. It is therefore
+    /// opt-in: `KRD_STREAM_WATCHDOG=<seconds>` turns it on, `0` (the default) leaves it off.
     private func startFrameWatchdog() {
-        let limit = Double(ProcessInfo.processInfo.environment["KRD_STREAM_WATCHDOG"] ?? "15") ?? 15
-        guard limit > 0 else { return }
+        let limit = Double(ProcessInfo.processInfo.environment["KRD_STREAM_WATCHDOG"] ?? "0") ?? 0
         lastFrameAt = Date()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.schedule(deadline: .now() + 1, repeating: 5)
         timer.setEventHandler { [weak self] in self?.watchFrames(limit: limit) }
         timer.resume()
         frameWatchdog = timer
@@ -884,17 +895,18 @@ final class Desk {
         guard !cleanedUp, filter != nil else { return }
         let count = capturer.callbacks
         if count != lastSeenCallbacks {
-            // Frames are flowing again: the retry budget is earned back by delivery, not by a
-            // restart returning without throwing.
+            // Frames are flowing: the retry budget is earned back by delivery, not by a restart
+            // returning without throwing, and nothing is owed any more.
             lastSeenCallbacks = count
             lastFrameAt = Date()
+            expectFrameBy = nil
             if streamStopAttempts > 0 { streamStopAttempts = 0 }
             return
         }
         if captureRestarting {
             // A restart that has been "in flight" for longer than a stop plus a start can take is
-            // not in flight any more, it is parked. Clear it and let the retry below happen;
-            // otherwise a single hung `stopCapture()` freezes the picture for the session.
+            // not in flight any more, it is parked. Clear it and let the retry happen; otherwise a
+            // single hung `stopCapture()` freezes the picture for the session.
             let parked = Date().timeIntervalSince(restartStartedAt)
             if parked > 12 {
                 Log.write("krd: a capture restart has been parked for \(Int(parked))s; "
@@ -904,20 +916,32 @@ final class Desk {
             }
             return
         }
+        if let due = expectFrameBy, Date() >= due {
+            expectFrameBy = nil
+            let waited = Date().timeIntervalSince(due) + FRAME_TIMEOUT
+            retryStream(reason: String(format: "no frame %.1fs after asking for one", waited))
+            return
+        }
+        guard limit > 0 else { return }
         let silence = Date().timeIntervalSince(lastFrameAt)
         guard silence >= limit else { return }
         lastFrameAt = Date()
+        retryStream(reason: "no frames for \(Int(silence))s")
+    }
+
+    /// Count one failed attempt and restart, or give up once the budget is spent.
+    private func retryStream(reason: String) {
         streamStopAttempts += 1
         guard streamStopAttempts <= 5 else {
             frameWatchdog?.cancel()
             frameWatchdog = nil
-            warnRestartOnce("krd: no frames for \(Int(silence))s and 5 restarts did not help; "
+            warnRestartOnce("krd: \(reason) and 5 restarts did not help; "
                 + "the last frame stays on screen\n")
             return
         }
-        Log.write("krd: no frames for \(Int(silence))s; restarting the capture stream "
+        Log.write("krd: \(reason); restarting the capture stream "
             + "(attempt \(streamStopAttempts)/5)\n")
-        restartCapture(reason: "no frames arriving")
+        restartCapture(reason: reason)
     }
 
     /// The stream stopped on its own: restart it with backoff, bounded.
@@ -1190,14 +1214,18 @@ final class Desk {
     /// ScreenCaptureKit wants the crop relative to the filter's content: the window frame for a
     /// window filter, the display for a display filter. A full-frame capture sends nil so the
     /// terminal keeps getting exactly what it got before zoom existed.
-    private func cropForFilter() -> CGRect? {
-        let crop = currentCrop()
-        guard crop.width < fullRect.width - 0.5 || crop.height < fullRect.height - 0.5 else { return nil }
+    private func filterRect(for crop: CGRect) -> CGRect {
         // Builds differ on whether a display filter wants global points; KRD_ZOOM_GLOBAL_RECT=1
         // is the escape hatch when a crop on a secondary display lands somewhere else.
         let global = ProcessInfo.processInfo.environment["KRD_ZOOM_GLOBAL_RECT"] != nil
         let origin = global ? crop.origin : CGPoint(x: crop.minX - fullRect.minX, y: crop.minY - fullRect.minY)
         return CGRect(origin: origin, size: crop.size)
+    }
+
+    private func cropForFilter() -> CGRect? {
+        let crop = currentCrop()
+        guard crop.width < fullRect.width - 0.5 || crop.height < fullRect.height - 0.5 else { return nil }
+        return filterRect(for: crop)
     }
 
     private func applyLayout(geometry: TermGeometry) {
@@ -1260,17 +1288,63 @@ final class Desk {
         guard dx != 0 || dy != 0 else { return }
         zoomFocus = CGPoint(x: crop.midX + dx, y: crop.midY + dy)
         applyLayout(geometry: geometry)
-        restartCapture()
+        panCapture()
+    }
+
+    /// Move the crop of the running stream. `SCStream.updateConfiguration` re-crops in place, so a
+    /// pan costs one message instead of a stop/start cycle (issue #54): no freeze while the stream
+    /// re-negotiates, and the stop path -- the one that wedged in the #44 soak -- leaves the hot
+    /// path entirely. `restartCapture` is still the fallback if the update is refused.
+    private func panCapture() {
+        guard !cleanedUp, filter != nil, let layout = currentGrid() else { return }
+        if panInFlight {                              // coalesce: one update at a time
+            panPending = true
+            return
+        }
+        panInFlight = true
+        let rect = filterRect(for: currentCrop())
+        let width = layout.pixelW, height = layout.pixelH
+        Task { [weak self] in
+            guard let self else { return }
+            var result: Capturer.Update = .noStream
+            do {
+                result = try await self.capturer.updateSource(rect, width: width, height: height)
+            } catch {
+                Log.write("krd: could not move the capture window (\(error)); restarting it instead\n")
+            }
+            DispatchQueue.main.async {
+                if result == .changed {
+                    // The update owes us a frame; the watchdog checks that it arrives rather than
+                    // waiting for one to be "overdue" by the silence rule, which a still screen
+                    // never satisfies.
+                    self.expectFrameBy = Date().addingTimeInterval(self.FRAME_TIMEOUT)
+                    if self.options.debug {
+                        let crop = self.currentCrop()
+                        Log.write("pan: source \(Int(crop.width))x\(Int(crop.height)) pt -> "
+                            + "\(width)x\(height) px (update, no restart)\n")
+                    }
+                } else if result == .noStream, !self.cleanedUp {
+                    self.restartCapture(reason: "a refused in-place pan")
+                }
+                self.panInFlight = false
+                if self.panPending {
+                    self.panPending = false
+                    self.panCapture()
+                }
+            }
+        }
     }
 
     /// Restart the stream against the current filter and layout.
     ///
-    /// One path for both triggers: a terminal resize and a display-set change (and the zoom
-    /// follow, which is the same operation with a different reason). `captureRestarting` keeps
-    /// two of them from starting a stream at the same time; the loser is queued, not dropped.
-    private func restartCapture(reason: String = "a zoom pan") {
+    /// This is the path for the triggers that really change the filter or the layout: a terminal
+    /// resize, a display-set change, a recovery restart, and the fallback when an in-place pan is
+    /// refused. A zoom *pan* does not come through here any more (issue #54): it re-crops the
+    /// running stream with `Capturer.updateSource`. `captureRestarting` keeps two restarts from
+    /// starting a stream at the same time; the loser is queued with its reason, not dropped.
+    private func restartCapture(reason: String = "a restart") {
         guard let filter, let layout = currentGrid(), !cleanedUp else { return }
-        if captureRestarting { restartPending = true; return }
+        if captureRestarting { restartPending = true; pendingRestartReason = reason; return }
         captureRestarting = true
         restartStartedAt = Date()
         let crop = cropForFilter()
@@ -1288,7 +1362,7 @@ final class Desk {
             self.captureRestarting = false
             if self.restartPending {
                 self.restartPending = false
-                self.restartCapture()
+                self.restartCapture(reason: self.pendingRestartReason ?? reason)
             }
         }
     }
