@@ -27,7 +27,8 @@ English | [简体中文](design-overview.zh-CN.md)
 
 - **Top:** the stage. **One display at a time, filling the stage**; the rest are reached by scrolling the
   right-edge bar.
-- **Bottom:** the three most recently used windows, same bar, with `⤢` switching 2 / 3 / 4 per screen.
+- **Bottom:** the most recently used windows, same bar, with `⤢` switching 2 / 3 / 4 per row and the band
+  holding as many rows of them as fit.
 - **Right edge:** one **bar as tall as the pane**, in two segments - the upper one for displays, the lower one
   for windows. `▲` at the top, `▼` at the bottom, a `█` thumb in between; click a plain cell to jump there.
   **No more little `◀ ▶` triangles.**
@@ -42,8 +43,9 @@ English | [简体中文](design-overview.zh-CN.md)
   fallback, not the path.
 - **One display at a time** (see §6.6): the number of displays must not change the cost, and must not squeeze
   every one of them into a slit.
-- So the capture count is 1 display + 3 visible windows = **four**, ≈28 KB - and it stays four whether there are
-  20 windows or 5 displays.
+- So the capture count is 1 display + one page of windows - **four** at 137×44 (≈28 KB), seven on a pane whose
+  band holds two rows of three - and it stays that whether there are 20 windows or 5 displays: the cost follows
+  the pane's page size, never the desk.
 
 ## 3. Where the order comes from (measured)
 
@@ -79,8 +81,8 @@ English | [简体中文](design-overview.zh-CN.md)
   away), `denied` (Screen Recording), `no stream` (the window server refuses that window - `-3805`),
   `no pixels`, `failed`. Every cause draws the same rectangle, so without that word "no picture" is all
   a reader can report - and "no picture" was the question, not the answer (`PanelCaptureError.maskLabel`).
-- Because only three windows are on screen, "everything open" is bounded **by the layout itself** — no need to
-  save resources by drawing nothing.
+- Because only a page of windows is on screen (three at 137×44, up to nine on a tall pane), "everything open" is
+  bounded **by the layout itself** — no need to save resources by drawing nothing.
 
 ## 5. Interaction
 
@@ -89,7 +91,7 @@ English | [简体中文](design-overview.zh-CN.md)
 | click a window card (or its caption) | enter that window (single-window mirror, 20 fps) |
 | click the display on the stage | mirror the whole screen |
 | click `▲` / `▼` in the upper segment | previous / next display |
-| click `▲` / `▼` in the lower segment | previous / next group of windows (one screenful) |
+| click `▲` / `▼` in the lower segment | previous / next page of windows (one page = `per × rows`) |
 | click a `│` in the middle | jump proportionally (the `█` thumb shows where you are) |
 | click `⤢` | cycle 2 → 3 → 4 windows per screen |
 | click `⬅ 🖥 back` | return to the landing screen |
@@ -123,7 +125,8 @@ is 20+ cells tall, and the thumb doubles as "where am I in this list".
 ## 6.5 Layout (the row budget)
 
 Top to bottom: header 1 row → stage (`stageH + 1` caption) → **divider 1 row** → card band header 1
-row → cards (`cardH + 1` caption) → one blank row → footer 1 row.
+row → the card section (`cardH` picture rows + 1 caption row, holding a page of `per × cardRowCount`
+cards) → one blank row → footer 1 row.
 
 The divider came out of review: without it the stage caption, the band header and the tops of the
 cards arrive as three dense rows in a row ("too crowded"). One dim rule is cheaper than a blank row -
@@ -138,27 +141,33 @@ to the stage instead of showing a two-row strip. Before this the cards took thei
 and the stage got the leftovers: on a 240×44 pane that was 23 rows of cards against 14 rows of
 display, so the desktop arrived as a small picture in the middle of an empty wall ("桌面缩在一角，其余
 全黑"). On top of the split the stage's aspect still caps it - a taller pane hands the rows a 16:10
-picture cannot use back to the cards, which widen into them (137×73: 42 + 24).
+picture cannot use back to the card section, which spends them on more *rows* of the same previews
+(118×73 with a 17×33 cell: stage 37, section 29 + 1; 137×73 on an 8×16 cell: 42 + 24 + 1).
 
-- Content width `content = cols - 2` (bar plus padding); `winW = floor((content - (per-1)) / per)` -
-  137 columns / 3 → 43 cells. The band's *height* comes from the 7:3 split (10 rows at 137×44), so the
-  card is a box, not a shape: the picture inside keeps its own aspect and is usually width-limited
-  there. `idealCardH = winW / (1.62 × cellAspect)` is the height a *tall* band reaches, and by then the
-  cards have widened (fewer per page) so their pictures grow with the box.
-- **A page's cards share the page's width, not `per`'s.** `per` is an upper bound on how many fit, so a page
-  with fewer cards (`pageCount < per`) gives each card `floor((content - (pageCount-1) × gap) / pageCount)`
-  cells instead of a `per`-sized slot. A lone window used to get one third of the band and the other two
-  thirds stayed wall: a picture hugging the left edge with 80 columns of nothing beside it, which reads as
-  "the card is in the wrong place", not as "this band has one card". The box is now the band, the picture
-  inside it keeps its own aspect and is centred (a lone 16:9 window in a 137×44 pane sits with equal margins
-  either side), and its caption follows the *picture* rather than the box - under the box's left edge it
-  would label empty wall.
+- **`per` is cards per row.** A page holds `per × cardRowCount`, where a card is as tall as its slot
+  width makes it (`cardRows = winW / (1.62 × cellAspect)`, floored at `minCardRows` and capped by the
+  band) and `cardRowCount = (cardH + 1) / (cardRows + 1)` - a row of cards is its picture plus the
+  caption directly under it, and the section owns `cardH` picture rows plus one caption row. So the
+  same page holds three windows at 137×44 (where the band is exactly one preview tall) and six at
+  118×73. `capacity = per × cardRowCount` is what the bar's `▼` steps by, what the title range prints
+  (`1–6 / 7`) and what the thumb's track is measured against.
+- **A card is one slot of `per`, whatever the page holds.** A page of one used to blow its card up to
+  the whole band - a 115×29 box around an 11-row picture, reported as "the preview is much too big,
+  three to a row is enough" ("窗口的预览可以再小一点…一排可以显示三个窗口"). The slot's width decides the
+  height, the caption sits directly under the picture, and the row is centred in the band (§6.7).
+- Rows are filled left to right, `per` at a time; the next row starts one caption row lower, so a page
+  of six reads as two rows of three pictures, each with its label under it. The stack of rows is
+  centred in the section too, with the leftover section rows split above and below it rather than
+  pooled under the last row (an odd one goes to the bottom, §6.7).
+- Content width `content = cols - 2` (bar plus padding); the slot is
+  `winW = floor((content - (per-1) × gap) / per)` - 137 columns / 3 → 43 cells, 118 columns / 3 → 37.
+  A card narrower than `minCardCols` (8) is not drawn at all, so a narrow pane shows fewer per row
+  instead of a strip of slivers.
 - Between two cards: `cardGap = max(1, content / 45)` cells - 3 at 137 columns, 1 on a 60-column pane. One
   cell was the first version and read as the cards touching; the gap scales with the width because air on a
-  narrow pane is paid for with a card (`per` drops from 4 to 3 at 60 columns if the gap is 3). At 137 columns
-  the 3-cell gap costs the cards one row (44×14 → 43×13) and gives it to the stage, which grows 23 → 24.
-- The stage takes the remaining rows: `mainH = rows - (5 or 6) - winRows - 1` (6 when there is a
-  divider). At 137x44 that is **stage 23 + cards 14** - one row of picture less than before the rule.
+  narrow pane is paid for with a card (`per` drops from 4 to 3 at 60 columns if the gap is 3).
+- The stage takes the rest of the budget: 137×44 is **stage 27 + a section of 11 rows** (10 picture rows
+  and the caption row), which is what the pinned layout table in `WallLayoutTests` asserts.
 - Whole-cell placement only; never the last cell of the last row (autowrap pushes the whole picture up).
 - Every truncation and pad goes through `DisplayWidth` (CJK and emoji are wide). `⤢ ▣ ▲ ▼` are
   East-Asian-Ambiguous, so `--symbols ascii` (`> w ^ v < . '`) exists and both modes must lay out the same
@@ -176,16 +185,16 @@ a card reads as a window lying on the wall, not a window in a frame.
 
 | case | handling |
 |---|---|
-| landscape (16:10 / 1.54) | the width fills the stage's columns and **the band is exactly the rows the aspect gives** (`WallLayout.make(stageAspect:)`: 42 of a 137×73 pane's rows on an 8×16 cell); the rows a tall pane has over go to the card band, which then shows fewer, wider cards |
+| landscape (16:10 / 1.54) | the width fills the stage's columns and **the band is exactly the rows the aspect gives** (`WallLayout.make(stageAspect:)`: 42 of a 137×73 pane's rows on an 8×16 cell); the rows a tall pane has over go to the card section, which shows more rows of the same previews (§6.5) |
 | pixels are quality, cells are geometry | with unicode placeholders the terminal fits the image into the picture's cells (§6.9), so the capture is asked for at `pane.dpr` device pixels per **reported** cell - 2 on a terminal that answers in points, 1 on one that answers in device pixels - and `--dpr N` overrides it (both axes share the factor, capped at 4096 px a side). The pixel-sized path (`--no-placeholders`) has no fitting, so there the picture *must* be asked for in device pixels - and a terminal that reports its cell in points makes that number unavailable, which is why that path takes `--cell` and why placeholders are the default |
 | where the cell size comes from | one `PaneGeometry` snapshot: the pty's `ws_xpixel` when it has one, else the terminal's own `CSI 16t`/`14t` answer, else the 8×16 fallback (an 8×20 cell belongs to the CRT era, and its 2.5 aspect against a real 2.0 left 36% of the stage empty). Measured at start and re-measured on every resize (`PaneGeometry.measure`) |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
-| window card | the card rect is the layout's and the picture fits inside it at the window's own aspect: 43×13 cells at 137×44, 66×22 at 137×73, where the card band inherits the rows the stage does not need. A picture never resizes its own card |
+| window card | the card rect is the layout's and the picture fits inside it at the window's own aspect: 43×13 cells at 137×44, 37×12 at 118×73 (a 17×33 cell), where the section inherits the rows the stage does not need and spends them on a second row of the same slots. A picture never resizes its own card |
 | corners | **rounded**, a fortieth of the short side (`--square` for square). The first revision was square ("把圆角边框去掉吧") because a cut corner is a hole that the terminal fills with its own background: a rounded picture read as a frame around a smaller picture. The frame was the *other* bug - ScreenCaptureKit pads with black instead of upscaling (`PanelCapture.fitted`), so the picture's pixels held a desktop in one corner. With the picture equal to its cells the corner hole is inside the picture and shows the wall the picture lies on, which is what a window looks like. This is the only alpha in a wall image; the mirror's tiles stay opaque RGB |
 | one height per row | the cards of a page are drawn at **one height** - the tallest one every picture can reach without cropping, i.e. the widest window's (`WallPanels.sharedCardHeight`, then `PanelImage.fit(maxHeight:)`). Per-window fitting left a 16:9 card shorter than a square one, so the row's top and bottom edges disagreed ("窗口的最高高度需要保持一致"). The cost is that one wide window shortens its neighbours while it is on the page; the alternative would be cropping, which the design rules out |
 | the maths | one direction, **cells → pixels**: `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then the height is the constraint, else the width; the result is rounded to whole **cells** (`PanelImage.fit`), and the picture's pixels are then exactly those cells × the cell (`86×27 cells at 8×16 px = 688×432 px`, not one pixel more), with no offset inside the panel. Rounding the other way - fit in pixels, re-derive the cells - left the picture up to half a cell larger than its box, which a 1:1 terminal shows as a gap and a scaling one hides as a 1-2% stretch |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |
-| capture | **only the one on stage**: three displays + three windows = 4 panels, the same cost as a single display |
+| capture | **only the one on stage**: three displays + one page of windows - 4 panels on a 137×44 pane, 7 on a 118×73 one, where a page is six. The cost follows the pane's page size, never how many windows exist |
 
 Why not cover: cover throws content away, and the display's own shape *is* information - no menu bar, no Dock, and the
 reader cannot tell which display they are looking at.
@@ -204,10 +213,12 @@ letterbox leaves over, and nobody has ever reported those as a bug.
 than a 16:10 picture can use (53 against 42 at 137×73), and because a caption hangs one row under its picture, that
 slack showed up as wall *between* the picture and the divider - reported as "the display is smaller than its frame",
 right after the black ring. `WallLayout.make(stageAspect:cellAspect:)` now sizes the stage band from the picture and
-gives the rows it does not need to the card band, which takes them by showing **fewer, wider cards** (`per` is a
-maximum): at 137×73 that is two cards of 66×22 with 528×357 px pictures instead of three of 43×13 with 344×218, and the
-wall has no band slack anywhere. What it never does is stretch the picture to fill a band - a stretched desktop is a
-worse lie than a letterboxed one, and the aspect is the one thing the wall knows for certain.
+gives the rows it does not need to the card section, which spends them on **more rows of the same slots** (`per` is the
+reader's number and does not move): at 118×73 with a 17×33 cell that is two rows of three 37×12 previews instead of one
+row with 18 rows of empty wall under it (issue #83), and at 137×73 on an 8×16 cell the section is 25 rows, which holds
+one row of 43×13 previews because a second one would need 28. What it never does is stretch the picture to fill a
+band - a stretched desktop is a worse lie than a letterboxed one, and the aspect is the one thing the wall knows for
+certain.
 
 The cells under a picture still have to be cleared first: the placeholder box and any older placement live in the same
 cells. `WallCanvas`'s `.picture` branch writes spaces over the picture's rect (spaces only, no visible glyph, so the
