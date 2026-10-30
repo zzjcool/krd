@@ -52,6 +52,7 @@ krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global scree
 krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
 krd --scale 0.5              # capture half the pixels per side and let the terminal upscale:
                              # 4x fewer bytes on colour-heavy content, visibly softer text
+krd --scale auto             # ...or let krd drop to 0.5/0.25 while the link cannot keep up
 krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --no-quantise           # keep the encoder lossless (photos cost ~2.3x the bytes)

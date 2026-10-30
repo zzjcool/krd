@@ -167,6 +167,49 @@ The live ratio is 3.2× rather than 3.98× because a still desktop's bytes are m
 and the tiles that change; the bench number is the clean one. An automatic "drop the scale before the
 frame rate" policy is deliberately *not* here: the flag and the numbers come first.
 
+## Capture scale: `--scale auto` (issue #64)
+
+`--scale auto` starts at 1 and moves down the ladder `1 → 0.5 → 0.25` while the **write side** cannot
+keep up, then back up when it can. The default is still `1`: nothing about anyone's picture changes
+unless they ask for this.
+
+**The signal is backpressure, not encoder time.** A frame is *late* when it took longer to come out
+than the interval it has to fit in (`write_ms > 1000/fps`, and `--stats-json` reports the ratio per
+second as `late`/`frames`). That is the causal version of "the link is losing": when the pty cannot
+take the bytes, `write(2)` is where the frame sits, so the write's own duration crosses the budget
+and stays there (#26 measured 619 ms per write on a 20 MB/s link while
+the encoder kept producing 20 fps). Encoder time says nothing about that — a fast machine on a slow
+link has cheap frames and a broken picture; and the *whole* frame's duration is not it either, because
+a photo repaint that only happens twice a second takes longer than 50 ms to encode on any machine.
+
+| | down | up |
+|---|---|---|
+| condition | > 50 % of frames late | < 5 % of frames late |
+| window | 3 s (≥ 6 samples) | 10 s (≥ 20 samples), the whole window observed |
+| after a change | 5 s minimum dwell, both directions | same |
+
+**Why asymmetric.** Going down spends quality the user can see but understands (a softer picture,
+which is strictly better than a picture that stutters). Going up spends a risk: if the link cannot
+carry scale 1 after all, the next few seconds stutter *at the moment the user asked for nothing*.
+So the downgrade is a majority vote over a short window and the upgrade is near-unanimity over a long
+one — it is much harder to come back up than to fall down.
+
+**Why that alone still flaps, and what the backoff adds.** On a link that carries 0.5 easily and 1
+only at 2 fps, "quiet at 0.5 for 10 s" is true a few seconds after every probe, so thresholds alone
+give a 10-second cycle — up, stutter, down, up… To stop that, an upgrade that is undone within 20 s
+counts as a **failed probe** and multiplies the quiet window it will demand next time by 3 (capped at
+300 s): 10 s, 30 s, 90 s. A probe that survives 20 s resets the penalty. The end state on such a link
+is "mostly at 0.5, one probe every few minutes", which is what a person would do by hand.
+
+A scale change goes through the same in-place `updateSource` as a pan (#57): the stream is not
+restarted, so the picture never goes black and the frame watchdog is not involved. The log line is
+`krd: pipe is behind; scale 1 -> 0.5` (or `pipe has headroom; scale 0.5 -> 1`), and `--debug`'s
+`pan:` line shows the update that carried it. The pointer mapping is unaffected at every level for
+the reason #60 gives: the viewport is built from the pane's pixels, not the captured ones.
+
+`--fps` is deliberately *not* touched: lowering the frame rate is a different promise (fewer, sharper
+frames) and the user should be the one to make it.
+
 ## Measuring a change
 
 ```sh
