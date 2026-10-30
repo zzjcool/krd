@@ -240,6 +240,10 @@ def build_parser():
                    help="how long to let the program draw before the pty is closed (default 12)")
     p.add_argument("--png", default=None, help="PNG prefix (a frame index is appended)")
     p.add_argument("--keep-stream", action="store_true", dest="keep_stream")
+    p.add_argument("--cell-mode", default="points", choices=["points", "pixels"],
+                   dest="cell_mode",
+                   help="does the pty report its cell in points (points, the default: dpr 2, what "
+                        "Rex does) or in device pixels (pixels: dpr 1)")
     p.add_argument("--terminal", default="rex", choices=["rex", "none"],
                    help="answer kitty/DSR probes like the terminal krd targets (default rex)")
     p.add_argument("--resize", action="append", default=[], metavar="AT:COLSxROWS",
@@ -849,9 +853,13 @@ def cmd_render(args, context):
         # file is written next to the process, not into the stream, so it cannot be confused with
         # what krd draws.
         remote_pid_file = "/tmp/kagent-run-%s.pid" % marker
-        remote = ("stty rows %d cols %d 2>/dev/null; %s & guard=$!; "
-                  "echo $guard > %s; wait $guard; exit $?" % (
-                      rows, cols, " ".join(_shquote(a) for a in command), remote_pid_file))
+        # `echo $$ > file; exec cmd`: the pid file names the process that becomes the command, so a
+        # survivor can be killed -- without turning the command into a background job, which POSIX
+        # gives /dev/null for stdin. krd reads the terminal to measure its cell, so a backgrounded
+        # krd cannot see the pty: it falls back to an 8x16 cell it made up, with no query at all, and
+        # the picture comes out at half the size while everything still looks green.
+        remote = ("stty rows %d cols %d 2>/dev/null; echo $$ > %s; exec %s" % (
+                      rows, cols, remote_pid_file, " ".join(_shquote(a) for a in command)))
         import shlex
         local_command = ["ssh", "-tt"] + context.target.ssh_options + [context.target.host, remote]
     resizes = []
@@ -861,7 +869,7 @@ def cmd_render(args, context):
         resizes.append((float(at), new_cols, new_rows))
     stream, status, seconds, answered = render.run_under_pty(
         local_command, cols=cols, rows=rows, seconds=args.seconds, cell=cell,
-        terminal=args.terminal, resizes=resizes)
+        terminal=args.terminal, resizes=resizes, cell_mode=args.cell_mode)
     killed = None
     if context.target.remote:
         # The ssh is gone; make sure the program it started is too. A survivor is not a warning,
@@ -904,11 +912,32 @@ def cmd_render(args, context):
         if native is not None:
             probe = native.w <= 1 and native.h <= 1
             entry["native_px"] = [native.w, native.h]
-            entry["fit"] = "exact" if (native.w, native.h) == box else "scaled"
+            # Pixels are quality, cells are geometry (design §6.9). What that means depends on the
+            # transport, and the two are not interchangeable:
+            #
+            #   with placeholders  the *terminal* fits the image into the rectangle of cells, so the
+            #                      image may be any size at least as big as its box. Smaller than the
+            #                      box is the bug this repo paid for ("the desktop at half size in the
+            #                      corner"): the terminal upscales and it looks soft, or the image
+            #                      sits in one corner and the rest is background.
+            #   pixel-sized        there is no fitting: the image is drawn one pixel per device
+            #                      pixel, so anything but an exact match leaves seams.
+            k = native.w / box[0] if box[0] else 0
+            upscaled = native.w < box[0] or native.h < box[1]
+            multiple = (k >= 1 and float(k).is_integer()
+                        and (native.w, native.h) == (box[0] * int(k), box[1] * int(k)))
+            if p_.unicode_placeholder:
+                entry["fit"] = ("exact" if (native.w, native.h) == box
+                                else "%dx" % k if multiple
+                                else "upscaled" if upscaled else "fitted")
+                broken = upscaled
+            else:
+                entry["fit"] = "exact" if (native.w, native.h) == box else "scaled"
+                broken = (native.w, native.h) != box
             entry["probe"] = probe
-            if not probe and (native.w, native.h) != box and p_.unicode_placeholder:
+            if not probe and broken:
                 misfits.append({"image": p_.image_id, "native": [native.w, native.h],
-                                "cell_box": list(box)})
+                                "cell_box": list(box), "fit": entry["fit"]})
         pictures.append(entry)
     payload = {
         "command": command, "exit": status, "seconds": round(seconds, 2),
@@ -1160,6 +1189,29 @@ def cmd_selftest(args, context):
         except Exception as error:
             checks.append({"check": "scenario %s" % path.name, "state": predicates.FAIL,
                            "detail": str(error)})
+    # The instrument checks itself first, because a harness that quietly changes the program it
+    # measures produces numbers that are wrong but consistent -- the most expensive kind. If the pty
+    # does not answer the terminal probe, krd measures a made-up 8x16 cell instead of the one on the
+    # command line, and every picture comes out at half size while every check still passes.
+    krd = context.target.krd
+    demo = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--target", context.target.name, "--json",
+         "render", "--pane", "80x24", "--cell", "17x33", "--seconds", "6", "--quiet",
+         "--run", "selftest-pty", "--", krd, "--demo"],
+        capture_output=True, text=True)
+    try:
+        report = json.loads(demo.stdout)
+        answered = report.get("answered") or {}
+        spoke = (answered.get("u1", 0) > 0 and answered.get("cellsize", 0) > 0)
+        checks.append({"check": "the pty answers", "state": predicates.PASS if spoke
+                       else predicates.FAIL,
+                       "detail": "u1=%d cellsize=%d windowsize=%d" % (
+                           answered.get("u1", 0), answered.get("cellsize", 0),
+                           answered.get("windowsize", 0))})
+    except Exception as error:
+        checks.append({"check": "the pty answers", "state": predicates.UNKNOWN,
+                       "detail": str(error)[:160]})
+
     if args.live:
         state, payload = cmd_doctor(args, context)
         checks += [{k: v for k, v in c.items() if k != "fix"} for c in payload["checks"]]

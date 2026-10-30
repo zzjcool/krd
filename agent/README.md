@@ -145,6 +145,7 @@ locked machine, and in CI.
 
 ```bash
 kagent --target host render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+kagent --target host render --pane 100x30 --cell 17x33 --cell-mode pixels -- .build/release/krd --selftest
 kagent render --target vm --pane 146x46 --cell 17x33 -- '~/bin/krd' --wall
 
 kagent vt render /tmp/stream.vt --png /tmp/frame      # a stream captured elsewhere
@@ -162,7 +163,29 @@ picture 1  cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
 ```
 
 `cells` is `[col, row, cols, rows]`, and `native` is what was actually transmitted, so the comparison
-is against the image the terminal was handed, not the box echoed back. The first line also says how
+is against the image the terminal was handed, not the box echoed back.
+
+`fit` says how the two relate, and the answer depends on the transport, because the two are not
+interchangeable:
+
+| fit | meaning |
+|---|---|
+| `exact` | pixels == cells x cell |
+| `2x`, `3x` | an integer multiple: the terminal fits the image into the cells, so this is *better*, not wrong (`--dpr`) |
+| `fitted` | other size, still at least as big as the box: fine with placeholders, the terminal scales it |
+| `upscaled` | smaller than the box: the bug this repo paid for, "the desktop at half size in the corner" |
+| `scaled` | a pixel-sized placement that does not equal its box: seams on a 1:1 terminal |
+
+`misfits` collects the last two, and `--strict-fit` fails on them.
+
+`--cell-mode` is which terminal the harness pretends to be, and it changes what krd asks for:
+
+* `points` (default) — a Retina terminal that reports its cell in points and answers `CSI 14t/16t`,
+  i.e. **Rex**, so krd asks for two device pixels per cell and uses unicode placeholders.
+* `pixels` — a terminal whose `TIOCGWINSZ` reports device pixels, so krd takes one pixel per cell and
+  sizes every picture to its box exactly. This is the only mode in which `--selftest` fills its
+  tiles: the selftest never probes for placeholders, so on a points terminal it has no device cell to
+  ask for and falls back to 8x16. The first line also says how
 the run ended: `exited 0` (krd finished) or `stopped at the 12.0s deadline` (`--seconds`, default 12,
 is how long it gets to draw before the pty closes). A run that decodes no frame is a failed
 measurement — exit 2 — unless you pass `--allow-empty`.

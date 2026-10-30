@@ -51,12 +51,13 @@ class TerminalAnswers:
     the request's parameters, so a `U=1` placement answers `i=31,p=1;OK` and not `i=31;OK`.
     """
 
-    def __init__(self, fd, cell=(17, 33), name="rex"):
+    def __init__(self, fd, cell=(17, 33), name="rex", cols=146, rows=73):
         self.fd = fd
         self.cell = cell
+        self.cols, self.rows = cols, rows
         self.name = name
         self.seen = bytearray()
-        self.answered = {"u1": 0, "dsr": 0, "cellsize": 0, "query": 0}
+        self.answered = {"u1": 0, "dsr": 0, "cellsize": 0, "windowsize": 0, "query": 0}
 
     def _write(self, data):
         try:
@@ -74,6 +75,16 @@ class TerminalAnswers:
             self.seen = self.seen.replace(b"\x1b[5n", b"", 1)
             self._write(b"\x1b[0n")
             self.answered["dsr"] += 1
+        if b"\x1b[14t" in self.seen:
+            # CSI 14t asks for the *text area* in pixels. A terminal that reports its cell in points
+            # answers this in points too, and krd divides by the row/column count to get the cell --
+            # so leaving it unanswered is not "no information", it is "this terminal has an 8x16
+            # cell", which silently halves every picture. The wall asks this question, which is why
+            # the wall and --demo measured different geometries for days.
+            self.seen = self.seen.replace(b"\x1b[14t", b"", 1)
+            self._write(("\x1b[4;%d;%dt" % (self.rows * self.cell[1],
+                                            self.cols * self.cell[0])).encode())
+            self.answered["windowsize"] += 1
         if b"\x1b[16t" in self.seen:
             self.seen = self.seen.replace(b"\x1b[16t", b"", 1)
             self._write(("\x1b[6;%d;%dt" % (self.cell[1], self.cell[0])).encode())
@@ -98,29 +109,45 @@ class TerminalAnswers:
                 self.answered["u1"] += 1
 
 
-def resize(fd, cols, rows, cell=None):
+def set_pixel_size(fd, cols, rows, cell=None, mode="points"):
+    """Tell the child how big a cell is -- or refuse to.
+
+    Two real terminals, two answers, and krd draws differently for each:
+
+    * `pixels` (the other end reports device pixels, ws_xpixel set): krd takes one device pixel per
+      reported cell (`dpr=1`) and asks for pictures exactly the size of their cell box.
+    * `points` (a Retina terminal that reports *points* and answers CSI 14t/16t, ws_xpixel clear):
+      krd asks for two device pixels per reported cell (`dpr=2`) and lets the terminal fit the image
+      into the cells. This is what Rex does, so it is what a person's screen looks like.
+
+    Reporting pixels when the terminal is Rex measures a path no user is on -- the trap this whole
+    scaffold exists to avoid, one level down.
+    """
+    width, height = cell or (0, 0)
+    if mode == "points":
+        width = height = 0
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, width * cols, height * rows))
+
+
+def resize(fd, cols, rows, cell=None, mode="points"):
     """Set the pty's size and let the kernel deliver SIGWINCH.
 
     Resizing is where stale geometry shows up: the layout is recomputed, but the pictures already
     on screen were placed for the old rectangle. Driving it here is the only way to check the
     resize path without a person dragging a window edge.
     """
-    width, height = cell or (0, 0)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ,
-                struct.pack("HHHH", rows, cols, width * cols, height * rows))
+    set_pixel_size(fd, cols, rows, cell, mode)
 
 
 def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cwd=None,
-                  on_chunk=None, terminal="rex", resizes=None):
+                  on_chunk=None, terminal="rex", resizes=None, cell_mode="points"):
     """Run `argv` on a pty of exactly `cols`x`rows`, and collect every byte it writes.
 
     A pty is not a convenience here: krd takes its geometry from `TIOCGWINSZ` and its behaviour from
     whether the other end answers queries, so a pipe measures a different program.
     """
     master, slave = pty.openpty()
-    width, height = cell or (0, 0)
-    fcntl.ioctl(slave, termios.TIOCSWINSZ,
-                struct.pack("HHHH", rows, cols, width * cols, height * rows))
+    set_pixel_size(slave, cols, rows, cell, cell_mode)
     child_env = dict(os.environ)
     child_env.update(env or {})
     child_env.pop("KAGENT_RUN", None)
@@ -137,7 +164,7 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
                                close_fds=True)
     # The slave stays open in the parent: on macOS TIOCSWINSZ on the master does not always reach
     # the child's terminal, and a resize that silently does nothing is worse than no resize at all.
-    answers = TerminalAnswers(master, cell=(cell or (17, 33)), name=terminal)
+    answers = TerminalAnswers(master, cell=(cell or (17, 33)), name=terminal, cols=cols, rows=rows)
     # (at_seconds, cols, rows): a resize in the middle of the run, the way a person drags a window.
     pending = sorted(resizes or [])
     started = time.time()
@@ -149,7 +176,7 @@ def run_under_pty(argv, cols=146, rows=73, seconds=10.0, cell=None, env=None, cw
             break
         while pending and time.time() - started >= pending[0][0]:
             _, new_cols, new_rows = pending.pop(0)
-            resize(slave, new_cols, new_rows, cell)
+            resize(slave, new_cols, new_rows, cell, cell_mode)
             pass
         ready, _, _ = select.select([master], [], [], min(0.2, max(0.01, remaining)))
         if ready:
@@ -385,8 +412,11 @@ def picture_rects(decoder, cell):
     # history: after a resize it is a rectangle that no longer exists, and counting it as a picture
     # is how a resize bug reads as a layout with too many cards.
     for placement in decoder.live_placements().values():
-        if not placement.unicode_placeholder:
-            continue
+        # Both transports are reported, because the geometry is the same question either way: a
+        # placeholders run and a pixel-sized run place the same rectangles (checks/transports-agree.sh
+        # pins that). Filtering to placeholders here made the pixel path look like "the wall drew
+        # nothing", which is a false negative in the one check that is supposed to catch a missing
+        # picture.
         image = decoder.images().get(placement.image_id)
         if image is not None and image.w <= 1 and image.h <= 1:
             continue  # the U=1 capability probe: a 1x1 image placed to ask "can you fit?"

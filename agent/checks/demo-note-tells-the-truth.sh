@@ -24,17 +24,22 @@ import re, sys
 line = sys.stdin.read().strip()
 cols, rows, cw, ch = (int(x) for x in sys.argv[1:5])
 found = re.search(r"pic (\d+)x(\d+)c (\d+)x(\d+)px", line)
+# The note also prints the quality factor: the terminal is allowed to ask for more device pixels
+# than cells (`2x` when it reports its cell in points, as Rex does). Pixels are quality; cells are
+# geometry. So the arithmetic to check is px == cells x cell x factor, not x 1.
+factor = re.search(r"(\d+(?:\.\d+)?)x ", line)
+scale = float(factor.group(1)) if factor else 1.0
 if not found:
     # The note is elided when it does not fit the pane ("pic 31x10c 5…"); that is honest, not a lie.
     print("  %dx%d  elided: %s" % (cols, rows, line.split("|", 1)[-1][-40:]))
     sys.exit(0)
 cells_w, cells_h, px_w, px_h = (int(x) for x in found.groups())
-want = (cells_w * cw, cells_h * ch)
+want = (round(cells_w * cw * scale), round(cells_h * ch * scale))
 if (px_w, px_h) != want:
     print("  %dx%d  FAIL claims %dx%d px for %dx%d cells, which is %dx%d"
-          % (cols, rows, px_w, px_h, cells_w, cells_h, want[0], want[1]))
+          % (cols, rows, px_w, px_h, cells_w, cells_h, scale, want[0], want[1]))
     sys.exit(1)
-print("  %dx%d  pic %dx%dc = %dx%d px  ok" % (cols, rows, cells_w, cells_h, px_w, px_h))
+print("  %dx%d  pic %dx%dc = %dx%d px at %gx  ok" % (cols, rows, cells_w, cells_h, px_w, px_h, scale))
 ' "$cols" "$rows" "$CELLW" "$CELLH" || failed=1
 done
 exit $failed

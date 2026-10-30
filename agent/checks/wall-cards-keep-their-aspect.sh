@@ -14,18 +14,30 @@ PANE=${PANE:-146x46}
 CELL=${CELL:-17x33}
 
 windows=$("$KAGENT" --json windows)
-render=$("$KAGENT" --json render --target vm --pane "$PANE" --cell "$CELL" --seconds 9 -- \
+display=$("$KAGENT" --json see --max-width 200 --quiet)
+render=$("$KAGENT" --json render --target vm --pane "$PANE" --cell "$CELL" --seconds "${SECONDS_TO_RUN:-14}" --quiet --allow-empty -- \
           '~/bin/krd' --wall)
 
-printf '%s\n%s\n' "$windows" "$render" | python3 -c '
+printf '%s\n%s\n%s\n' "$windows" "$display" "$render" | python3 -c '
 import json, sys
 
-lines = sys.stdin.read().strip().splitlines()
-# Two JSON documents were concatenated with a newline; split on the boundary line.
-raw = "\n".join(lines)
+# Three JSON documents were concatenated; decode them in one pass with an absolute offset. Slicing
+# on a decoded length instead is off by however much whitespace was skipped, and it silently worked
+# for two documents and broke for three.
+raw = sys.stdin.read()
 decoder = json.JSONDecoder()
-windows, index = decoder.raw_decode(raw)
-render, _ = decoder.raw_decode(raw[index:].lstrip())
+offset, documents = 0, []
+while True:
+    while offset < len(raw) and raw[offset].isspace():
+        offset += 1
+    if offset >= len(raw):
+        break
+    document, offset = decoder.raw_decode(raw, offset)
+    documents.append(document)
+if len(documents) != 3:
+    raise SystemExit("expected windows, a frame and a render report; got %d document(s)"
+                     % len(documents))
+windows, screen, render = documents
 
 cols, rows = (int(x) for x in sys.argv[1].split("x"))
 cell = (int(x) for x in sys.argv[2].split("x"))
@@ -49,7 +61,13 @@ for i in range(len(rects)):
 if render["misfits"]:
     problems.append("pictures do not match their cell box: %s" % render["misfits"][:2])
 
+# The stage shows the display, so the display is one of the shapes to match against -- otherwise a
+# 1.6 display would be quietly matched to whatever window happened to be closest.
 shapes = []
+bounds = screen.get("bounds") or {}
+if bounds.get("height"):
+    shapes.append((bounds["width"] / bounds["height"],
+                   "display %dx%d" % (bounds["width"], bounds["height"])))
 for w in windows["windows"]:
     _, _, width, height = w["rect"]
     if height:
@@ -57,17 +75,27 @@ for w in windows["windows"]:
 
 # The stage is the display; the cards are the windows. Both are fitted to the source aspect, so a
 # card matches *some* window and the stage matches the display it was captured from.
+#
+# The aspect to compare is the picture, not the box around it: a card is as tall as its picture
+# needs, capped by the band, so a capped card is slightly wider than its source and lets the
+# letterboxing show. Comparing the box would call that a bug; the content size (`native_px`) is what
+# "the window is not stretched" actually means.
+by_image = {p["image"]: p for p in render["pictures"]}
 matched = 0
 for r in rects:
-    aspect = (r["cols"] * cell_w) / (r["rows"] * cell_h)
+    picture = by_image.get(r["image"]) or {}
+    native = picture.get("native_px")
+    aspect = (native[0] / native[1]) if native and native[1] else \
+        (r["cols"] * cell_w) / (r["rows"] * cell_h)
     best = min(shapes, key=lambda s: abs(s[0] - aspect), default=None)
     if best and abs(best[0] - aspect) / best[0] < 0.02:
         matched += 1
-        print("  card %dx%d cells = %.3f -> %s (%.3f)" % (r["cols"], r["rows"], aspect,
-                                                          best[1], best[0]))
+        print("  %s %dx%d cells = %.3f -> %s (%.3f)" % (
+            "stage" if best[1].startswith("display") else "card",
+            r["cols"], r["rows"], aspect, best[1], best[0]))
     else:
-        problems.append("card %dx%d cells has aspect %.3f, no window matches it"
-                        % (r["cols"], r["rows"], aspect))
+        problems.append("picture %s is %dx%d cells with content aspect %.3f, no window matches it"
+                        % (r["image"], r["cols"], r["rows"], aspect))
 
 print("pictures=%d matched=%d misfits=%d" % (len(rects), matched, len(render["misfits"])))
 if problems:
