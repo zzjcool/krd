@@ -1,5 +1,5 @@
 import XCTest
-@testable import krdcore
+import Foundation
 
 /// The adaptive frame-rate gate cannot deliver the 15 fps rung from a 20 fps source.
 ///
@@ -99,14 +99,16 @@ final class FpsRungGateTests: XCTestCase {
                        "the 15 fps rung delivered \(delivered) fps from a 20 fps source")
     }
 
-    /// Red with 10.0: every second frame is dropped, so the rung is the 10 fps rung wearing
-    /// another name. `- 1` (a millisecond of slack against timer jitter) does not help: 50 ms
-    /// against 65.67 ms is a *whole frame* short, not a rounding error.
+    /// Red with 10.1 (10.0, plus one frame for the inclusive endpoint of the driver loop): every
+    /// second frame is dropped, so the rung is the 10 fps rung wearing another name. `- 1` (a
+    /// millisecond of slack against timer jitter) does not help: 50 ms against 65.67 ms is a
+    /// *whole frame* short, not a rounding error. The tolerance is 0.2, not 0.1, because of that
+    /// endpoint frame — the assertion must not sit on an ulp.
     func testThe15FpsRungDeliversTen() throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["KRD_RED"] == "1",
                           "armed with KRD_RED=1")
         let delivered = productDraws(period: 50, due: 1000.0 / 15)
-        XCTAssertEqual(delivered, 10.0, accuracy: 0.1,
+        XCTAssertEqual(delivered, 10.0, accuracy: 0.2,
                        "diagnosis: the gate quantises the rung down to a multiple of the source period")
     }
 
@@ -125,9 +127,14 @@ final class FpsRungGateTests: XCTestCase {
                 XCTAssertLessThanOrEqual(delivered, source + 0.6)
             }
         }
-        // 20 -> 15 is the one that collides with another rung on this ladder.
-        XCTAssertEqual(productDraws(period: 50, due: 1000.0 / 15),
-                       productDraws(period: 50, due: 1000.0 / 10),
+        // 20 -> 15 is the one that collides with another rung on this ladder. Both sides are
+        // pinned to the expected rate as well as to each other, so a dead gate (0 == 0) or a
+        // removed gate (20 == 20) cannot pass this.
+        let rung15 = productDraws(period: 50, due: 1000.0 / 15)
+        let rung10 = productDraws(period: 50, due: 1000.0 / 10)
+        XCTAssertEqual(rung15, 10.0, accuracy: 0.2, "the 15 fps rung from a 20 fps source")
+        XCTAssertEqual(rung10, 10.0, accuracy: 0.2, "the 10 fps rung from a 20 fps source")
+        XCTAssertEqual(rung15, rung10,
                        "the 15 fps and 10 fps rungs are the same rate from a 20 fps source")
     }
 

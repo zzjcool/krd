@@ -14,16 +14,28 @@ measured 14.2 KB/s), `--dev`.
 
     fps_median 15.0   fps_mean 14.82   fps_min 13  fps_max 16   (fps_json_median 15.06)
 
-## The 15 fps rung is never entered end-to-end — blocked by #93, not by this bug
+## The rung *is* reached end-to-end at 600 B/tick, and it delivers 10.1 fps
 
-    harness.py --label slow15 --fps 20 --quality auto --drain-bytes 1024 --tick-ms 50 --seconds 45
+    harness.py --label knee-600 --fps 20 --quality auto --drain-bytes 600 --tick-ms 50 --seconds 90
 
-    changes: []      write_ms_p50: 0.0      final fps_median 18.0
+    drain ceiling 11.7 KB/s, measured 8.5 KB/s
+     6.36s  20/80 -> 20/70      16.47s  20/50 -> 15/50   <- the rung under test
+    11.40s  20/70 -> 20/50      27.31s  15/50 -> 10/50   <- stepped past it in one window
+    36.50s  10/50 -> 15/50      50.41s  15/50 -> 10/50
+    77.51s  10/50 -> 15/50      83.70s  15/50 -> 10/50
 
-The ladder never steps: at `--fps 20` a 14 KB/s drain does not produce a blocking write
-(frames compress to ~10 KB/s, under the ceiling), and even under a true stall the governor
-counts a hang as one late frame (#93). So the rung cannot be reached from the outside to be
-measured from the outside — which is why the red test is over the gate's arithmetic:
+In the window after 16.47 s the rung asked for 15 fps and the loop drew
+
+    fps_median 10.1   fps_mean 10.45   fps_max 12.0   delivered_ratio_of_rung 0.67
+
+i.e. exactly `50 ms x ceil(66.67 / 50)` = 100 ms. Six of the eight transitions are the
+governor ping-ponging 15 <-> 10 because the 15 rung always measures short.
+
+At 1024 B/tick (20 KB/s ceiling, 14.2 KB/s measured) the ladder never steps at all
+(`changes: []`, `write_ms_p50 0.0`, fps_median 18.0) — the link is too fast to create
+pressure, which is why the first attempt at this measurement looked like #93.
+
+## The red test
 
     KRD_RED=1 swift test --filter FpsRungGateTests
     error: ... ("10.1") is not equal to ("15.0") +/- ("0.5")
