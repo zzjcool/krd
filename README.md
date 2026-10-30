@@ -80,6 +80,10 @@ gives them back when it closes. `make dev` is the shortcut.
 1920x1200). Tiles, dirty rects, the encoder, the placements and the chrome are all the real
 code — only the pixels are synthetic, so it needs no permission and never stops. `make dev-mock`.
 
+On the landing screen a click is the whole vocabulary: the right bar scrolls the stage and the shelf
+(one click = one page, the wheel = one item), and **clicking a picture opens that window's mirror** —
+krd hands the pane to a child `krd --window <id>` and takes the wall back when it exits (`Ctrl-\`).
+
 Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a real machine.
 Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/TESTING.md](docs/TESTING.md).

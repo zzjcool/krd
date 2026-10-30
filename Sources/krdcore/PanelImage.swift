@@ -39,6 +39,16 @@ public struct PanelFit: Equatable {
 
 /// The picture maths shared by the text layer and the capture path (design §6.6).
 public enum PanelImage {
+    /// The corner radius for a picture of this size: one twenty-fourth of its short side.
+    ///
+    /// Chosen to read as a rounded object at a glance without looking like a badge: at the VM's
+    /// 1024x768 display fitted into a 137-column stage that is ~33 px, and a 731x416 card picture
+    /// gets ~17 px - about what macOS gives a window. One rule for both, because a rounded card next
+    /// to a square stage would look like two different things glued together.
+    public static func cornerRadius(width: Int, height: Int) -> Int {
+        max(0, min(width, height) / 24)
+    }
+
     /// Fit `aspect` (width / height) inside `rect`, never cropping and never stretching.
     ///
     /// Both outputs come out of the same two numbers so the cells and the pixels cannot disagree:
@@ -100,9 +110,16 @@ public enum PanelImage {
     /// Clipped, never scaled: the capture is asked for exactly `fit`'s pixel size, and a scaler here
     /// would be a second resampler that could disagree with the terminal's. A content that is a
     /// pixel or two too big loses its edge instead of blurring.
+    ///
+    /// `cornerRadius` rounds the picture's own corners (in pixels, `0` = square): the alpha outside
+    /// the arc is left at 0, so the wall's background shows through and a display or a window reads
+    /// as a rounded object lying on the wall instead of a rectangle cut out of it. macOS windows are
+    /// rounded anyway, so the card pictures lose nothing; the stage is a display, and its corners are
+    /// the one thing a square cut cannot say.
     public static func compose(content: [UInt8], width: Int, height: Int,
                                panelWidth: Int, panelHeight: Int,
-                               originX: Int, originY: Int) -> [UInt8] {
+                               originX: Int, originY: Int,
+                               cornerRadius: Int = 0) -> [UInt8] {
         guard panelWidth > 0, panelHeight > 0 else { return [] }
         // Alpha 0 everywhere: the bars are the terminal's own background, not a colour of ours.
         var canvas = [UInt8](repeating: 0, count: panelWidth * panelHeight * 4)
@@ -111,11 +128,27 @@ public enum PanelImage {
         let srcStride = width * 3
         content.withUnsafeBufferPointer { src in
             canvas.withUnsafeMutableBufferPointer { dst in
+                // The radius can never eat more than half the picture, or the four arcs would
+                // cross and there would be no opaque pixel left at all.
+                let r = max(0, min(cornerRadius, min(width, height) / 2))
                 for row in 0..<height {
                     let y = originY + row
                     guard y >= 0, y < panelHeight else { continue }
-                    let first = max(0, -originX)                    // clipped left edge
-                    let last = min(width, panelWidth - originX)     // clipped right edge
+                    var first = max(0, -originX)                    // clipped left edge
+                    var last = min(width, panelWidth - originX)     // clipped right edge
+                    if r > 0 {
+                        // Only two rows out of each corner are narrowed: `dy` is the distance from
+                        // the nearest horizontal edge, and `dx` is how much the arc takes off the
+                        // row. The middle rows keep their full span, so the cost is the arcs alone.
+                        let dyTop = r - row
+                        let dyBottom = r - (height - 1 - row)
+                        let dy = max(dyTop, dyBottom)
+                        if dy > 0 {
+                            let dx = r - Int((Double(r * r - dy * dy)).squareRoot().rounded(.down))
+                            first = max(first, dx)
+                            last = min(last, width - dx)
+                        }
+                    }
                     guard last > first else { continue }
                     let out = dst.baseAddress! + y * dstStride + (originX + first) * 4
                     let input = src.baseAddress! + row * srcStride + first * 3

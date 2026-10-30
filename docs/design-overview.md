@@ -154,6 +154,7 @@ card reads as a window lying on the wall, not a window in a frame.
 | landscape (16:10 / 1.54) | the height fills the stage's rows and the width is ~72 cells centred (137×44 at 17×33 cells); ~30 cells of transparency on each side |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
 | window card | the card rect **never changes** (43×13 cells at 137×44); the picture fits inside at the window's own aspect, the rest is transparent |
+| rounded corners | every picture's own corners are cut to a radius of **one twenty-fourth of its short side** (`PanelImage.cornerRadius`), and the pixels outside the arc keep alpha 0 - so a display or a window reads as an object lying on the wall instead of a rectangle cut out of it. macOS rounds its windows anyway, so the card pictures lose nothing; the stage is where it shows |
 | one height per row | the cards of a page are drawn at **one height** - the tallest one every picture can reach without cropping, i.e. the widest window's (`WallPanels.sharedCardHeight`, then `PanelImage.fit(maxHeight:)`). Per-window fitting left a 16:9 card shorter than a square one, so the row's top and bottom edges disagreed ("窗口的最高高度需要保持一致"). The cost is that one wide window shortens its neighbours while it is on the page; the alternative would be cropping, which the design rules out |
 | the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |
@@ -320,6 +321,10 @@ Restart-path facts already hit once (do not relearn them):
   model changes, so a cache waits until CPU is actually the bottleneck.
 - **P3 done (2026-10-30)**: every section open, the right bar (two segments, wheel = one item, bar = one
   page), the mouse hit map, one height per card row, a divider between the stage and the cards, a 3-cell gap.
+- **P3b done (2026-10-30)**: clicking a picture hands the pane to a child `krd --window <id>` - the mirror as
+  it has always been built - and the wall comes back when that child exits. A child rather than an in-process
+  switch: the mirror is a capture target, a tile grid and a 20 fps loop that forwards input, and "back" then
+  costs nothing. When the child stops badly the wall's footer says its exit code and its own last sentence.
 - **P4 done (2026-10-30)**: plain `krd` opens the wall. `--mirror` (or `--window <query>`, which asks for one
   window and so cannot mean the wall) takes the old default back; `wall` stays a symlink and `--wall` still
   parses, because scripts spell it. `--list`, `--selftest`, `--bench`, `--mock` keep their own paths - they are

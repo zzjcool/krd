@@ -64,6 +64,10 @@ krd --format rgba            # 终端不认 f=24 时退回 f=32
 krd --bench                  # 在合成帧上给编码器计时，不需要终端
 ```
 
+落地屏上只有鼠标这一套词汇：右边竖条滚舞台和卡片带（点一下翻一页，滚轮一格一项），
+**点一张图就进入那个窗口的镜像**——krd 把面板交给子进程 `krd --window <id>`，子进程退出（`Ctrl-\`）
+之后再把墙接回来。
+
 退出按 **`Ctrl-\`**；`Ctrl-C` 会转发给远程桌面，和真机一致。
 完整参数、调优开关和诊断开关在 [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) 和
 [docs/TESTING.zh-CN.md](docs/TESTING.zh-CN.md)。

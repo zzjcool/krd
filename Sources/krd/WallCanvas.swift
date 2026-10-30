@@ -130,6 +130,10 @@ enum WallNotice: Equatable {
     /// granted Screen Recording. `terminal` is `TERM_PROGRAM` when the terminal says (Terminal
     /// writes `Apple_Terminal`), because "grant it to this app" is only actionable with a name.
     case screenRecordingDenied(terminal: String?)
+    /// The child mirror krd spawned for a clicked picture exited without doing its job: the code and
+    /// whatever it said on stderr. Without this the click looks like a no-op - the pane blinks and
+    /// the wall comes straight back - and the reason is only in a log file nobody opens.
+    case mirrorStopped(exit: Int32, message: String?)
 
     /// The footer sentence, ASCII-safe apart from the leading bullet (which the symbol table owns).
     func text(bullet: String, dash: String) -> String {
@@ -140,6 +144,11 @@ enum WallNotice: Equatable {
         case let .screenRecordingDenied(terminal):
             let name = terminal.map { $0 == "Apple_Terminal" ? "Terminal" : $0 } ?? "your terminal"
             return "\(bullet) no picture\(dash)grant Screen Recording to \(name)"
+        case let .mirrorStopped(code, message):
+            if let message, !message.isEmpty {
+                return "\(bullet) the mirror stopped (exit \(code))\(dash)\(message)"
+            }
+            return "\(bullet) the mirror stopped (exit \(code))"
         }
     }
 }

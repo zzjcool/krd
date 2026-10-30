@@ -133,11 +133,42 @@ final class InputReader {
         }
     }
 
+    /// Stop the reader thread and give the terminal back.
+    ///
+    /// The wall hands the tty to a child `krd` when a card is clicked, and two readers on one tty
+    /// would steal each other's reports. This waits for the thread to leave its `poll` (it wakes at
+    /// least every 100 ms), so the caller can rely on nobody reading once it returns.
+    func stop() {
+        stopLock.lock()
+        stopFlag = true
+        stopLock.unlock()
+        _ = stoppedSignal.wait(timeout: .now() + 1)
+    }
+
+    private var isStopped: Bool {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        return stopFlag
+    }
+
     // MARK: read loop
 
+    private let stopLock = NSLock()
+    private var stopFlag = false
+    private let stoppedSignal = DispatchSemaphore(value: 0)
+
     private func loop() {
+        defer {
+            // Whatever made the loop return, the terminal goes back to the shell in a state that
+            // works: mouse reporting off, kitty flags off, termios restored.
+            ScreenWriter.writeMouseReporting(false)
+            ScreenWriter.writeKeyboardProtocol(false)
+            restore()
+            stoppedSignal.signal()
+        }
         var chunk = [UInt8](repeating: 0, count: 8192)
         while true {
+            if isStopped { return }
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {

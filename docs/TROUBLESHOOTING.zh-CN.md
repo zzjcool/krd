@@ -248,6 +248,19 @@ Alt-`G`，后面全变成文字。
 任何回调，也不打日志。
 **对策。** `queueDepth = 3`（`Capture.swift`）。
 
+### 23a. 点一张图闪一下就回到墙
+
+**原因。** 点击是生效的：krd 把面板交给子进程 `krd --window <id>`，是这个子进程没画出东西就退出了。
+墙的页脚现在会带子进程的退出码和它自己最后一句话，先看那行。最常见两种：
+
+- `the mirror stopped (exit 1) - The user declined TCCs ...`——SCK 的流式那一半（`SCStream`）被拒，
+  而一次性那一半（`SCScreenshotManager`，墙的图片用的就是它）是允许的。给运行 krd 的那个终端屏幕录制权限（23b）。
+- `the mirror stopped (exit 1) - no window matched "<id>"`——窗口在这一页画出来之后、点之前关掉了。
+  滚一下再点。
+
+**解决。** krd 这边不用做什么，原因就在页脚上。子进程正常跑起来的话，在它里面按 `Ctrl-\` 就回墙——
+这就是退出窗口镜像的方式。
+
 ### 23b. 每块面板都是 `no picture`，页脚让你去给屏幕录制权限
 
 **原因。** macOS 的屏幕录制权限是发给「负责的应用」的。krd 从终端里启动时，这个权限属于那个终端

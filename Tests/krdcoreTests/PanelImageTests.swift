@@ -121,3 +121,67 @@ final class PanelImageHeightCapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(capped.contentWidth, 1)
     }
 }
+
+/// Rounded corners on the picture itself (design §6.6): the alpha outside the arc stays 0, so the
+/// wall's background shows through and a display reads as an object on the wall.
+final class PanelImageCornerTests: XCTestCase {
+    /// A solid white 40x40 picture on a 40x40 panel, so every pixel is content.
+    private func white(_ w: Int = 40, _ h: Int = 40) -> [UInt8] {
+        [UInt8](repeating: 255, count: w * h * 3)
+    }
+
+    private func alpha(_ canvas: [UInt8], _ x: Int, _ y: Int, width: Int) -> UInt8 {
+        canvas[(y * width + x) * 4 + 3]
+    }
+
+    func testTheCornersAreCutAndTheRestIsOpaque() {
+        let canvas = PanelImage.compose(content: white(), width: 40, height: 40,
+                                       panelWidth: 40, panelHeight: 40,
+                                       originX: 0, originY: 0, cornerRadius: 8)
+        XCTAssertEqual(alpha(canvas, 0, 0, width: 40), 0, "top-left corner")
+        XCTAssertEqual(alpha(canvas, 39, 0, width: 40), 0, "top-right corner")
+        XCTAssertEqual(alpha(canvas, 0, 39, width: 40), 0, "bottom-left corner")
+        XCTAssertEqual(alpha(canvas, 39, 39, width: 40), 0, "bottom-right corner")
+        // Inside the arc and everywhere else: untouched.
+        XCTAssertEqual(alpha(canvas, 8, 8, width: 40), 255)
+        XCTAssertEqual(alpha(canvas, 20, 0, width: 40), 255, "the top edge stays")
+        XCTAssertEqual(alpha(canvas, 20, 20, width: 40), 255)
+        XCTAssertEqual(alpha(canvas, 20, 39, width: 40), 255, "the bottom edge stays")
+    }
+
+    func testTheArcIsMonotoneSoTheCornerLooksRound() {
+        let canvas = PanelImage.compose(content: white(), width: 40, height: 40,
+                                       panelWidth: 40, panelHeight: 40,
+                                       originX: 0, originY: 0, cornerRadius: 8)
+        // Row 0 is cut by the full radius, row r-1 by almost nothing.
+        var widths: [Int] = []
+        for y in 0..<8 {
+            let firstOpaque = (0..<40).first { alpha(canvas, $0, y, width: 40) != 0 } ?? -1
+            widths.append(firstOpaque)
+        }
+        XCTAssertEqual(widths.first, 8, "the top row starts at the radius")
+        XCTAssertEqual(widths.last, 1, "the last row of the arc keeps only the tangent pixel")
+        XCTAssertEqual(widths, widths.sorted(by: >), "the cut shrinks row by row: \(widths)")
+    }
+
+    func testRadiusZeroIsTheOldRectangle() {
+        let square = PanelImage.compose(content: white(), width: 40, height: 40,
+                                       panelWidth: 40, panelHeight: 40,
+                                       originX: 0, originY: 0)
+        XCTAssertEqual(alpha(square, 0, 0, width: 40), 255)
+        XCTAssertEqual(alpha(square, 39, 39, width: 40), 255)
+    }
+
+    func testARadiusLargerThanHalfThePictureCannotEraseIt() {
+        let canvas = PanelImage.compose(content: white(), width: 20, height: 20,
+                                       panelWidth: 20, panelHeight: 20,
+                                       originX: 0, originY: 0, cornerRadius: 999)
+        XCTAssertEqual(alpha(canvas, 10, 10, width: 20), 255, "the middle always survives")
+    }
+
+    func testTheRadiusIsA24thOfTheShortSide() {
+        XCTAssertEqual(PanelImage.cornerRadius(width: 731, height: 416), 17)
+        XCTAssertEqual(PanelImage.cornerRadius(width: 1267, height: 792), 33)
+        XCTAssertEqual(PanelImage.cornerRadius(width: 10, height: 200), 0, "nothing to round")
+    }
+}

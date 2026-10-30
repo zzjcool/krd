@@ -43,12 +43,18 @@ enum WallPictures {
                 guard let raster = PanelRaster.rgb(image) else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                let canvas = PanelImage.compose(content: raster.pixels,
-                                                width: raster.width, height: raster.height,
-                                                panelWidth: panel.pixelWidth,
-                                                panelHeight: panel.pixelHeight,
-                                                originX: panel.fit.originX,
-                                                originY: panel.fit.originY)
+                let canvas = PanelImage.compose(
+                    content: raster.pixels,
+                    width: raster.width, height: raster.height,
+                    panelWidth: panel.pixelWidth,
+                    panelHeight: panel.pixelHeight,
+                    originX: panel.fit.originX,
+                    originY: panel.fit.originY,
+                    // Round the picture's own corners (design §6.6): the capture is the size it will
+                    // be drawn at, so the radius is in the same pixels and does not change when the
+                    // pane is resized.
+                    cornerRadius: PanelImage.cornerRadius(width: raster.width,
+                                                          height: raster.height))
                 guard canvas.count == panel.pixelWidth * panel.pixelHeight * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }

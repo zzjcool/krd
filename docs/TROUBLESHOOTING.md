@@ -276,6 +276,21 @@ so the two spellings of F1–F4 cannot disagree; the parser decision and the tab
 first frame is delivered, then no more callbacks arrive and nothing is logged.
 **Fix.** `queueDepth = 3` (`Capture.swift`).
 
+### 23a. Clicking a picture flashes and comes straight back to the wall
+
+**Cause.** The click works: krd hands the pane to a child `krd --window <id>`, and that child exited
+without drawing. The wall's footer now carries the child's exit code and its own last sentence, so
+read that first. The usual ones:
+
+- `the mirror stopped (exit 1) - The user declined TCCs ...` - the stream half of ScreenCaptureKit
+  (`SCStream`) is denied while the one-shot half (`SCScreenshotManager`, which the wall's pictures
+  use) is allowed. Grant Screen Recording to the terminal krd runs in (23b).
+- `the mirror stopped (exit 1) - no window matched "<id>"` - the window closed between the page
+  being drawn and the click. Scroll and click again.
+
+**Fix.** Nothing to do in krd: the reason is on the footer. If the child works, `Ctrl-\` inside it
+brings the wall back - that is the way out of a window mirror.
+
 ### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
 
 **Cause.** macOS grants Screen Recording per *responsible* application. When krd is started from a
