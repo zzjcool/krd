@@ -6,7 +6,7 @@ each move re-encodes the next frame for real, and the numbers under the bars are
 put on the wire a moment ago -- not an estimate.
 
     colour   --quality  100 (lossless rgb) · 80 (5-6-5) · 60 (8-bit grey) · 30 (4-bit grey) · 0 (1-bit)
-    space    --scale    1.0 · 0.5 · 0.33 · 0.25 · 0.1  (the terminal upscales to the same box)
+    space    --scale    1.0 · 0.8 · 0.6 · 0.5 · 0.33 · 0.25 · 0.1   (upscaled by the terminal)
     time     --fps      30 · 25 · 20 · 15 · 10 · 5      (one step = 5 fps)
 
 Controls, because a slider you cannot reach is a table with extra steps:
@@ -36,7 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CLIP = os.path.join(HERE, '..', 'docs', 'media', 'demo.mp4')
 
 QUALITY = [100, 80, 60, 30, 0]
-DOWNSCALE = [1, 2, 3, 4, 10]             # 1.0, 0.5, 0.33, 0.25, 0.1
+DOWNSCALE = [1.0, 0.8, 0.6, 0.5, 0.33, 0.25, 0.1]     # the terminal upscales to the box
 FPS = [30, 25, 20, 15, 10, 5]        # one step = 5 fps
 LABEL = {100: 'rgb + zlib (lossless)', 80: 'rgb 5-6-5 + zlib', 60: 'grey 8-bit png',
          30: 'grey 4-bit png', 0: 'black/white 1-bit'}
@@ -44,21 +44,32 @@ LABEL = {100: 'rgb + zlib (lossless)', 80: 'rgb 5-6-5 + zlib', 60: 'grey 8-bit p
 
 # ---------------------------------------------------------------- encoding
 
-def resample(rows, w, h, factor):
-    """Nearest neighbour by whole pixels: every channel of every factor-th pixel, not one channel
-    of it. `row[0::3*factor]` takes the red channel only and hands the encoder 1/3 of a row, which
-    it happily packs into a PNG whose header claims the full width -- a corrupt frame that a
-    terminal renders as noise, and that a byte count will not notice.
+def resample(rows, w, h, scale):
+    """Nearest neighbour by whole pixels: every channel of the sampled pixel, never one channel of it.
+
+    `row[0::3*factor]` takes the red channel only and hands the encoder 1/3 of a row, which it
+    happily packs into a PNG whose header claims the full width -- a corrupt frame that a terminal
+    renders as noise, and that a byte count will not notice. Hence the whole-pixel slicing, and
+    hence `verify()` at the encoder.
     """
-    if factor == 1:
+    if scale >= 0.999:
         return rows, w, h
-    tw, th = w // factor, h // factor
+    tw, th = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    inv = 1.0 / scale
+    if abs(inv - round(inv)) < 1e-9:                 # 0.5, 0.33, 0.25, 0.1: slice, in C
+        f = int(round(inv))
+        out = []
+        for row in rows[::f][:th]:                   # ceil() would hand the encoder one row too many
+            buf = bytearray(tw * 3)
+            for c in range(3):
+                buf[c::3] = row[c::3 * f][:tw]
+            out.append(bytes(buf))
+        return out, tw, th
+    offsets = [min(w - 1, int(x * inv)) * 3 for x in range(tw)]   # 0.8, 0.6: general, sampled once
     out = []
-    for row in rows[::factor][:th]:        # ceil() would hand the encoder one row too many
-        buf = bytearray(tw * 3)
-        for c in range(3):
-            buf[c::3] = row[c::3 * factor][:tw]
-        out.append(bytes(buf))
+    for y in range(th):
+        row = rows[min(h - 1, int(y * inv))]
+        out.append(b''.join([row[o:o + 3] for o in offsets]))
     return out, tw, th
 
 
@@ -163,19 +174,22 @@ def table(clip, src_w, src_h):
     base = len(base_payload)
     print(f'{os.path.basename(clip)} at {src_w}x{src_h}; 100 / 1.0 / 30 fps = '
           f'{human(base)}/frame, {human(base * 30)}/s\n')
-    for factor in DOWNSCALE:
-        r2, w2, h2 = resample(rows, src_w, src_h, factor)
+    for scale in DOWNSCALE:
+        r2, w2, h2 = resample(rows, src_w, src_h, scale)
         cells = []
         for quality in QUALITY:
             payload, kind, _ = encode(r2, w2, h2, quality)
             verify(payload, kind, w2, h2)
             cells.append(f'{quality:3d}:{human(len(payload)):>8s} {base / len(payload):6.2f}x')
-        print(f'  --scale {("%.2f" % (1 / factor)).rstrip("0").rstrip("."):>4s} '
+        print(f'  --scale {("%.2f" % scale).rstrip("0").rstrip("."):>4s} '
               f'({w2}x{h2})  ' + '   '.join(cells))
     print('\n  --fps ' + '/'.join(str(f) for f in FPS) + ' divide the same frame: '
           + ' '.join(f'{30 / f:.2f}x' for f in FPS))
-    r2, w2, h2 = resample(rows, src_w, src_h, 2)
+    r2, w2, h2 = resample(rows, src_w, src_h, 0.5)
     combined = len(encode(r2, w2, h2, 60)[0])
+    print(f'  default 80 / 0.8 / 20   = '
+          f'{base / len(encode(*resample(rows, src_w, src_h, 0.8)[:1], *resample(rows, src_w, src_h, 0.8)[1:], 80)[0]):5.2f}x frame, '
+          f'x 1.50 for fps')
     print(f'  combined 60 / 0.5 / 15  = {base / combined * 2:5.2f}x fewer bytes '
           f'({human(combined)}/frame at {human(combined * 15)}/s)')
 
@@ -372,8 +386,8 @@ def main():
         raise SystemExit(f'{clip}: no such file')
     cells = argv[argv.index('--cells') + 1] if '--cells' in argv else None
     once = '--once' in argv
-    start = argv[argv.index('--start') + 1] if '--start' in argv else '60,2,15'
-    cap = int(argv[argv.index('--max-bytes') + 1]) if '--max-bytes' in argv else 48_000
+    start = argv[argv.index('--start') + 1] if '--start' in argv else '80,0.8,20'
+    cap = int(argv[argv.index('--max-bytes') + 1]) if '--max-bytes' in argv else 200_000
     try:
         start_quality, start_space, start_fps = (float(v) for v in start.split(','))
     except ValueError:
@@ -402,11 +416,12 @@ def main():
     screen = Screen(cols, rows)
     bars = [Bar('colour', '--quality', QUALITY, lambda v: f'{v:>3d}   {LABEL[v]}'),
             Bar('space', '--scale', DOWNSCALE,
-                lambda v: f'{("%.2f" % (1 / v)).rstrip("0").rstrip("."):>4s}  '
-                          f'{src_w // v}x{src_h // v} px'),
+                lambda v: f'{("%.2f" % v).rstrip("0").rstrip("."):>4s}  '
+                          f'{int(round(src_w * v))}x{int(round(src_h * v))} px'),
             Bar('time', '--fps', FPS, lambda v: f'{v:>3d}')]
-    # start where a slow link can actually keep up; drag right if yours can. 100/1.0/30 is ~325 KB/s
-    # of base64, which an ssh pty takes but the far end buffers for seconds.
+    # 80 / 0.8 / 20 is ~210 KB/s of base64 -- comfortable on a LAN, tight over ssh. `--max-bytes`
+    # lowers it: the bars stay responsive either way (text jumps the frame queue), only the picture
+    # gets fresher or staler.
     for bar, want in zip(bars, (start_quality, start_space, start_fps)):
         bar.index = min(range(len(bar.steps)),
                         key=lambda i: abs(bar.steps[i] - (want if bar is not bars[2] else want)))
