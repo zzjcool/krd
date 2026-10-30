@@ -286,7 +286,12 @@ Restart-path facts already hit once (do not relearn them):
   and its single-stream logic are untouched - P2 adds a parallel path, it does not rework the mirror.
 
 - **P1** `WindowOrder` + `WallLayout` + the text layer (text cards and empty frames first, opt-in `--start wall`).
-- **P2** single-panel capture → compress → cache → dedupe → mask fallback.
+- **P2 done (2026-10-30)**: `PanelImage` (fit + dominant colour + composite, pure and tested),
+  `WallPanels` (the plan), `PanelCapture` (one-shot, typed failures), `WallPictures` (shoot → sample
+  → compose), `Render.emitPanel` (the tile wire shape with caller-owned ids) and the canvas's three
+  slot states (placeholder / picture / mask). Measured at 137×44: **4 pictures, 1.18 MB**, once; the
+  mirror path's bytes and golden dumps are unchanged. No dedupe: the wall only repaints when the
+  model changes, so a cache waits until CPU is actually the bottleneck.
 - **P3** everything open + scrolling + `⤢` + the mouse hit map.
 - **P4** flip the default + docs (README both languages, ARCHITECTURE, TROUBLESHOOTING) + `bench/budget.json`.
 

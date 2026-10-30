@@ -237,7 +237,11 @@
   （1 s tick 发现模型变化）才拍一次，~92 ms，然后压缩上屏。`Capture.swift` 那套一条流的逻辑
   完全不动——P2 是新增一条并行路径，不是改造镜像路径。
 - **P1** `WindowOrder` + `WallLayout` + 文本层（先只有文字卡片和无图的框，`--start wall` 显式打开）。
-- **P2** 单块采集 → 压缩 → 缓存 → 去重 → 遮罩兜底。
+- **P2 已完成（2026-10-30）**：`PanelImage`（fit + 主色 + 合成，纯、可测）、`WallPanels`（计划）、
+  `PanelCapture`（一次性截图，具名失败）、`WallPictures`（拍 → 采色 → 合成）、`Render.emitPanel`
+  （与贴片同一种线格式，id 由调用方给）、`WallCanvas` 的三种槽位状态（占位 / 图 / 遮罩）。
+  实测 137×44：整墙 **4 张图、1.18 MB**、一次；镜像路径的字节数与 golden dump 完全没变。
+  去重没有做——墙面本来就只在模型变化时重画，缓存要等真的量到 CPU 是瓶颈再说。
 - **P3** 全开 + 滚动 + `⤢` + 鼠标命中。
 - **P4** 翻默认 + 文档（README 双语、ARCHITECTURE、TROUBLESHOOTING）+ `bench/budget.json`。
 

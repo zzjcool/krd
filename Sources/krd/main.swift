@@ -71,9 +71,11 @@ struct Options {
     var noChrome = false
     /// Open a panel at startup, for screenshots and for `--dev --selftest` without input.
     var devPanel: String? = nil
-    /// The landing screen (`--wall`): displays plus the most recently used windows as text, with
-    /// no capture at all. Opt-in, because the mirror is what krd is for — and it renders fully with
-    /// the Screen Recording grant denied (`WallSource` reads nothing that needs one).
+    /// The landing screen (`--wall`): displays plus the most recently used windows, as pictures.
+    ///
+    /// It renders fully with the Screen Recording grant denied: the layout, the captions and the
+    /// scroll bar are text, and a panel that cannot be captured draws its mask instead (design §4).
+    /// Opt-in for now, because the mirror is what krd is for; the flip is phase 4.
     var wall = false
     /// The `--wall` glyph table (`--symbols`): `emoji` unless the terminal draws `▲ ▣ ⤢` two cells
     /// wide, which would slide the bar off the column a click maps to.
@@ -115,8 +117,8 @@ func usage() -> String {
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
       --no-chrome         force the TUI layer off, e.g. for scripts
       --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
-      --wall              the landing screen: displays + the most recently used windows, as
-                          text instead of a mirror (opt-in; the mirror stays the default)
+      --wall              the landing screen: the display and the most recently used windows,
+                          as pictures instead of a mirror (opt-in; the mirror stays the default)
       --symbols <m>       --wall glyphs: emoji (default) or ascii, for terminals that draw
                           ▲ ▣ ⤢ two cells wide
       --mock              draw the desktop in process: no screen, no permission, runs forever
