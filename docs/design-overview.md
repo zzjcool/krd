@@ -268,6 +268,11 @@ own, so nothing has to be estimated.
 | the probe | once at startup: a 1×1 image transmitted with `q=2` (silent) and placed as a placeholder with `q=0`. `OK` → placeholders, `E…` or no answer → the pixel path. One log line says which, because a terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells |
 | one snapshot | `PaneGeometry` - grid, cell, dpr, source - is measured once at start and once per resize. The layout, every capture size and the mouse mapping all read *it*; nothing else may measure the terminal |
 
+`--demo` draws a test pattern instead of the desk (`DemoPicture`): no window server, no grant, a fixed
+model, and the footer prints the measurement. It exists because every bug above was invisible in code and
+obvious on a screen that needed a VM and a human - the pattern's own border is the measurement
+(TROUBLESHOOTING 23f).
+
 The geometry has exactly one direction: **cells → pixels**. The old code fitted in pixels, rounded to cells, then
 derived pixels again (`originX/originY`, `pixelWidth/Height`, a per-tick `ioctl`, a mutable fallback cell); the two
 roundings could disagree, and every "the box is right but the picture is not" report was one of those disagreements.

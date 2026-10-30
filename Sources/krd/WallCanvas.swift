@@ -103,6 +103,13 @@ struct WallSlotPaints: Equatable {
     /// click hint. One reason exists today and it is the one that cost the most time to diagnose:
     /// four boxes saying "no picture" are not an answer to "why is my wall empty".
     var notice: WallNotice? = nil
+    /// The `--demo` sentence: the numbers this frame was drawn from, in the wall's own words.
+    ///
+    /// Why it is on screen and not only in the log: the picture's geometry has been the one thing
+    /// that could not be checked without a screenshot, and a reader with no screenshot tool can still
+    /// read a line of text. "border at half the width" plus "cell 8x16 · pic 688x432 px" is enough to
+    /// tell a scaling terminal from a 1:1 one.
+    var demoNote: String? = nil
 
     func card(_ slot: Int) -> WallSlotPaint {
         cards.indices.contains(slot) ? cards[slot] : .placeholder
@@ -425,7 +432,8 @@ final class WallCanvas {
         drawBand(&grid, model: model, layout: layout)
         drawCards(&grid, model: model, layout: layout, paints: paints)
         drawCardCaptions(&grid, model: model, layout: layout)
-        drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice)
+        drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice,
+                   demoNote: paints.demoNote)
         drawBar(&grid, layout: layout)
         return grid.cells
     }
@@ -619,10 +627,18 @@ final class WallCanvas {
     /// The footer: how many panels there are (right, right-aligned) and what a click does here
     /// (left). After a pick it becomes the way back, which in phase 1 is the whole of "entered".
     private func drawFooter(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                            focus: WallState.Focus?, notice: WallNotice? = nil) {
+                            focus: WallState.Focus?, notice: WallNotice? = nil,
+                            demoNote: String? = nil) {
         let content = min(layout.contentCols, grid.cols)
         let budget = drawTail(&grid, row: layout.footerRow, content: content,
                               "\(1 + layout.cards.count) panels", .dim)
+        // The demo's numbers come before everything: while they are up, that line *is* the point of
+        // the frame, and the click hint can wait.
+        if let demoNote {
+            grid.text(DisplayWidth.truncate(demoNote, to: budget), row: layout.footerRow, col: 1,
+                      .bright, limit: budget)
+            return
+        }
         let lead: String
         switch focus {
         case nil:

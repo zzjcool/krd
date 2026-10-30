@@ -149,8 +149,14 @@ final class WallPanelRowHeightTests: XCTestCase {
                                     stageSource: nil, cardSources: cards)
         for (index, panel) in panels.enumerated() {
             let aspect = Double(panel.fit.contentWidth) / Double(panel.fit.contentHeight)
-            // Rounding to whole pixels is the only slack allowed.
-            XCTAssertEqual(aspect, cards[index].aspect, accuracy: 0.01,
+            // One cell is the slack: the picture is sized by the cells the layout gave it, so an
+            // aspect is right to within half a cell on each axis (a 44x14 card at 17x33 px cells is
+            // 748x462 -> 1.6%). Tighter than that would mean the pixels disagree with the layout,
+            // which is the bug this replaced.
+            let cellW = 17.0, cellH = 33.0
+            let slack = max(cellW / Double(panel.fit.contentWidth),
+                            cellH / Double(panel.fit.contentHeight))
+            XCTAssertEqual(aspect, cards[index].aspect, accuracy: cards[index].aspect * slack * 1.2,
                            "card \(index) changed shape")
         }
     }

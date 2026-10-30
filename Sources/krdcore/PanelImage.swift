@@ -78,17 +78,25 @@ public enum PanelImage {
             h = maxHeight
             w = max(1, min(availW, Int((Double(h) * aspect).rounded())))
         }
-        let x = (availW - w) / 2
-        let y = (availH - h) / 2
-
-        // The cell box is the same rectangle seen through the grid: round the pixel box, then
-        // centre it, and never let rounding push it past the panel's own edges.
+        // The cell box: the pixel box seen through the grid, rounded to whole cells and centred.
         let cols = max(1, min(rect.cols, Int((Double(w) / cellW).rounded())))
         let rows = max(1, min(rect.rows, Int((Double(h) / cellH).rounded())))
         let cellRect = CellRect(col: rect.col + (rect.cols - cols) / 2,
                                 row: rect.row + (rect.rows - rows) / 2,
                                 cols: cols, rows: rows)
-        return PanelFit(contentWidth: w, contentHeight: h, originX: x, originY: y, cellRect: cellRect)
+
+        // **Cells decide pixels.** The cell rectangle is the layout's own integer rectangle, and the
+        // picture is exactly its size - the cell count is not re-derived from a pixel count that was
+        // itself rounded (`w`/`h` above), because that left the picture up to half a cell narrower
+        // than its box: a terminal that draws an image at its own pixel size then leaves a gap at the
+        // edge, and one that scales hides the same bug as a 1-2% stretch. The panel *is* the picture
+        // (design §6.6), so there is no origin inside it either: both offsets are zero by definition,
+        // and a non-zero one would only be an invitation to shift a picture inside a canvas that is
+        // exactly its own size.
+        let pictureW = max(1, Int((Double(cols) * cellW).rounded()))
+        let pictureH = max(1, Int((Double(rows) * cellH).rounded()))
+        return PanelFit(contentWidth: pictureW, contentHeight: pictureH,
+                        originX: 0, originY: 0, cellRect: cellRect)
     }
 
     /// Paint `content` (RGB, `width` x `height`) onto a **transparent** panel-sized canvas.

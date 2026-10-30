@@ -81,6 +81,9 @@ struct Options {
     /// desktop in the corner (`emitPanelAsPlaceholder`). `nil` = ask the terminal once at startup
     /// (`TermGeometry.supportsPlaceholders`), which is the default: guessing is what this replaces.
     var placeholders: Bool? = nil
+    /// Draw a test pattern instead of the desk: no window server, no Screen Recording grant, and the
+    /// picture's own border is the measurement (`DemoPicture`, TROUBLESHOOTING 23f).
+    var demo = false
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
 
@@ -188,6 +191,7 @@ func usage() -> String {
                           moves; --no-cursor is still accepted and means the same as the default)
       --dpr <n>           device pixels per reported pixel for the pixel-sized path (default: 2
                           when the terminal only answers CSI 16t/14t, 1 when the pty reports them)
+      --demo             draw a test pattern instead of the desk (no capture, no permission)
       --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
                           pixel-sized placement. Default: one probe at startup, then the answer
       --dry-run           parse input but only log it, never post CGEvent
@@ -371,6 +375,7 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
                 options.cell = (w, h)
             }
             i += 1
+        case "--demo": options.demo = true
         case "--no-placeholders": options.placeholders = false
         case "--placeholders": options.placeholders = true
         case "--dpr":
@@ -1121,6 +1126,7 @@ final class Desk {
         let pane = PaneGeometry.measure(cell: options.cell, grid: options.pane,
                                         dpr: options.dpr) { Log.write($0) }
         wallPane = pane
+        WallPictures.demo = options.demo
         // Pictures: kitty unicode placeholders when the terminal accepts them, else pixel-sized
         // placements. One probe, one log line, and the answer is a reply rather than a hope - a
         // terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells.
@@ -1196,7 +1202,7 @@ final class Desk {
         let tty = TermGeometry.read()
         let pane = options.pane == nil && (tty.cols != stored.cols || tty.rows != stored.rows)
             ? stored.with(cols: tty.cols, rows: tty.rows) : stored
-        let model = WallSource.model()
+        let model = options.demo ? WallSource.demoModel() : WallSource.model()
         guard force || model != wallModel || pane != wallPane else { return }
         wallModel = model
         wallPane = pane
@@ -1318,6 +1324,13 @@ final class Desk {
                                stageSource: stage, cardSources: cards)
     }
 
+    /// Integer when the number is one, otherwise one decimal: the footer has room for a number, not
+    /// for a float's opinion of it.
+    private static func trim(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        return rounded == rounded.rounded() ? String(Int(rounded)) : String(format: "%.1f", rounded)
+    }
+
     /// Paint the text, then the pictures on the cells the text was told to leave alone.
     private func paintWall(layout: WallLayout, model: WallModel, panels: [WallPanel],
                            pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError]) {
@@ -1325,6 +1338,20 @@ final class Desk {
         var paints = WallSlotPaints()
         for panel in panels {
             paints.mark(slot: panel.slot, failures[panel.slot] == nil ? .picture : .mask)
+        }
+        if options.demo {
+            // One line that answers "why does the picture not fill its box" without a screenshot:
+            // the pane, the cell it was measured at, the quality factor, the stage's cells and
+            // pixels, and which transport the pictures went out on.
+            let scale = wallPlaceholders ? (options.dpr ?? 1) : pane.dpr
+            let cell = "cell \(Self.trim(pane.cellW))x\(Self.trim(pane.cellH))"
+            let stage = panels.first { $0.slot == 0 }.map {
+                "pic \($0.rect.cols)x\($0.rect.rows)c \($0.fit.contentWidth)x\($0.fit.contentHeight)px"
+            } ?? "no stage"
+            let dot = options.symbols.dot
+            paints.demoNote = "demo \(pane.cols)x\(pane.rows) \(dot) \(cell) \(dot) "
+                + "\(Self.trim(scale))x \(dot) \(stage) \(dot) "
+                + "\(wallPlaceholders ? "U=1" : "a=p") \(dot) \(pane.source)"
         }
         // A frame with no pictures and a *reason* says the reason once, in the footer: four boxes
         // reading "no picture" answer "what", not "why".

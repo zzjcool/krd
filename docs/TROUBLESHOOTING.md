@@ -270,6 +270,33 @@ so the two spellings of F1–F4 cannot disagree; the parser decision and the tab
 
 ## 4. ScreenCaptureKit & permissions
 
+### 23f. Reproducing a geometry complaint without a screenshot
+
+```
+krd --wall --demo
+```
+
+draws a **test pattern** instead of the desk: no window server, no Screen Recording grant, no VM, and
+the same numbers on every machine (the demo's model is fixed: one 2560x1600 display and four windows,
+16:9, 4:3, 1:1, 21:9). The picture's own border is the measurement, the four corners are four colours,
+the circle turns into an ellipse the moment an aspect is stretched, and the footer prints what this
+frame was drawn from:
+
+```
+demo 137x44 · cell 8x16 · 2x · pic 86x27c 1376x864px · a=p · measured from the terminal (CSI 16t+14t)
+```
+
+Reading the three cases:
+
+| what you see | what it means |
+|---|---|
+| border fills the box, on all four sides | the transport works; a remaining complaint is about the *box*, not the picture (`--wall --pane WxH` reproduces it) |
+| border fills the box but the picture is soft | the terminal is scaling up: raise `--dpr` (it is quality, not geometry) |
+| the border is inside the box but smaller, anchored top-left | the terminal draws an image one texel per device pixel and krd asked for fewer: the picture must be asked for in **device** pixels. Give the real cell (`--cell 16x33`) or let krd read it from the pty (`ws_xpixel`, which a local run has and ssh does not) |
+
+`--placeholders` / `--no-placeholders` switch transports, and `--dpr N` changes the quality factor, so
+one terminal can be compared against itself in four lines.
+
 ### 23e. The picture fills part of its box / sits in the top-left corner
 
 Two ways to place an image on a kitty terminal, and only one of them is right: **cells** (`U=1` unicode

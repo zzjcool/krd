@@ -76,6 +76,31 @@ enum WallSource {
         WallModel(displays: displays(), windows: windows())
     }
 
+    /// A model that does not come from the window server (`--demo`).
+    ///
+    /// Why the demo also replaces the *list* of sources: "we are both looking at the same thing" is
+    /// the whole value of a joint debug session. With the real window list the demo's pictures would
+    /// have whatever aspects the reader happens to have open, so the same pane size would produce a
+    /// different layout on two machines and neither could reproduce the other's screen. These four
+    /// windows are chosen to exercise the fit: wider than the card, square, taller than the card, and
+    /// an extreme 21:9.
+    static func demoModel() -> WallModel {
+        WallModel(
+            displays: [WallDisplay(name: "Demo Display", width: 2560, height: 1600,
+                                   id: 1, main: true)],
+            windows: [
+                OrderedWindow(windowID: 1, pid: 1, app: "Demo", title: "16:9 window",
+                              bounds: CGRectCompat(x: 0, y: 0, width: 1920, height: 1080)),
+                OrderedWindow(windowID: 2, pid: 1, app: "Demo", title: "4:3 window",
+                              bounds: CGRectCompat(x: 0, y: 0, width: 1600, height: 1200)),
+                OrderedWindow(windowID: 3, pid: 1, app: "Demo", title: "square window",
+                              bounds: CGRectCompat(x: 0, y: 0, width: 1200, height: 1200)),
+                OrderedWindow(windowID: 4, pid: 1, app: "Demo", title: "21:9 window",
+                              bounds: CGRectCompat(x: 0, y: 0, width: 2520, height: 1080))
+            ]
+        )
+    }
+
     /// The display order: the menu-bar display first, then left to right by `frame.minX`.
     ///
     /// The index tie break is explicit rather than relying on `sorted` being stable: two screens

@@ -43,6 +43,9 @@ enum WallPictures {
     /// Sequential on purpose: all four captures go through the same screen-recording service, the
     /// measurements were taken that way, and running them at once buys nothing a reader can see. A
     /// panel that fails is simply absent — the caller paints its mask.
+    /// Draw the test pattern instead of the desk (`--demo`). Set once before the first paint.
+    static var demo = false
+
     static func capture(_ panels: [WallPanel]) async -> (pictures: [Picture],
                                                           failures: [Int: PanelCaptureError]) {
         var pictures: [Picture] = []
@@ -62,6 +65,18 @@ enum WallPictures {
                 wantH *= shrink
                 let width = max(1, Int(wantW.rounded()))
                 let height = max(1, Int(wantH.rounded()))
+                if Self.demo {
+                    // The same size the capture would have produced, at the same aspect: the demo is
+                    // only useful if it travels the identical path (`width`/`height` above come from
+                    // the panel, so the pattern is fitted like a desktop would be).
+                    let pixels = DemoPicture.render(width: width, height: height)
+                    Log.write("krd: demo picture on slot \(panel.slot): "
+                              + "\(panel.rect.cols)x\(panel.rect.rows) cells, "
+                              + "\(width)x\(height) px\n")
+                    pictures.append(Picture(panel: panel, pixels: pixels,
+                                            width: width, height: height))
+                    continue
+                }
                 let image: CGImage
                 switch panel.source {
                 case let .display(id):

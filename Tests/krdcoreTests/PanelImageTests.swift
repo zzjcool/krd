@@ -14,27 +14,60 @@ final class PanelImageTests: XCTestCase {
 
     func testLandscapeIsHeightBoundInAWideBand() {
         let fit = PanelImage.fit(aspect: 1.6, in: band, cellW: 17, cellH: 33)
-        XCTAssertEqual(fit.contentHeight, 792)              // 24 rows
-        XCTAssertEqual(fit.contentWidth, 1267)              // 792 * 1.6
-        XCTAssertEqual(fit.originX, 514)                    // (2295 - 1267) / 2
-        XCTAssertEqual(fit.originY, 0)
+        // Height-bound: all 24 rows, and the width is the aspect's - 1275 px, which is exactly the
+        // 75 cells the cell rect got. Cells decide pixels, so the two cannot differ (see `fit`).
         XCTAssertEqual(fit.cellRect, CellRect(col: 1 + (135 - 75) / 2, row: 1, cols: 75, rows: 24))
+        XCTAssertEqual(fit.contentHeight, 24 * 33)          // the whole cell box, not 792
+        XCTAssertEqual(fit.contentWidth, 75 * 17)           // 1275
+        // The panel *is* the picture: nothing is placed inside it (design §6.6).
+        XCTAssertEqual(fit.originX, 0)
+        XCTAssertEqual(fit.originY, 0)
     }
 
     func testPortraitStaysHeightBoundAndNarrow() {
         let fit = PanelImage.fit(aspect: 1200.0 / 1920.0, in: band, cellW: 17, cellH: 33)
-        XCTAssertEqual(fit.contentHeight, 792)
-        XCTAssertEqual(fit.contentWidth, 495)
         XCTAssertEqual(fit.cellRect.cols, 29)
         XCTAssertEqual(fit.cellRect.rows, 24)
+        XCTAssertEqual(fit.contentHeight, 24 * 33)
+        XCTAssertEqual(fit.contentWidth, 29 * 17)
     }
 
     func testANarrowBandIsWidthBound() {
         let fit = PanelImage.fit(aspect: 1.6, in: CellRect(col: 0, row: 0, cols: 20, rows: 40),
                                  cellW: 17, cellH: 33)
-        XCTAssertEqual(fit.contentWidth, 340)
-        XCTAssertEqual(fit.contentHeight, 213)              // rounded 340 / 1.6
-        XCTAssertEqual(fit.originY, (1320 - 213) / 2)
+        // Width-bound: all 20 columns, and the height is the aspect's - rounded to whole cells, since
+        // a cell is the smallest thing the layout can be wrong by.
+        XCTAssertEqual(fit.cellRect.cols, 20)
+        XCTAssertEqual(fit.contentWidth, 20 * 17)
+        XCTAssertEqual(fit.contentHeight, fit.cellRect.rows * 33)
+        XCTAssertEqual(fit.cellRect.rows, 6)                // 340 / 1.6 = 212.5 px -> 6.4 rows, rounded
+        XCTAssertEqual(fit.originX, 0)
+        XCTAssertEqual(fit.originY, 0)
+    }
+
+    /// The invariant every picture geometry bug came from breaking: **the picture's pixels are its
+    /// cell rectangle**, and it sits at the panel's origin. A picture a few pixels wider than its box
+    /// is a gap on a terminal that draws 1:1 and a 1-2% stretch on one that scales.
+    func testThePicturesPixelsAreExactlyItsCells() {
+        let cases: [(Double, CellRect, Double, Double)] = [
+            (1.6, band, 17, 33),
+            (1200.0 / 1920.0, band, 17, 33),
+            (1.6, CellRect(col: 0, row: 0, cols: 20, rows: 40), 17, 33),
+            (21.0 / 9.0, CellRect(col: 3, row: 5, cols: 137, rows: 42), 8, 16),
+            (1.0, CellRect(col: 1, row: 1, cols: 3, rows: 2), 16.7, 32.7)
+        ]
+        for (aspect, rect, cellW, cellH) in cases {
+            let fit = PanelImage.fit(aspect: aspect, in: rect, cellW: cellW, cellH: cellH)
+            XCTAssertEqual(Double(fit.contentWidth), Double(fit.cellRect.cols) * cellW,
+                           accuracy: 0.5, "aspect \(aspect)")
+            XCTAssertEqual(Double(fit.contentHeight), Double(fit.cellRect.rows) * cellH,
+                           accuracy: 0.5, "aspect \(aspect)")
+            XCTAssertEqual(fit.originX, 0)
+            XCTAssertEqual(fit.originY, 0)
+            // The cell rect stays inside the band, and the picture inside the cell rect's cells.
+            XCTAssertLessThanOrEqual(fit.cellRect.maxCol, rect.maxCol)
+            XCTAssertLessThanOrEqual(fit.cellRect.maxRow, rect.maxRow)
+        }
     }
 
     func testUnusableInputsGiveAnEmptyFit() {
@@ -99,10 +132,17 @@ final class PanelImageHeightCapTests: XCTestCase {
         let full = PanelImage.fit(aspect: 1.0, in: rect, cellW: 17, cellH: 33)
         let capped = PanelImage.fit(aspect: 1.0, in: rect, cellW: 17, cellH: 33,
                                      maxHeight: full.contentHeight - 60)
-        XCTAssertEqual(capped.contentHeight, full.contentHeight - 60)
-        XCTAssertEqual(capped.contentWidth, full.contentWidth - 60, "a cap keeps the aspect")
-        XCTAssertEqual(capped.originY, (14 * 33 - capped.contentHeight) / 2, "centred, not pinned")
-        XCTAssertEqual(capped.originX, (44 * 17 - capped.contentWidth) / 2)
+        // A cap lowers the picture: fewer rows, a square stays square to within the cell the layout is
+        // quantised in, and the panel is still exactly the picture (no offset inside it).
+        XCTAssertLessThan(capped.cellRect.rows, full.cellRect.rows)
+        // Square stays square to within one cell per axis: a cell is 17x33, so a 24x12-cell picture
+        // is 408x396 px. That is the layout's quantisation, not a crop or a stretch.
+        let aspect = Double(capped.contentWidth) / Double(capped.contentHeight)
+        XCTAssertEqual(aspect, 1.0, accuracy: 0.04, "a square cap stays square")
+        XCTAssertEqual(capped.contentHeight, capped.cellRect.rows * 33)
+        XCTAssertEqual(capped.contentWidth, capped.cellRect.cols * 17)
+        XCTAssertEqual(capped.originX, 0)
+        XCTAssertEqual(capped.originY, 0)
     }
 
     func testACapAboveTheFitChangesNothing() {
@@ -116,7 +156,9 @@ final class PanelImageHeightCapTests: XCTestCase {
 
     func testACapNeverLeavesThePanel() {
         let capped = PanelImage.fit(aspect: 3.0, in: rect, cellW: 17, cellH: 33, maxHeight: 100)
-        XCTAssertEqual(capped.contentHeight, 100)
+        // The cap is honoured to the nearest cell: 100 px is three rows of 33 px.
+        XCTAssertEqual(capped.cellRect.rows, 3)
+        XCTAssertEqual(capped.contentHeight, 3 * 33)
         XCTAssertLessThanOrEqual(capped.contentWidth, 44 * 17)
         XCTAssertGreaterThanOrEqual(capped.contentWidth, 1)
     }
