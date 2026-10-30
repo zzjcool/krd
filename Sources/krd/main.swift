@@ -989,9 +989,12 @@ final class Desk {
             // ANSI answers say 8x16 = 0.50), so the fit left 36% of the stage's height empty: the
             // picture looked smaller than its frame. Only the *ratio* has to be roughly right for
             // the layout, and a terminal that answers nothing keeps the fallback.
-            // 150 ms per question, not the default 250: a terminal that answers does so in
-            // microseconds, and this runs before the first paint, where half a second is visible.
-            if let measured = TermGeometry.query(timeoutMs: 150) {
+            // 500 ms, not 150: a terminal that answers does so in microseconds, but a busy one
+            // (Rex renders its own UI while we ask) can answer late, and a late answer used to be
+            // as bad as no answer - the wall fell back to a guessed cell aspect and drew the
+            // desktop at 80% of the width. Half a second before the first paint is invisible next
+            // to a fit that is 20% wrong.
+            if let measured = TermGeometry.query(timeoutMs: 500) {
                 TermGeometry.fallbackCell = measured.cellSize
                 // The one number every fit in the wall depends on, and the one a reader cannot see:
                 // "the picture does not reach the full width" is answered by this line plus their

@@ -12,7 +12,13 @@ struct TermGeometry {
 
     /// Some terminals only report the pixel size once the pane has been laid out on
     /// screen (a brand-new tab can report 0). Allow an explicit cell size as fallback.
-    static var fallbackCell = (w: 8.0, h: 20.0)
+    ///
+    /// 8x16 (aspect 2.0), not the 8x20 (2.5) this used to assume: 20-pixel-tall cells belong to
+    /// bitmap fonts on CRTs. A modern terminal is 2.0-2.2 - Rex *says* 8x16 when asked - and the
+    /// aspect is what every fit depends on: 2.5 against a real 2.0 makes the wall's stage box 25%
+    /// wider than the picture it holds, and a terminal that fits (rather than stretches) then draws
+    /// the desktop at 80% of the width. That was "首页还是没有全宽" on a pane that ignored `CSI 16t`.
+    static var fallbackCell = (w: 8.0, h: 16.0)
 
     /// Grid size of the terminal we last measured. A cell coordinate can never exceed it,
     /// so it tells us for sure whether an incoming mouse report is in cells or in pixels.
