@@ -158,8 +158,12 @@ being interrupted"，几次重启之后就会出现），要么更糟——一�
 浸泡测试发现的（[TESTING §11](TESTING.zh-CN.md#11-浸泡测试全功能开-30-分钟)）。
 
 - `didStopWithError` 会重启采集流，最多五次、退避 1-2-4-8-8 秒，每次尝试一行日志。
-- 看门狗（`KRD_STREAM_WATCHDOG`，默认 15 秒，`0` 关闭）在收不到帧回调时重启。静止画面不等于沉默：
-  SCK 会按刷新率发 `.idle` 帧，所以 15 秒没有回调说明是流，而不是内容。
+- **问过的帧是欠着的。** 平移（`updateSource`）或重启之后，看门狗要求 3 秒内必须来一帧（probe 实测
+  p50 42 ms），没来就重启采集流。这条是精确的：krd 知道自己要过什么。
+- **光是「没有帧」说明不了任何事**，这是实测结论而不是假设：静止桌面上 ScreenCaptureKit **一帧都不发**
+  （1 秒窗口 0 帧；10 分钟浸泡里指针扫动之间出现 56 秒空档）。这条看门狗早期的版本把「15 秒没帧」当成
+  死亡，结果五分钟内把一条健康的流重启了三次。所以长静默规则改成默认关闭：`KRD_STREAM_WATCHDOG=<秒>`，
+  默认 `0`。
 - `Capturer.stop()` 最多等 2 秒。在已经死掉的流上调 `stopCapture()` 在 macOS 26 上不会回调，而
   `restartCapture` 要等它返回才清掉「有重启在飞」的标志，于是一次卡住的 stop 会堵死之后所有重启。
   重试额度是靠**帧真的回来了**挣回来的，不是靠一次重启没抛异常。
@@ -249,9 +253,15 @@ pixelW/H   = pane 的像素数，不变          // 变小的是**源**，不是
    —— 真正的 1:1 密度在 `屏幕像素 / pane 像素` 处到达，不在无穷远。
 
 `--zoom-follow` 在指针进入画面外圈 15% 时平移裁剪区，而且只平移到刚好把指针放回那条边上（平移，不是追着
-跑）。平移会重启采集流：裁剪区是采集端设置，重启会清空 `previousFrame`（一次全屏重绘）并付出一次
-`capturer.stop()`/`start()` 的往返。这就是「不每帧付全屏代价」的代价；`KRD_ZOOM_GLOBAL_RECT=1` 的存在
-是因为副屏上的 display filter 可能想要全局坐标而不是相对 filter 的坐标。
+跑）。平移走的是 `SCStream.updateConfiguration`（`Capturer.updateSource`），不再 stop/start 整条流：
+画面不会因为重新协商而冻住，stop/start 路径彻底离开热路径。它仍会清空 `previousFrame`（新裁剪就是新画面，
+一次全屏重绘），而且更新后的**第一帧仍可能是旧裁剪**（那一帧已经在路上）——`probe/zoom_update_probe.swift`
+实测：一到两帧内就稳定，端到端 p50 42 ms；同时一次平移必须被当作「流还活着」的证据，否则帧看门狗会把它误判
+成静默。如果一次平移要的就是流当前那块矩形，直接跳过（`Capturer.Update.unchanged`）：裁剪区会被显示器边缘夹住，
+指针停在角上时否则会每秒四次发同一个配置，而配置没变化就不会产生帧——等帧的调用方就会把它当成流死了。
+`KRD_ZOOM_GLOBAL_RECT=1` 的存在是因为副屏上的 display filter 可能想要全局坐标而不是相对 filter
+的坐标。启动（`--zoom` / `--zoom-at`）、终端 resize、显示器集合变化仍然重启采集流：它们的 filter 或布局
+是真的变了。
 
 
 所有实测数据用的那套配置：
@@ -308,7 +318,7 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `--dry-run` | `InputReader(dryRun:)`：解析并记日志，绝不调用 `CGEvent.post` |
 | `--zoom <f>` | `applyLayout` → `Viewport.crop`；`Capturer.start(sourceRect:)` 在采集端裁剪 |
 | `--zoom-at <x,y>` | `configureSource`：裁剪区的中心，全局屏幕点 |
-| `--zoom-follow` | `followPointerIfNeeded`：指针进入 15% 外圈时平移裁剪区，然后重启采集流 |
+| `--zoom-follow` | `followPointerIfNeeded`：指针进入 15% 外圈时平移裁剪区，然后 `Capturer.updateSource`（`updateConfiguration`，不重启） |
 | `--selftest` | `runSelfTest(layout:)`：合成帧（按当前 `--format`）走真正的 `handleFrame`/`emit` |
 | `KRD_DUMP` | `ScreenWriter.flush` 把每次 flush 的缓冲同时写一份到文件 |
 | `KRD_Q` | 每条转义里的 `q=` 字段（默认 `2` = 静默） |

@@ -272,6 +272,7 @@ to decide "is this the terminal or is this krd?" — each one prints its own nar
 | `probe/kbench.py`, `probe/kpace.py` | pipe throughput and backpressure at a fixed frame rate |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`, `CGPreflightPostEventAccess()`, display/window enumeration (run on the target Mac to see whether TCC is the problem) |
 | `probe/ax_probe.swift` | what a headless client can read: the AX warm-up trap, window list without Screen Recording, per-window node counts and walk timing, pruned vs raw size (read-only) |
+| `probe/zoom_update_probe.swift` | whether `SCStream.updateConfiguration` can re-crop a *running* stream: 10 pans with latency, settle time, pixel evidence, and a liveness check inside each crop (this is the gate issue #54 was built behind) |
 | `probe/display_probe.swift` | which display-change mechanism fires: `now`, `list`, `set <i>` (a real resolution change), `watch [--appkit]` printing CoreGraphics callbacks and AppKit notifications for 10 s |
 | `probe/photo_codec.py` | what a colour-heavy frame would cost under each option of issue #26 (16-bit quantisation, fewer pixels, no zlib) with the same kitty framing, so its baseline row reproduces `krd --bench`'s `photo` bytes |
 
@@ -299,7 +300,11 @@ ssh target 'cd /tmp && python3 soak.py --minutes 30 --binary /tmp/krd-soak \
 ```
 
 Exit code 0 is PASS. A short run (`--minutes 2 --interval 10`) is the smoke test used while changing
-the script. It samples RSS (`ps -o rss=`), fds (`lsof`), threads (`ps -M`) and the `krd ax` state
+the script. The script also gives the pty a window size (`TIOCSWINSZ`, 60x24 cells of 17x33 px):
+without it krd reads 0x0 from its terminal and falls back to a 1x1-cell pane, and the picture it
+mirrors is 136x132 px of almost nothing. The tables below were taken *before* that line existed —
+memory, fds and threads are unaffected, the tile and `delivered` counts are from the small pane and
+are not comparable with a real session. It samples RSS (`ps -o rss=`), fds (`lsof`), threads (`ps -M`) and the `krd ax` state
 directory every 30 s, keeps `--stats-json` on, and pokes the paths that only leak over time:
 
 | stressor | every | what it exercises |
@@ -361,7 +366,8 @@ exists because of it.
 | threads | same | SCK worker threads appear and disappear with stream restarts, so the count moves up and down legitimately |
 | `krd ax` state | < 64 MB | 16 snapshots per window is the design; the runs sat at 72 KB and stopped at exactly 16 files |
 | stats cadence | no gap > 5 s | a blocked write or a stuck callback shows up here first |
-| **frames** | `callbacks` must not stand still for 60 s | a static screen is *not* silence (SCK sends `.idle` frames at the refresh rate), so a minute without a callback means the stream, not the content |
+| **answered** | every stressor must produce a frame within 20 s (`ANSWER_SECONDS`) | the failure that matters is "we asked the stream for something and got nothing back", not silence: a still screen sends nothing at all (measured 0 frames in 1 s, and 56 s gaps between pointer sweeps) |
+| frames (reported, never failed on) | longest `callbacks` freeze | kept as a number because a dead stream *also* looks like this; on its own it cannot be a verdict, which is what the 15-minute-frozen-window rule learned the hard way |
 
 The last row is the lesson of this exercise, and the reason the script also reports `saw N OSC 52`
 and `N transmits` next to the memory numbers: a soak that only measures growth cannot tell "stable"

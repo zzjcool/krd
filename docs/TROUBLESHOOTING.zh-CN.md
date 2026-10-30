@@ -383,10 +383,13 @@ macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、
 
 ### 41. `--zoom-follow` 拖动时卡顿
 
-**根因。** 设计如此：平移改变的是裁剪区，而裁剪区是**采集端**设置，所以必须重启采集流
-（`capturer.stop()` + `start()`），下一帧是全屏重绘。
-**对策。** 没有要修的东西——需要平滑就固定用 `--zoom-at`，或者少放大一档，让指针整段拖动都待在可视区内。
-重启失败时日志会写 `krd: could not restart capture after a zoom pan: …`，画面保持旧裁剪。
+**根因。** 两件事，其中一件已经不成立了。从 #54 起平移走的是 `SCStream.updateConfiguration`
+（`Capturer.updateSource`），不再是 `stop()`/`start()`，所以流不再重新协商、画面也不会因此中断。仍然成立的
+部分：新裁剪就是新画面，所以下一帧是全屏重绘（所有 tile 变脏）；而且更新后的第一帧仍可能是旧裁剪（它已经
+在路上）。
+**对策。** 没有要修的东西——连全屏重绘都在意就用 `--zoom-at` 固定视角，或者少放大一档，让指针整段拖动都待在
+可视区内。更新被拒绝时日志会写 `krd: could not move the capture window (…); restarting it instead`，krd
+会退回到原来的 stop/start 路径。
 
 ### 42. `krd ax press @e7` 说 ref 过期了，或者「no snapshot holds @e7」
 
@@ -459,5 +462,7 @@ krd: capture stopped (SCStream 3805: Failed during stream due to application con
 那正是采集流冻住时从外面看到的样子；第一次出现时它还会抓一份栈采样（`<work>/sample.txt`）。
 
 如果画面冻住但日志里**完全没有** `capture stopped`，那是另一种安静的死法（没有错误回调，帧就那么停了）。
-krd 的帧看门狗在静默 15 秒后会重启采集流（`KRD_STREAM_WATCHDOG=<秒>` 可改，`0` 关闭），这件事的进展
-记在 [TESTING §11](TESTING.zh-CN.md#11-浸泡测试全功能开-30-分钟)。
+注意：**静止**画面本来就一帧都不发，那是正常的，不是卡死（实测：1 秒窗口 0 帧）。krd 真正盯的是「它要过的
+那一帧」：平移或重启之后 3 秒没帧就重启采集流。更老的「多久完全没帧」规则要用
+`KRD_STREAM_WATCHDOG=<秒>` 显式打开（默认关闭，正因为静止桌面会误触发）。这件事的进展记在
+[TESTING §11](TESTING.zh-CN.md#11-浸泡测试全功能开-30-分钟)。

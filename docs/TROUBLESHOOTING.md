@@ -447,11 +447,15 @@ coordinate space (it takes global screen points, the same space as `CGEvent.loca
 
 ### 41. `--zoom-follow` stutters while dragging
 
-**Cause.** By design: panning moves the crop, and the crop is a *capture-side* setting, so the
-stream has to be restarted (`capturer.stop()` + `start()`) and the next frame is a full repaint.
-**Fix.** Nothing to fix — use `--zoom-at` for a fixed view when smooth panning matters, or zoom out
-one step so the pointer stays inside the visible rect for the whole drag. If the restart fails, the
-log says `krd: could not restart capture after a zoom pan: …` and the picture keeps the old crop.
+**Cause.** Two things, and only one of them is still true. Since #54 a pan is an
+`SCStream.updateConfiguration` (`Capturer.updateSource`), not a `stop()`/`start()` cycle, so the
+stream is not re-negotiated any more and the picture keeps coming. What remains by design: the new
+crop is a new picture, so the next frame is a full repaint (every tile dirty), and the first frame
+after the update can still be the old crop because it was already in flight.
+**Fix.** Nothing to fix — use `--zoom-at` for a fixed view when even a full repaint matters, or zoom
+out one step so the pointer stays inside the visible rect for the whole drag. If the update is
+refused, the log says `krd: could not move the capture window (…); restarting it instead` and krd
+falls back to the old stop/start path.
 
 ### 42. `krd ax press @e7` says the ref is stale, or "no snapshot holds @e7"
 
@@ -537,6 +541,9 @@ stream looks like from outside, and it writes a stack sample (`<work>/sample.txt
 that happens.
 
 If the picture freezes with **no** `capture stopped` line at all, you are seeing the quiet variant
-(no error callback, frames just stop). krd's frame watchdog restarts the stream after 15 s of
-silence — `KRD_STREAM_WATCHDOG=<seconds>` changes that, `0` turns it off — and the state of that
-investigation is in [TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on).
+(no error callback, frames just stop). Note that a *still* screen also produces no frames at all —
+that is normal, not a hang (measured: 0 frames in 1 s). What krd does watch is the frame it asked
+for: after a pan or a restart no frame for 3 s means a restart. For the older "no frames at all"
+rule, set `KRD_STREAM_WATCHDOG=<seconds>` (it is off by default, precisely because a quiet desktop
+trips it). The state of that investigation is in
+[TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on).

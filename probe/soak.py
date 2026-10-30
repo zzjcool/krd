@@ -21,14 +21,17 @@ and the pointer/zoom paths never run. The master side must be drained continuous
 buffer blocks krd's `write(2)`, which looks exactly like the stall this script is meant to detect.
 """
 import argparse
+import fcntl
 import json
 import os
 import pty
 import random
 import select
 import signal
+import struct
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -37,7 +40,11 @@ FDS_SLACK = 2              # one or two transient descriptors are not a leak
 THREAD_SLACK = 2
 STATE_LIMIT_MB = 64.0      # 16 snapshots per window, a few hundred KB each
 STALL_SECONDS = 5.0        # a bigger gap between stats samples is a stall, not slowness
-FREEZE_SECONDS = 60.0      # screen unchanged is not a freeze; `callbacks` not advancing is
+FREEZE_SECONDS = 60
+# A still screen sends no frames at all (measured: 0 frames in 1 s on macOS 26.6), so "no callbacks
+# for a minute" is normal on a quiet desktop and cannot be a failure on its own. What *is* a failure
+# is asking the stream for something -- a pan, a pasteboard change -- and getting no frame back.
+ANSWER_SECONDS = 20.0      # screen unchanged is not a freeze; `callbacks` not advancing is
 
 
 def now():
@@ -133,6 +140,14 @@ class Stress:
         self.last = {"clipboard": 0.0, "ax": 0.0, "pointer": 0.0}
         self.counts = {"clipboard": 0, "ax": 0, "pointer": 0}
         self.errors = []
+        # (time, callbacks at that moment, what was asked for): the next frame answers it.
+        self.last_action = None
+
+    def asked(self, t, callbacks, kind):
+        self.last_action = (t, callbacks, kind)
+
+    def answered(self):
+        self.last_action = None
 
     def maybe(self, t):
         if self.args.clipboard_every and t - self.last["clipboard"] >= self.args.clipboard_every:
@@ -268,6 +283,7 @@ def main():
     env["PATH"] = os.path.dirname(os.path.abspath(args.binary)) + ":" + env.get("PATH", "")
 
     cols, rows = (int(v) for v in args.pane.split("x"))
+    cell = tuple(int(v) for v in args.cell.split("x"))
     argv = [os.path.abspath(args.binary), "--pane", args.pane, "--cell", args.cell,
             "--stats-json", stats_path, "--log", log_path] + args.extra.split()
     print("# krd %s" % " ".join(argv[1:]))
@@ -277,6 +293,13 @@ def main():
         env["TERM"] = env.get("TERM", "xterm-256color")
         os.execvpe(argv[0], argv, env)
         os._exit(127)
+
+    # Give the pty a real window size. A bare `pty.fork()` reports 0x0, and krd then falls back to
+    # a 1x1-cell pane -- the picture is 136x132 px of nothing, and `--pane`/`--cell` on the command
+    # line do not help because krd believes the terminal. One line here makes the soak exercise a
+    # 100x40-cell pane at 17x33 px, which is what a real session looks like.
+    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, cols * cell[0], rows * cell[1]))
 
     drain = Drain(master)
     drain.start()
@@ -296,16 +319,32 @@ def main():
                 "stats": stats_tail(stats_path)[0], "stats_lines": stats_tail(stats_path)[1]}]
     next_sample = started + args.interval
     interrupted = False
+    unanswered = []
     frozen_since = None
     sample_taken = False
 
     try:
         while now() < deadline:
             t = now()
+            before = dict(stress.counts)
             stress.maybe(t)
+            changed = [k for k in stress.counts if stress.counts[k] != before[k]]
+            if changed:
+                tail_now = stats_tail(stats_path)[0]
+                stress.asked(t, tail_now["callbacks"] if tail_now else 0, "a %s action" % changed[0])
             if t >= next_sample:
                 tail, lines = stats_tail(stats_path)
                 live = stats_tail(stats_path)[0]
+                if live is not None and stress.last_action is not None:
+                    # Did the last stressor get an answer? A pan owes a frame, a pasteboard change
+                    # normally costs one too. This -- not "silence" -- is the failure signal: a still
+                    # screen legitimately sends nothing (see ANSWER_SECONDS).
+                    if live["callbacks"] > stress.last_action[1]:
+                        stress.answered()
+                    elif t - stress.last_action[0] > ANSWER_SECONDS:
+                        unanswered.append((round(stress.last_action[0] - started, 1),
+                                           stress.last_action[2]))
+                        stress.answered()
                 # A freeze is only diagnosable while the process is still running: take a stack
                 # sample the first time `callbacks` has been still for a minute, and keep going.
                 if live is not None:
@@ -399,10 +438,11 @@ def main():
         failures.append("no --stats-json samples: krd never produced a frame")
     elif stall > STALL_SECONDS:
         failures.append("stats gap %.1f s (limit %.0f s)" % (stall, STALL_SECONDS))
-    if frozen is not None and frozen > FREEZE_SECONDS:
-        failures.append("the capture stream stopped delivering frames for %.0f s "
-                        "(limit %.0f s) -- the picture is frozen even though krd is alive"
-                        % (frozen, FREEZE_SECONDS))
+    for at, kind in unanswered:
+        failures.append("%s at t=%.0fs got no frame back within %d s"
+                        % (kind, at, ANSWER_SECONDS))
+    # `frozen` is reported, not failed on: a quiet desktop sends nothing at all (measured 0 frames
+    # in 1 s while the screen sat still), so a still `callbacks` counter between stressors is normal.
     if bad and bad > 0:
         failures.append("%d bad frames" % bad)
 
