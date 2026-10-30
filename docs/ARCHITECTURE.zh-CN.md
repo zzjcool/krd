@@ -151,6 +151,19 @@ Desk.run():
 重启日志。所有触发（轮询、回调）都只**记一笔**，由 500 ms 的尾沿去抖（`Debounce`）合并——
 `NSApp.run()` 下一次合盖会连发 3 条通知，而轮询在稳定过程中也可能看到两次变化。
 
+### 采集流是否还活着
+
+`SCStream` 会在没人动它的情况下停掉：要么 `didStopWithError` 带着 `-3805`（"application connection
+being interrupted"，几次重启之后就会出现），要么更糟——一条回调都没有，帧就那么停了。这两种都是 30 分钟
+浸泡测试发现的（[TESTING §11](TESTING.zh-CN.md#11-浸泡测试全功能开-30-分钟)）。
+
+- `didStopWithError` 会重启采集流，最多五次、退避 1-2-4-8-8 秒，每次尝试一行日志。
+- 看门狗（`KRD_STREAM_WATCHDOG`，默认 15 秒，`0` 关闭）在收不到帧回调时重启。静止画面不等于沉默：
+  SCK 会按刷新率发 `.idle` 帧，所以 15 秒没有回调说明是流，而不是内容。
+- `Capturer.stop()` 最多等 2 秒。在已经死掉的流上调 `stopCapture()` 在 macOS 26 上不会回调，而
+  `restartCapture` 要等它返回才清掉「有重启在飞」的标志，于是一次卡住的 stop 会堵死之后所有重启。
+  重试额度是靠**帧真的回来了**挣回来的，不是靠一次重启没抛异常。
+
 选哪块屏是纯函数（`DisplayPick.choose`，`DisplayPickTests` 覆盖）：`--display <i>` 在索引还有效时
 优先；否则优先保留会话已经在的那块（指针跑到别的屏**不**构成换屏理由）；只有它消失了才回退到指针所在
 的屏，并且会写进日志（`krd: capturing display 2 is gone; following the pointer to display 1`）。

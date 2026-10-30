@@ -259,6 +259,16 @@ func parseSize(_ spec: String) -> (Int, Int)? {
     return (w, h)
 }
 
+private extension Error {
+    /// One line for the log: `SCStream -3805: Failed during stream ...`, without the NSError dump.
+    var short: String {
+        let ns = self as NSError
+        let domain = ns.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" ? "SCStream" : ns.domain
+        let text = ns.localizedDescription.replacingOccurrences(of: "\n", with: " ")
+        return "\(domain) \(ns.code): \(text)"
+    }
+}
+
 /// The display reconfiguration callback: hand the event to the session and touch nothing else.
 /// It runs *while* the display set is being reconfigured, so every real decision waits for the
 /// debounce.
@@ -285,6 +295,18 @@ final class Desk {
     private var geometry: TermGeometry?
     private var captureRestarting = false
     private var restartPending = false
+    /// Consecutive `didStopWithError` recoveries that have not produced a frame yet. Bounded, so a
+    /// dead window server cannot turn the retry loop into a hot loop.
+    private var streamStopAttempts = 0
+    private var streamStopTimer: DispatchSourceTimer?
+    /// Last `callbacks` count and when it last moved: a stream that stops delivering frames
+    /// without calling `didStopWithError` is the failure this catches (issue #44).
+    private var frameWatchdog: DispatchSourceTimer?
+    private var lastSeenCallbacks = 0
+    private var lastFrameAt = Date()
+    /// When the in-flight restart started, so a restart that never returns cannot gate the
+    /// watchdog forever (see `Capturer.stop`).
+    private var restartStartedAt = Date()
     private var followTimer: DispatchSourceTimer?
     /// The display this session is attached to, and how many existed when we last looked. Both
     /// are what "the display set changed" is measured against.
@@ -443,6 +465,11 @@ final class Desk {
         guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
 
         let writer = self.writer
+        // A stream that stops by itself is not fatal and must not be silent: restart it, at most
+        // 5 times with backoff, and say so in the log each time.
+        capturer.onStreamStopped = { [weak self] error in
+            DispatchQueue.main.async { self?.recoverFromStoppedStream(error) }
+        }
         capturer.onFrame = { [weak self] pixels, width, height in
             guard let self else { return }
             self.handleFrame(pixels: pixels, width: width, height: height)
@@ -526,6 +553,7 @@ final class Desk {
                           + "\(clipboardPolicy.toTarget))\n")
             }
         }
+        startFrameWatchdog()
         if clipboardPolicy.toTerminal {
             let timer = DispatchSource.makeTimerSource(queue: .main)
             timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
@@ -747,6 +775,102 @@ final class Desk {
                     + "the last frame stays on screen\n")
             }
         }
+    }
+
+    /// Restart the stream when frames stop arriving *without* an error.
+    ///
+    /// `didStopWithError` is the loud failure; this is the quiet one, and the 30-minute soak hit
+    /// both (issue #44): after recovering from `-3805` the replacement stream delivered 75 frames
+    /// and then went silent for the rest of the run, with krd alive and every counter flat. Silent
+    /// is worse than dead, because nothing looks wrong.
+    ///
+    /// A static screen is not silence: ScreenCaptureKit sends `.idle` frames on every
+    /// `minimumFrameInterval` (measured 16/s on a still desktop here), and krd counts each callback
+    /// before deciding it is idle. So "no callback for 15 s" means the stream, not the content.
+    /// `KRD_STREAM_WATCHDOG=<seconds>` changes the limit, 0 turns it off.
+    private func startFrameWatchdog() {
+        let limit = Double(ProcessInfo.processInfo.environment["KRD_STREAM_WATCHDOG"] ?? "15") ?? 15
+        guard limit > 0 else { return }
+        lastFrameAt = Date()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.setEventHandler { [weak self] in self?.watchFrames(limit: limit) }
+        timer.resume()
+        frameWatchdog = timer
+    }
+
+    private func watchFrames(limit: Double) {
+        if options.debug {
+            Log.write("watchdog: tick callbacks=\(capturer.callbacks) seen=\(lastSeenCallbacks) "
+                + "silence=\(Int(Date().timeIntervalSince(lastFrameAt)))s restarting=\(captureRestarting)\n")
+        }
+        guard !cleanedUp, filter != nil else { return }
+        let count = capturer.callbacks
+        if count != lastSeenCallbacks {
+            // Frames are flowing again: the retry budget is earned back by delivery, not by a
+            // restart returning without throwing.
+            lastSeenCallbacks = count
+            lastFrameAt = Date()
+            if streamStopAttempts > 0 { streamStopAttempts = 0 }
+            return
+        }
+        if captureRestarting {
+            // A restart that has been "in flight" for longer than a stop plus a start can take is
+            // not in flight any more, it is parked. Clear it and let the retry below happen;
+            // otherwise a single hung `stopCapture()` freezes the picture for the session.
+            let parked = Date().timeIntervalSince(restartStartedAt)
+            if parked > 12 {
+                Log.write("krd: a capture restart has been parked for \(Int(parked))s; "
+                    + "clearing it and trying again\n")
+                captureRestarting = false
+                restartPending = false
+            }
+            return
+        }
+        let silence = Date().timeIntervalSince(lastFrameAt)
+        guard silence >= limit else { return }
+        lastFrameAt = Date()
+        streamStopAttempts += 1
+        guard streamStopAttempts <= 5 else {
+            frameWatchdog?.cancel()
+            frameWatchdog = nil
+            warnRestartOnce("krd: no frames for \(Int(silence))s and 5 restarts did not help; "
+                + "the last frame stays on screen\n")
+            return
+        }
+        Log.write("krd: no frames for \(Int(silence))s; restarting the capture stream "
+            + "(attempt \(streamStopAttempts)/5)\n")
+        restartCapture(reason: "no frames arriving")
+    }
+
+    /// The stream stopped on its own: restart it with backoff, bounded.
+    ///
+    /// `-3805` ("application connection being interrupted") is what a VM's window server hands
+    /// back when it drops the connection under the stream; after it, `callbacks` never moves again
+    /// and the picture is frozen, which is worse than an error because nothing looks wrong. Five
+    /// attempts with 1, 2, 4, 8, 8 s are enough for a transient drop and bounded for a dead one.
+    private func recoverFromStoppedStream(_ error: Error) {
+        guard !cleanedUp else { return }
+        streamStopAttempts += 1
+        let attempt = streamStopAttempts
+        guard attempt <= 5 else {
+            warnRestartOnce("krd: capture stopped (\(error.short)); gave up after 5 restarts; "
+                + "the last frame stays on screen\n")
+            return
+        }
+        let delay = min(pow(2.0, Double(attempt - 1)), 8.0)
+        Log.write("krd: capture stopped (\(error.short)); restarting in \(Int(delay))s "
+            + "(attempt \(attempt)/5)\n")
+        streamStopTimer?.cancel()
+        frameWatchdog?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler { [weak self] in
+            self?.streamStopTimer = nil
+            self?.restartCapture(reason: "the stream stopping")
+        }
+        timer.resume()
+        streamStopTimer = timer
     }
 
     /// One line per session for capture restarts that keep failing, not one per plug event.
@@ -1055,6 +1179,7 @@ final class Desk {
         guard let filter, let layout = currentGrid(), !cleanedUp else { return }
         if captureRestarting { restartPending = true; return }
         captureRestarting = true
+        restartStartedAt = Date()
         let crop = cropForFilter()
         Task { [weak self] in
             guard let self else { return }
@@ -1285,6 +1410,7 @@ final class Desk {
         clipboardTimer?.cancel()
         displayTimer?.cancel()
         displayPollTimer?.cancel()
+        streamStopTimer?.cancel()
         if displayCallbackRegistered {
             CGDisplayRemoveReconfigurationCallback(krdDisplayChanged, Unmanaged.passUnretained(self).toOpaque())
             displayCallbackRegistered = false

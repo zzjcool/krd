@@ -230,3 +230,87 @@ python3 probe/kprobe4.py > /tmp/p4.log 2>&1 ; cat /tmp/p4.log
 swift probe/sck_probe.swift   # on the machine being viewed
 swift probe/ax_probe.swift    # 最好在 ssh 里跑：那里第一次 AX 调用会失败到 warm-up 为止
 ```
+
+## 11. 浸泡测试：全功能开 30 分钟
+
+11 个 feature 是在一轮里落地的（#15 键盘协议、#16 `--ime`、#17 定向投递输入、#18 剪贴板桥、#19
+显示器集合变化、#22 `--zoom`、#24 backdrop 拒绝、#25 空闲帧统计、#27/#28 `krd ax`、#31 CI 预算）。
+每一个都单独 review、单独测过，所以**没人做过的正是「组合 + 时间」**——而它们每个都加了只会慢慢出问题
+的东西：一个 pasteboard 轮询、一个显示器定时器、每次平移一次采集流重启、每次 dump 一个快照文件。
+
+```bash
+swift build -c release
+scp .build/release/krd target:/tmp/krd-soak && scp probe/soak.py target:/tmp/
+ssh target 'cd /tmp && python3 soak.py --minutes 30 --binary /tmp/krd-soak \
+             --work /tmp/krd-soak --out /tmp/krd-soak/report.json'
+```
+
+退出码 0 即通过。改脚本时用短跑冒烟（`--minutes 2 --interval 10`）。它每 30 秒采一次 RSS
+（`ps -o rss=`）、fds（`lsof`）、threads（`ps -M`）和 `krd ax` 状态目录大小，同时开着
+`--stats-json`，并且一直戳那些「只在长时间里漏」的路径：
+
+| 压力 | 频率 | 压的是什么 |
+|---|---|---|
+| `pbcopy`，16 B … 8 KB 随机文本 | 60 秒 | pasteboard `changeCount` 轮询 → OSC 52 编码 → 写出去（#18） |
+| `krd ax tree --app Finder` | 60 秒 | 每次 dump 一个快照文件，每窗口保留 16 个（#28） |
+| 指针扫动（SGR mouse 报文写进 pty），从左下到右上 | 60–120 秒 | 指针跟随与 `--zoom-follow`，即每次平移一次采集流重启（#22） |
+| （被动） | 2 Hz | #19 的显示器集合指纹轮询 |
+
+### 它发现了什么
+
+在 `kraal-agent`（macOS 26.6.2，M1 Pro 虚拟机）上跑了三次，参数相同（`--zoom 2 --zoom-follow
+--clipboard=in --pane 60x24 --cell 17x33`）：
+
+| 轮次 | 构建 | 内存 / fds / threads | 画面 |
+|---|---|---|---|
+| A，30 分钟 | `cadf25e` | 全平：RSS 31.3 → 31.6 MB，fds 25–26，threads 13→14，`krd ax` 72 KB（16 个快照，已修剪），stats 间隙 1.0 秒 | **第 10 分钟起冻住**，之后 19 分钟一直冻着 |
+| B，30 分钟 | A + `didStopWithError` 后重启 | 全平：RSS 31.2 → 31.5 MB，fds 25–27，threads 13→15，`krd ax` 72 KB | 恢复过一次，然后又冻了 19 分钟 |
+| C，12 分钟 | B + 给 `stopCapture()` 加上限 + 帧看门狗 | 全平：RSS 31.3 → 31.6 MB，fds 19–25，threads ≤15，`krd ax` 52 KB | 第 10 分钟被重启救回来了，第 11 分钟整个主队列卡死 |
+
+**没有任何东西泄漏。** 四次运行（两次是完整的 30 分钟），每轮 12–30 次 pasteboard 写入、同样次数的
+`krd ax` 快照 dump、12–15 次采集流重启：RSS 只动 0.3–0.4 MB，fds 动一两个，threads 每次重启后都会回落，
+快照目录恰好停在 16 个文件。这就是 issue #44 那个问题的答案。
+
+坏掉的是「投递」，在有重启的运行里大约第 10 分钟：
+
+```
+krd: capture stopped: Error Domain=com.apple.ScreenCaptureKit.SCStreamErrorDomain Code=-3805
+     "Failed during stream due to application connection being interrupted"
+```
+
+以前 krd 写完这一行就继续跑：`callbacks` 再也不动，`delivered` 冻住，`bad` 一直是 0，RSS/fds/threads
+全平，stats 定时器照常写。**从外面看——以及从这个脚本当初要盯的每一个数字看——一切正常。** 所以 A 轮最初
+的判定是 PASS，而画面其实已经冻了 19 分钟；下面那条 `frames` 规则就是为它加的。
+
+### 因此改了什么
+
+- `didStopWithError` 现在会重启采集流，最多五次、退避 1-2-4-8-8 秒，每次尝试都写日志
+  （`krd: capture stopped (SCStream -3805: …); restarting in 1s (attempt 1/5)`）。
+- `Capturer.stop()` 最多等 2 秒。在已经死掉的流上调 `stopCapture()` 在这个系统上不会回调，而
+  `restartCapture` 要等它返回才清掉「有重启在飞」的标志——一次卡住的 stop 就把之后所有重启都堵死，
+  包括那个能把画面救回来的。C 轮之所以还会冻，是因为**下一个**问题：
+- **仍然未解决：** 那次恢复之后整个主队列卡死（看门狗自己的 5 秒 tick 不再出现在日志里，线程掉到 8，
+  画面冻住），而进程还活着。下一步是 `probe/soak.py` 现在会自动抓的栈采样：`callbacks` 静止满一分钟时
+  写一份 `<work>/sample.txt`，它会告诉我们卡在 `SCStream` 调用里，还是卡在采集队列的 `write(2)` 后面。
+
+### 判定规则，以及为什么是这些形状
+
+| 规则 | 阈值 | 理由 |
+|---|---|---|
+| RSS | 峰值 − 基线 < 10 MB | issue 里给的数字；30 分钟漏不到 10 MB 的漏不是我们要防的那种 |
+| fds | 后半程不得比前半程最大值再高出 2 | **最大值在上升**才是泄漏特征；`lsof` 抓到瞬时描述符不算 |
+| threads | 同上 | SCK 工作线程随采集流重启来去，数字上下波动是正常的 |
+| `krd ax` 状态目录 | < 64 MB | 设计就是每窗口 16 个快照；实测停在 72 KB、文件数恰好 16 |
+| stats 节奏 | 无 > 5 秒间隙 | 写阻塞或回调卡住会先在这里露头 |
+| **帧** | `callbacks` 不得静止 60 秒 | 静止画面**不等于**沉默（SCK 按刷新率发 `.idle` 帧），所以一分钟没回调说明是流死了 |
+
+最后一行是这次练习的教训，也是脚本要在内存数字旁边一并报 `saw N OSC 52` / `N transmits` 的原因：只测
+「增长」的浸泡测试，分不清「稳定」和「已经不动了」。
+
+### 不覆盖什么
+
+- `--window` 模式（#17）采单窗口而不是显示器，定向投递输入在本轮是闲着的；`--ime` 同样（没有打字）。
+- 内容基本是静止的虚拟机桌面，编码器几乎没被压到。要压编码把 `--extra` 指到会动的画面。
+- 单显示器虚拟机测不了 #19 的拔线路径（那条有自己的测试和 probe）。
+- 30 分钟不是一天；而且这台虚拟机的 ScreenCaptureKit 明显比真机脆：重启十次后出 `-3805` 可能只是 VM 的
+  问题。看门狗和重启的意义正是让这个差别不再致命。

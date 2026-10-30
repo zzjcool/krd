@@ -33,6 +33,13 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Called with (pixels, width, height) for every visually changed frame.
     var onFrame: (([UInt8], Int, Int) -> Void)?
 
+    /// The stream died on its own (the window server dropped the connection, `-3805`, or the
+    /// display was reconfigured under it). Without this the process keeps running, keeps writing
+    /// stats, and leaves the last frame on screen forever -- a 30-minute soak found exactly that
+    /// (issue #44): frozen at 10 min, `callbacks` never moving again, nothing in the log but one
+    /// line. The owner decides whether to restart; this just reports.
+    var onStreamStopped: ((Error) -> Void)?
+
     /// `sourceRect` crops on the server (macOS 14+), so a zoomed capture copies *fewer* pixels per
     /// frame instead of being upscaled on the CPU. It is relative to the filter's content origin
     /// (see `Desk.cropForFilter`).
@@ -58,11 +65,27 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         Log.write("capture stopped: \(error)\n")
+        self.stream = nil
+        onStreamStopped?(error)
     }
 
-    func stop() async {
-        try? await stream?.stopCapture()
-        stream = nil
+    /// Stop and forget the stream, but never wait for it indefinitely.
+    ///
+    /// `stopCapture()` on a stream that has *already* died (`-3805`) does not call back on macOS
+    /// 26.6: the continuation is never resumed. `Desk.restartCapture` awaits this before it clears
+    /// its "a restart is in flight" flag, so one hung stop wedges every later restart -- including
+    /// the one that would repair the picture. Measured in the 30-minute soak (issue #44): the
+    /// process stayed alive and idle, the main thread slept in its run loop, and nothing was ever
+    /// logged again. Racing a timer is enough: the orphaned call is harmless.
+    func stop(timeout: Double = 2.0) async {
+        guard let stream else { return }
+        self.stream = nil
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { try? await stream.stopCapture() }
+            group.addTask { try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0.1) * 1e9)) }
+            await group.next()
+            group.cancelAll()
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {

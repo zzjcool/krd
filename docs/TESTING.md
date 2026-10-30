@@ -261,3 +261,98 @@ swift probe/ax_probe.swift    # best over ssh: the first AX call fails there unt
 swift probe/display_probe.swift watch          # ssh: no events at all (that is issue #19)
 swift probe/display_probe.swift watch --appkit # a GUI terminal: 3 notifications per change
 ```
+
+## 11. Soak: thirty minutes with every feature on
+
+Eleven features landed in one run (#15 keyboard protocol, #16 `--ime`, #17 pid-targeted input, #18
+clipboard bridge, #19 display-set changes, #22 `--zoom`, #24 backdrop refusal, #25 idle-frame stats,
+#27/#28 `krd ax`, #31 CI budgets). Each was reviewed and tested alone, so the thing nobody had done
+is the combination over time — and every one of them added something that can only misbehave slowly:
+a pasteboard poll, a display timer, a stream restart per pan, a snapshot file per dump.
+
+```bash
+swift build -c release
+scp .build/release/krd target:/tmp/krd-soak && scp probe/soak.py target:/tmp/
+ssh target 'cd /tmp && python3 soak.py --minutes 30 --binary /tmp/krd-soak \
+             --work /tmp/krd-soak --out /tmp/krd-soak/report.json'
+```
+
+Exit code 0 is PASS. A short run (`--minutes 2 --interval 10`) is the smoke test used while changing
+the script. It samples RSS (`ps -o rss=`), fds (`lsof`), threads (`ps -M`) and the `krd ax` state
+directory every 30 s, keeps `--stats-json` on, and pokes the paths that only leak over time:
+
+| stressor | every | what it exercises |
+|---|---|---|
+| `pbcopy`, 16 B … 8 KB of random text | 60 s | pasteboard `changeCount` poll → OSC 52 encode → write (#18) |
+| `krd ax tree --app Finder` | 60 s | one snapshot file per dump, pruned to 16 per window (#28) |
+| a pointer sweep, corner to corner, as SGR mouse reports on the pty | 60–120 s | pointer following and `--zoom-follow`, i.e. a capture-stream restart per pan (#22) |
+| (passive) | 2 Hz | the display-set fingerprint poll from #19 |
+
+### What it found
+
+Three runs on `kraal-agent` (macOS 26.6.2, M1 Pro VM), same flags
+(`--zoom 2 --zoom-follow --clipboard=in --pane 60x24 --cell 17x33`):
+
+| run | build | memory / fds / threads | picture |
+|---|---|---|---|
+| A, 30 min | `cadf25e` | flat: RSS 31.3 → 31.6 MB, fds 25–26, threads 13→14, `krd ax` 72 KB (16 snapshots, pruned), stats gap 1.0 s | **frozen from 10 min**, for the remaining 19 |
+| B, 30 min | A + restart on `didStopWithError` | flat: RSS 31.2 → 31.5 MB, fds 25–27, threads 13→15, `krd ax` 72 KB | restored once, then frozen for 19 min |
+| C, 12 min | B + a bounded `stopCapture()` + the frame watchdog | flat: RSS 31.3 → 31.6 MB, fds 19–25, threads ≤15, `krd ax` 52 KB | restored by the restart at 10 min, then the whole main queue wedged at 11 min |
+
+**Nothing leaks.** Four runs, two of them a full 30 minutes, with 12–30 pasteboard writes, the same
+number of `krd ax` snapshot dumps and 12–15 capture-stream restarts each: RSS moves by 0.3–0.4 MB,
+fds by one or two, threads come back down after each restart, and the snapshot directory stops
+growing at exactly 16 files. That is the answer to issue #44's question.
+
+What breaks instead is delivery, at ~10 minutes into a run with restarts:
+
+```
+krd: capture stopped: Error Domain=com.apple.ScreenCaptureKit.SCStreamErrorDomain Code=-3805
+     "Failed during stream due to application connection being interrupted"
+```
+
+krd used to log that line and keep running: `callbacks` never moved again, `delivered` froze, `bad`
+stayed 0, RSS/fds/threads stayed flat, and the stats timer kept writing. **From the outside — and
+from every number this soak was written to watch — nothing looked wrong.** That is why run A's first
+verdict was PASS while the picture had been frozen for 19 of its 30 minutes; the `frames` rule below
+exists because of it.
+
+### What changed because of it
+
+- `didStopWithError` now restarts the stream, up to five times with 1-2-4-8-8 s backoff, and logs
+  each attempt (`krd: capture stopped (SCStream -3805: …); restarting in 1s (attempt 1/5)`).
+- `Capturer.stop()` gives up after 2 s. `stopCapture()` on a stream that has already died never
+  calls back on this build, and `restartCapture` awaits it before clearing "a restart is in flight",
+  so one hung stop wedged every later restart — including the one that repairs the picture. Run C
+  still freezes because of the *next* thing:
+- **Still open:** after that recovery the main queue wedges (the watchdog's own 5 s tick stops
+  appearing in the log, threads drop to 8, the picture freezes) while the process stays alive. Next
+  step is the stack sample `probe/soak.py` now takes automatically the first time `callbacks` stands
+  still for a minute (`<work>/sample.txt`), which says whether it is blocked in a `SCStream` call or
+  behind the capture queue's `write(2)`.
+
+### Verdict rules, and why they are shaped that way
+
+| rule | threshold | why |
+|---|---|---|
+| RSS | peak − baseline < 10 MB | the issue's number; a leak that fits in 10 MB over 30 min is not the leak we fear |
+| fds | the second half sets no new maximum beyond +2 | a *rising maximum* is the leak signature; `lsof` catching a transient descriptor is not |
+| threads | same | SCK worker threads appear and disappear with stream restarts, so the count moves up and down legitimately |
+| `krd ax` state | < 64 MB | 16 snapshots per window is the design; the runs sat at 72 KB and stopped at exactly 16 files |
+| stats cadence | no gap > 5 s | a blocked write or a stuck callback shows up here first |
+| **frames** | `callbacks` must not stand still for 60 s | a static screen is *not* silence (SCK sends `.idle` frames at the refresh rate), so a minute without a callback means the stream, not the content |
+
+The last row is the lesson of this exercise, and the reason the script also reports `saw N OSC 52`
+and `N transmits` next to the memory numbers: a soak that only measures growth cannot tell "stable"
+from "stopped working".
+
+### What it does not cover
+
+- `--window` mode (#17) captures one window instead of a display, so pid-targeted input is idle
+  here; so is `--ime` (nothing is typed).
+- The content is a mostly-static VM desktop: the encoder is barely exercised. For an encode soak,
+  point `--extra` at something that animates.
+- A single-display VM cannot test the unplug path from #19 (that has its own test and probe).
+- 30 minutes is not a day, and this VM's ScreenCaptureKit is clearly less reliable than a real
+  Mac's: `-3805` after ten minutes of restarts may be a VM artefact. The watchdog and the restart
+  are what make that difference survivable either way.
