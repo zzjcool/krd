@@ -22,39 +22,48 @@ public struct TileGrid {
     /// and the pixel rects below are already scaled; the cells (`paneCols/paneRows`, `rect().col/row/
     /// cols/rows`) are not, because the picture must still fill the same cell box.
     public let scale: Double
-    /// How much the source had to be shrunk to fit the pane's box, `min(boxW/srcW, boxH/srcH, 1)`.
-    /// 1 means the pane has room for the source at 1:1 (a small window in a big pane); below 1 the
-    /// source is downscaled to the box. It is never above 1: asking ScreenCaptureKit for a box
-    /// *larger* than the source does not upscale, it pads with black (issue #69).
+    /// How much the picture is scaled on screen relative to the source's own points:
+    /// `min(boxW/srcW, boxH/srcH)`. **May exceed 1**: a window smaller than the pane is drawn larger
+    /// by the terminal, which costs no bytes. It is *not* the capture ratio -- that is
+    /// `min(fit, 1) x scale`: we never ask for more pixels than the source has (asking
+    /// ScreenCaptureKit for more does not upscale, it pads with black, issue #69), and `--scale` only
+    /// takes pixels away (issue #71).
     public let fit: Double
     /// The source's own size in points, before any fitting (0 when the caller did not say).
     public let sourceW: Double
     public let sourceH: Double
-    /// The pane box the source was fitted into, in the pane's pixels at `scale == 1`.
+    /// The largest cell rectangle with the source's aspect that fits the pane, in pixels.
     public let boxW: Int
     public let boxH: Int
-    /// ...and in cells, before the source's own size trimmed it (`paneCols/paneRows` after).
+    /// ...and in cells. The picture is placed in `paneCols x paneRows` of these; whatever the aspect
+    /// leaves over belongs to the terminal.
     public let boxCols: Int
     public let boxRows: Int
-    /// The frame at `scale == 1`: the source after fitting.
+    /// The on-screen size at `scale == 1`, i.e. the source x `fit` (may be larger than the source).
     public let fittedW: Int
     public let fittedH: Int
 
-    /// The pane's own pixel size: what a terminal means by an SGR-Pixels mouse coordinate.
-    /// `pixelW/pixelH` is what we *ask the capturer for*, which is smaller when `scale < 1`.
+    /// The placement's pixel size: where the picture actually is on screen, and therefore what an
+    /// SGR-Pixels mouse coordinate has to be mapped against (issue #71).
+    /// `pixelW/pixelH` is what we *ask the capturer for*, which is smaller when `scale < 1` or when
+    /// the pane is smaller than the source.
     public var panePixelW: Int { max(2, Int((Double(paneCols) * cellW).rounded())) }
     public var panePixelH: Int { max(2, Int((Double(paneRows) * cellH).rounded())) }
 
     /// Why the frame is not the size of the pane box, in one clause for `--debug` (issue #69).
     public var fitNote: String {
         if fittedW == boxW && fittedH == boxH { return "" }        // the frame *is* the pane box
-        let leftCols = max(0, boxCols - paneCols), leftRows = max(0, boxRows - paneRows)
         if fit < 0.999 {
             return " (fitted to \(String(format: "%.3f", fit)) of the \(boxW)x\(boxH) px box)"
         }
-        guard leftCols > 0 || leftRows > 0 else { return "" }
-        return " (the source is smaller than the pane box: \(pixelW)x\(pixelH) px at 1:1, "
-            + "\(leftCols)x\(leftRows) cells left to the terminal)"
+        // How much the terminal has to stretch the frame to fill the placement: > 1 when the source is
+        // smaller than the pane or when --scale sent fewer pixels. This is the number that says why
+        // the picture is soft, and it is independent of how big the picture is on screen.
+        let stretchX = Double(panePixelW) / Double(max(pixelW, 1))
+        let stretchY = Double(panePixelH) / Double(max(pixelH, 1))
+        guard stretchX > 1.02 || stretchY > 1.02 else { return "" }
+        return " (the terminal stretches x\(String(format: "%.2f", max(stretchX, stretchY))): "
+            + "\(pixelW)x\(pixelH) px in \(paneCols)x\(paneRows) cells)"
     }
 
     public var tilesX: Int { (paneCols + tileCols - 1) / tileCols }
@@ -85,19 +94,24 @@ public struct TileGrid {
         let boxRows = rows
         let boxW = max(1, Int((Double(cols) * cellW).rounded()))
         let boxH = max(1, Int((Double(rows) * cellH).rounded()))
-        // Never ask for a box bigger than the source: ScreenCaptureKit does not upscale to fill it,
-        // it pads with black (issue #69), and then the pointer mapping spreads over pixels that do
-        // not exist. Fit the source into the box instead, keeping its own aspect by construction.
-        var fit = 1.0
-        if source.width >= 2, source.height >= 2 {
-            fit = min(min(Double(boxW) / source.width, Double(boxH) / source.height), 1)
-        }
-        // The image at scale 1, and the cell box the terminal upscales it into. `ceil` because a
-        // partly used cell still has to be covered, and the picture is anchored at the pane's
-        // top-left -- the cells it does not reach are left to the terminal's own background.
-        let fittedW = max(2, Int((source.width >= 2 ? source.width * fit : Double(boxW)).rounded()))
-        let fittedH = max(2, Int((source.height >= 2 ? source.height * fit : Double(boxH)).rounded()))
-        if source.width >= 2, source.height >= 2 {
+        // Two independent factors (issue #71):
+        //
+        //  * how big the picture is *on screen* is `fit`, relative to the source's own points -- as
+        //    large as the pane allows, which may mean the terminal draws it larger than the source;
+        //  * how many pixels we *capture* is `min(fit, 1) x scale` -- never more than the source has
+        //    (ScreenCaptureKit pads instead of upscaling, issue #69, and a display mirror must not
+        //    grow with the pane), and `--scale` only ever takes pixels away.
+        //
+        // So `--scale` buys bandwidth, not screen size: at 0.5 the frame is half as many pixels in
+        // the same cells, and the terminal stretches it back.
+        let known = source.width >= 2 && source.height >= 2
+        let fit = known ? min(Double(boxW) / source.width, Double(boxH) / source.height) : 1
+        let capture = known ? min(fit, 1) * captureScale : captureScale
+        let fittedW = max(2, Int((known ? source.width * fit : Double(boxW)).rounded()))
+        let fittedH = max(2, Int((known ? source.height * fit : Double(boxH)).rounded()))
+        // `ceil` because a partly used cell still has to be covered; anchored at the pane's
+        // top-left, and whatever the aspect leaves over stays the terminal's.
+        if known {
             cols = min(paneCols, max(1, Int((Double(fittedW) / cellW).rounded(.up))))
             rows = min(paneRows, max(1, Int((Double(fittedH) / cellH).rounded(.up))))
         }
@@ -105,8 +119,8 @@ public struct TileGrid {
             paneCols: cols, paneRows: rows,
             cellW: cellW, cellH: cellH,
             tileCols: tileCols, tileRows: tileRows,
-            pixelW: max(2, Int((Double(fittedW) * captureScale).rounded())),
-            pixelH: max(2, Int((Double(fittedH) * captureScale).rounded())),
+            pixelW: max(2, Int((known ? source.width * capture : Double(boxW) * captureScale).rounded())),
+            pixelH: max(2, Int((known ? source.height * capture : Double(boxH) * captureScale).rounded())),
             bpp: bpp, scale: captureScale,
             fit: fit, sourceW: source.width, sourceH: source.height, boxW: boxW, boxH: boxH,
             boxCols: boxCols, boxRows: boxRows, fittedW: fittedW, fittedH: fittedH

@@ -276,6 +276,7 @@ to decide "is this the terminal or is this krd?" — each one prints its own nar
 | `probe/display_probe.swift` | which display-change mechanism fires: `now`, `list`, `set <i>` (a real resolution change), `watch [--appkit]` printing CoreGraphics callbacks and AppKit notifications for 10 s |
 | `probe/scale_probe.py` | what `--scale` buys (bytes/s, CPU, raw frame size, and the kitty placement boxes read back out of the stream) and whether it moves the pointer: it clicks the same terminal pixel at two scales and compares TextEdit's caret |
 | `probe/ax_caret_probe.swift` | the verifier for that pointer test: `AXSelectedTextRange` plus the text area's frame, one line per window, frontmost first |
+| `probe/click_probe.py` | clicks a control in the mirrored window (`--control "New Tab"`) at every `--scale` and in panes both bigger and smaller than the window, and prints the tab count before/after: the picture's placement must not move with `--scale`, and a click in the cells the aspect leaves over must be ignored |
 | `probe/pipe_probe.py` | puts krd behind a link that cannot carry the picture: the pty is drained at a fixed rate (and the rate can change mid-run), so `--scale auto` can be watched stepping down and back up. Prints scale, `late`, fps and MB/s per second, plus the number of stream restarts |
 | `probe/photo_codec.py` | what a colour-heavy frame would cost under each option of issue #26 (16-bit quantisation, fewer pixels, no zlib) with the same kitty framing, so its baseline row reproduces `krd --bench`'s `photo` bytes |
 
