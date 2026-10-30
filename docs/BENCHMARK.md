@@ -87,6 +87,7 @@ Content classes (one generator each, in `Bench.swift`; L4 replays real ones):
 | `noise` | hash noise, no LZ77 matches | photo, video with dithering |
 | `ui` | flat blocks with 1 px borders | Finder, browser chrome, IDE panels |
 | `gradient` | smooth ramp | wallpapers, video pans (zlib's bad case) |
+| `photoReal` | luminance waves + colour tint + ±10 grain, correlated channels | an actual photograph (see below) |
 
 Cases, each of which asserts its own dirty-tile count:
 
@@ -96,10 +97,24 @@ Cases, each of which asserts its own dirty-tile count:
 | `line` | text | glyph strokes across one tile row | exactly `tilesX` |
 | `full` | text | strokes across the whole frame | all |
 | `photo` | noise | whole frame, reseeded | all |
+| `photoReal` | photoReal | whole frame, reseeded | all |
 | `gradient` | gradient | whole frame, reseeded | all |
 | `ui` | ui | whole frame, reseeded | all |
 | `drag` | noise | a 600×400 region moving | region ∩ tiles |
 | `none` | text | nothing | **0** |
+
+`photo` is the worst case, and a bad model of the common one. Hash noise has no LZ77 matches at all,
+so it answers "what does the encoder cost when nothing can be compressed" — but a photograph on
+screen has low-frequency structure and correlated channels, and compresses to about half. Since #59
+made the encoder quantise to 5-6-5 before zlib, the difference is not academic: quantising buys
+**1.29×** on `photo` and **2.14×** on `photoReal` (measured; the lossless ratios are 1.00 and 0.70).
+A benchmark with only `photo` in it makes that change look marginal when it is worth twice over.
+
+`photoReal` is therefore **deterministic by construction**: integer triangle waves, a fixed integer
+hash for the grain, and no clock, no RNG state, no `sin()`. Every run produces the same bytes on
+every machine (`Tests/krdTests/PhotoRealCaseTests.swift` asserts the frame is identical across two
+builds and that the lossless ratio stays near 0.5). A benchmark case that drifts is worse than no
+case, because its budget silently starts measuring something else.
 
 The assertion matters more than it looks: the first version of `char` applied its delta to the
 *previous* frame, so the moving block painted over its own last position, the second round was

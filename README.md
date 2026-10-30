@@ -50,8 +50,12 @@ krd --window Safari          # mirror a single window (a backdrop window is refu
 krd --zoom 2                 # show half the screen at twice the density (crop on the capture side)
 krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global screen points
 krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
+krd --scale 0.5              # capture half the pixels per side and let the terminal upscale:
+                             # 4x fewer bytes on colour-heavy content, visibly softer text
+krd --scale auto             # ...or let krd drop to 0.5/0.25 while the link cannot keep up
 krd --display 1 --fps 30
 krd --no-input               # watch only
+krd --no-quantise           # keep the encoder lossless (photos cost ~2.3x the bytes)
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture
@@ -124,7 +128,8 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 | | |
 |---|---|
 | Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, display-set changes (plug/unplug, resolution, lid) restart capture in place, SSH |
-| Rough | colour-heavy full-screen motion: 13.58 MB/frame worst case, costed in [research-photo-bandwidth](docs/research-photo-bandwidth.md) — the cheap fix is 16-bit tiles plus a smaller capture, not a codec; Herdr's image-delete semantics |
+| Rough | colour-heavy full-screen motion at full density: 13.58 MB/frame worst case, costed in [research-photo-bandwidth](docs/research-photo-bandwidth.md); Herdr's image-delete semantics |
+| Solid (bandwidth) | colour-heavy motion is usable when you spend resolution on it: incompressible tiles drop to 5-6-5 (`Z_HUFFMAN_ONLY`, no protocol change) for **1.29×**, and `--scale 0.5` captures a quarter of the pixels for **3.98×** — together **68 MB/s at 20 fps**, inside a local pty's 103 MB/s, with pointer mapping unchanged |
 | Solid (clipboard) | clipboard bridge, opt-in with `--clipboard=in|out|both`: a copy inside the mirrored
 desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the terminal
 for its clipboard, puts it on the target's pasteboard and posts `Cmd-V` (`out`, needs a terminal

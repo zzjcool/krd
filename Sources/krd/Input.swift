@@ -23,6 +23,11 @@ final class InputReader {
     /// a window that closed mid-session is noticed instead of silently clicking into whatever is in
     /// front (issue #17).
     var targetPid: (() -> pid_t?)?
+    /// The mirrored window's number, and "which window is on top at this point" -- together they say
+    /// whether the global tap would reach the mirrored window (the pid path does not for mouse events
+    /// on macOS 26, see `post`).
+    var targetWindow: (() -> CGWindowID?)?
+    var topmostWindow: ((CGPoint) -> CGWindowID?)?
     private var loggedTarget = false
     private var loggedFallback = false
 
@@ -277,6 +282,13 @@ final class InputReader {
         let spot: String
         if pixelMouse {
             guard viewport.contains(pixel: cx, cy) else {
+                if !motion, trace {
+                    // The picture does not fill the pane (issue #69): the cells past it belong to the
+                    // terminal, so this is not a click on the mirrored screen. Say so instead of
+                    // posting a guessed point.
+                    log("mouse at px(\(cx),\(cy)) is outside the picture "
+                        + "(\(viewport.pixelWidth)x\(viewport.pixelHeight) px); ignored")
+                }
                 // Press only: a release is the same click again, and the wall's bar *steps* per
                 // click (`cardStep(per)`), so delivering both would move two pages for one click.
                 // The chrome path opened a panel twice before this and that was invisible, because
@@ -544,6 +556,17 @@ final class InputReader {
         post(event, describe: "\(type.rawValue) at \(Int(point.x)),\(Int(point.y))")
     }
 
+    private static func isMouseEvent(_ type: CGEventType) -> Bool {
+        switch type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+             .otherMouseDown, .otherMouseUp, .leftMouseDragged, .rightMouseDragged,
+             .otherMouseDragged, .mouseMoved, .scrollWheel:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// `kind` follows xterm: 64 up, 65 down, 66 left, 67 right.
     private func postScroll(_ kind: Int, flags: CGEventFlags) {
         guard forward else { return }        // same reason as `postKey`
@@ -569,6 +592,17 @@ final class InputReader {
     /// because a silent fallback means clicks quietly start going to the desktop.
     private func post(_ event: CGEvent, describe: String? = nil) {
         if let targetPid, let pid = targetPid(), pid > 0 {
+            // macOS 26 drops *mouse* events posted to a pid -- Safari and TextEdit both ignore them
+            // without a word, while keys still arrive -- so a mirrored window could not be clicked
+            // at all (issue #69). When the mirrored window is the one on top at the pointer, the
+            // global tap delivers to exactly that window, so use it there; the pid path stays for
+            // a covered window, where the global tap would hit whatever is in front (issue #17).
+            if Self.isMouseEvent(event.type), let targetWindow, let topmostWindow,
+               let window = targetWindow(), let top = topmostWindow(event.location), top == window {
+                if trace, let describe { log("\(describe) -> global tap (the mirrored window is on top)") }
+                event.post(tap: .cghidEventTap)
+                return
+            }
             if trace, let describe { log("pid \(pid) <- \(describe)") }
             if trace, !loggedTarget {
                 loggedTarget = true

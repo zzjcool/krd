@@ -75,6 +75,37 @@ per-image escape header and zlib loses the cross-tile context it had at 16×8. F
 on resize, reconnect and the first frame, so this trades a rare +30 % for a −67 % on the path that
 runs 20 times per second while typing. `--tile 16x8` is still one flag away.
 
+### Dropping the low bits so zlib has something to find (issue #59)
+
+A photograph on screen is noise to zlib: 5-6-5 has no matches, so `o=z` bought ~1.00× on it. That is
+the case where the encoder used to send the pixels raw. Quantising first changes what zlib *sees*:
+each channel keeps 5/6/5 bits, so every byte comes from a 32- or 64-symbol alphabet, and the
+entropy coder alone reaches **1.29×** on hash noise and **2.3×** on a real photograph. The wire
+format does not change — the terminal still receives `f=24` with 3 bytes per pixel, it just receives
+fewer of them, and it needs no new feature for that.
+
+The decision is per tile and content-adaptive, using the ratio `LevelPolicy` already computes: a tile
+whose lossless attempt bought nothing for **two consecutive frames** is quantised before zlib, and a
+tile whose ratio drops back into compressible territory (or whose pixels start to look compressible)
+returns to lossless on the next frame. Text and UI never reach the quantiser: their ratio is ~0.1.
+
+Measured with `krd --bench --json --rounds 10`, three alternating runs, medians (`photo` = hash
+noise, the worst case; layout as reported in the JSON `config`, 66 tiles):
+
+| | wire | encode p50 |
+|---|---:|---:|
+| skip zlib (issue #53, today's `main`) | 4,755,012 B | 3.20 ms |
+| **5-6-5 then Huffman-only zlib (this)** | **3,686,632 B (−22.5 %)** | **6.03 ms** |
+
+`drag` (noise, but only part of the screen) moves with it: 1,198,117 → 1,105,258 B (−7.8 %),
+2.70 → 2.80 ms. Text/UI/gradient are byte-identical, and their p50 does not move.
+
+The cost is 36.5 dB PSNR: banding on smooth ramps, invisible on photographs and video. `--no-quantise`
+keeps the encoder strictly lossless and gets the `photo` case back to the skip-zlib numbers. The
+trade is only worth taking because bytes, not CPU, are what limits a photo screen: at 20 fps the
+lossless path asks for ~95 MB/s against a local pty that tops out at 103.6 MB/s
+([research-photo-bandwidth](research-photo-bandwidth.md) §0).
+
 ## Why these levers and not others
 
 **zlib level per tile (issue #3).** One level for the whole frame is always wrong: text compresses
@@ -102,6 +133,132 @@ referenced by construction, so the conversion writes in place.
 **What is *not* worth optimising.** Base64 and escape assembly together are 6 ms on a 13 MB payload
 and 0.02 ms on a typed character. A faster base64 would be invisible; the numbers above say so, and
 that is the point of measuring it.
+
+## The capture size comes from the source, not the pane (issue #69)
+
+`--window` used to size the capture from the pane's box (`cols × cellW × rows × cellH`) whatever the
+source was. ScreenCaptureKit does not upscale a window into a box larger than the window: it draws the
+window 1:1 in the top-left and **pads the rest with black**. On a 1024×678 window in a 70×24 pane
+(1190×792 px box) that was 31.8 % of the frame, and because the pointer was mapped across the whole
+padded box, a click near the picture's right edge was sent ~143 pt to its left — which is why the
+window felt unoperable.
+
+The rule now:
+
+- `f = min(boxW / srcW, boxH / srcH, 1)` — never ask for more pixels than the source has, and never
+  upscale beyond the pane either;
+- the frame is `src × f`, which has the source's aspect by construction, so there is nothing to pad;
+- the placement box is `c = ceil(pxW / cellW)`, `r = ceil(pxH / cellH)`, anchored at the pane's
+  top-left; the cells it does not reach are left to the terminal's background (krd does not paint
+  them);
+- the pointer uses **that same box** — `Viewport` is built from the placement cells, not from the
+  pane — so a click in the leftover cells is outside the picture and is dropped, not guessed.
+
+A source larger than the box is still downscaled into it, so this changes nothing for a full-screen
+capture; `--scale` multiplies the fitted size, and `--display` follows the same rule (a pane wider than
+the display no longer asks for pixels the display does not have).
+
+Measured (macOS 26.6, `--window 530` = a 1024×678 Safari window, share of black pixels in the first
+recorded frame):
+
+| pane | before: frame | before: black | after: frame | after: black |
+|---|---|---:|---|---:|
+| 70×24 | 1190×792 | 31.6 % | 1024×678 (61×21 cells) | 7.5 % |
+| 88×30 | 1496×990 | 56.6 % | 1024×678 (61×21 cells) | 7.5 % |
+| 60×20 | 1020×660 | 8.9 % | 997×660 (59×20 cells) | 6.8 % |
+| 70×24 at `--scale 0.5` | 595×396 | 7.0 % | 512×339 (61×21 cells) | 6.4 % |
+
+The black that is left is the page's own dark UI: the same runs against a light page measure 0.2 %, and
+the padding was visible as a band — the last row and the last column of the before frames are 100 %
+black, of the after frames 0–6 %.
+
+Clicking was checked against a control rather than by eye: the "New Tab" button of that window, at the
+pixel where it sits in the picture, opened a tab in six of six runs (panes 70×24, 30×12 and 88×30, at
+scale 1 and 0.5) and in none of the same six clicks on the previous build. In the 88×30 pane the old
+mapping sent that pixel to `(1022,247)` instead of `(1316,255)` — the 294 pt that made the window
+unusable there.
+
+Clicks in `--window` mode were also broken for a second, unrelated reason on macOS 26:
+`CGEvent.postToPid` delivers keyboard events but drops **mouse** events (Safari and TextEdit both
+ignore them silently), so the mirrored window could not be clicked at all. Mouse events now go through
+the global tap while the mirrored window is the one on top at the pointer, and through the pid only
+when it is covered (issue #17's case).
+
+## Capture scale: `--scale` (issue #60)
+
+`--scale 0.5` asks the capturer for half as many pixels in each direction (`SCStreamConfiguration.
+width/height` = the fitted source size × the scale) and lets the terminal upscale the image back
+into the same cell box. Nothing else moves:
+
+- the **crop** (`sourceRect`) is unchanged — this is not zoom;
+- the **placement box** (`c=8,r=4` per tile, the same cells) is unchanged, so the picture still fills
+  the pane exactly: `--record` gives 1020×627 raw frames at scale 1 and 510×314 at 0.5, while the
+  escape stream carries `c=8,r=4` placements and 136×132 / 68×66 px images in the two runs;
+- the **pointer mapping** is unchanged, because SGR-Pixels coordinates are the *pane's* grid, not the
+  image's. Clicked at the same terminal pixel, TextEdit's caret lands at the same offset at both
+  scales (86 and 948 for two points), and a deliberately doubled pixel lands somewhere else;
+
+The cost is resolution: at 0.5 a 13-point glyph is described by half as many pixels per side, so text
+gets visibly soft — the terminal's upscale is not a substitute for real pixels. It is a trade, not a
+free win, and the reason it defaults to 1.
+
+Measured (macOS 26.6 VM, pane 60×19 cells of 17×33 px, the still desktop; `--bench` for the pinned
+813-tile photo layout):
+
+| | scale 1 | scale 0.5 | scale 0.25 |
+|---|---:|---:|---:|
+| capture pixels | 1020×627 | 510×314 | 255×157 |
+| `--bench` photo wire | 13.57 MB | 3.41 MB (**3.98×**) | 0.86 MB (**15.7×**) |
+| live bytes/s (desktop) | 3.08 MB/s | 1.02 MB/s | 0.23 MB/s |
+| CPU (`ps %cpu`) | 17.5 % | 8.4 % | 3.9 % |
+| `bad` frames | 0 | 0 | 0 |
+
+The live ratio is 3.2× rather than 3.98× because a still desktop's bytes are mostly per-frame framing
+and the tiles that change; the bench number is the clean one. An automatic "drop the scale before the
+frame rate" policy is deliberately *not* here: the flag and the numbers come first.
+
+## Capture scale: `--scale auto` (issue #64)
+
+`--scale auto` starts at 1 and moves down the ladder `1 → 0.5 → 0.25` while the **write side** cannot
+keep up, then back up when it can. The default is still `1`: nothing about anyone's picture changes
+unless they ask for this.
+
+**The signal is backpressure, not encoder time.** A frame is *late* when it took longer to come out
+than the interval it has to fit in (`write_ms > 1000/fps`, and `--stats-json` reports the ratio per
+second as `late`/`frames`). That is the causal version of "the link is losing": when the pty cannot
+take the bytes, `write(2)` is where the frame sits, so the write's own duration crosses the budget
+and stays there (#26 measured 619 ms per write on a 20 MB/s link while
+the encoder kept producing 20 fps). Encoder time says nothing about that — a fast machine on a slow
+link has cheap frames and a broken picture; and the *whole* frame's duration is not it either, because
+a photo repaint that only happens twice a second takes longer than 50 ms to encode on any machine.
+
+| | down | up |
+|---|---|---|
+| condition | > 50 % of frames late | < 5 % of frames late |
+| window | 3 s (≥ 6 samples) | 10 s (≥ 20 samples), the whole window observed |
+| after a change | 5 s minimum dwell, both directions | same |
+
+**Why asymmetric.** Going down spends quality the user can see but understands (a softer picture,
+which is strictly better than a picture that stutters). Going up spends a risk: if the link cannot
+carry scale 1 after all, the next few seconds stutter *at the moment the user asked for nothing*.
+So the downgrade is a majority vote over a short window and the upgrade is near-unanimity over a long
+one — it is much harder to come back up than to fall down.
+
+**Why that alone still flaps, and what the backoff adds.** On a link that carries 0.5 easily and 1
+only at 2 fps, "quiet at 0.5 for 10 s" is true a few seconds after every probe, so thresholds alone
+give a 10-second cycle — up, stutter, down, up… To stop that, an upgrade that is undone within 20 s
+counts as a **failed probe** and multiplies the quiet window it will demand next time by 3 (capped at
+300 s): 10 s, 30 s, 90 s. A probe that survives 20 s resets the penalty. The end state on such a link
+is "mostly at 0.5, one probe every few minutes", which is what a person would do by hand.
+
+A scale change goes through the same in-place `updateSource` as a pan (#57): the stream is not
+restarted, so the picture never goes black and the frame watchdog is not involved. The log line is
+`krd: pipe is behind; scale 1 -> 0.5` (or `pipe has headroom; scale 0.5 -> 1`), and `--debug`'s
+`pan:` line shows the update that carried it. The pointer mapping is unaffected at every level for
+the reason #60 gives: the viewport is built from the pane's pixels, not the captured ones.
+
+`--fps` is deliberately *not* touched: lowering the frame rate is a different promise (fewer, sharper
+frames) and the user should be the one to make it.
 
 ## Measuring a change
 

@@ -40,6 +40,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// line. The owner decides whether to restart; this just reports.
     var onStreamStopped: ((Error) -> Void)?
 
+    /// The configuration the running stream was started with (or last updated to). `SCStream` does
+    /// not expose its own on this SDK, so this is the copy `updateSource` mutates.
+    private var config: SCStreamConfiguration?
+
     /// `sourceRect` crops on the server (macOS 14+), so a zoomed capture copies *fewer* pixels per
     /// frame instead of being upscaled on the CPU. It is relative to the filter's content origin
     /// (see `Desk.cropForFilter`).
@@ -61,6 +65,43 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         self.stream = stream
+        self.config = config
+    }
+
+    /// Move the crop of the **running** stream, no teardown (`SCStream.updateConfiguration`).
+    ///
+    /// This is what `--zoom-follow` uses for a pan: stopping and starting the stream froze the
+    /// picture for the length of a re-negotiation and was the main trigger of the stop/start path
+    /// that hung in the #44 soak. Measured with `probe/zoom_update_probe.swift` on macOS 26.6: the
+    /// new rect takes effect within one or two frames (p50 42 ms end to end), the stream keeps
+    /// delivering, and nothing stops.
+    ///
+    enum Update: Equatable {
+        case changed          // the stream was re-cropped, a frame is owed
+        case unchanged        // same rect and size as the running stream: nothing to do, no frame owed
+        case noStream         // nothing running; the caller falls back to a restart
+    }
+
+    /// Returns `.unchanged` when the request repeats the configuration the stream already has.
+    ///
+    /// That happens more than it sounds: `--zoom-follow` clamps the crop at the edge of the display,
+    /// so a pointer parked in a corner asks for the same rect four times a second. Sending that to
+    /// `updateConfiguration` is harmless but it produces **no frame** (nothing changed), and a
+    /// caller that then waits for one is waiting for something that will never arrive -- which is
+    /// exactly how the first version of this turned eight pans into eight needless restarts in a
+    /// 6-minute soak.
+    @discardableResult
+    func updateSource(_ sourceRect: CGRect, width: Int, height: Int) async throws -> Update {
+        guard let stream, var next = config else { return .noStream }
+        if next.sourceRect == sourceRect, next.width == width, next.height == height {
+            return .unchanged
+        }
+        next.sourceRect = sourceRect
+        next.width = width
+        next.height = height
+        try await stream.updateConfiguration(next)
+        config = next
+        return .changed
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

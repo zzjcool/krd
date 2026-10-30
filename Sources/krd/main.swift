@@ -16,7 +16,14 @@ struct Options {
     var zoomAt: CGPoint? = nil
     /// Pan the crop when the pointer reaches the edge of the picture (`--zoom-follow`).
     var zoomFollow = false
+    /// Capture at a fraction of the pane's pixels (`--scale 0.5`): a quarter of the bytes for half
+    /// the resolution in each direction, upscaled by the terminal into the same cell box. It changes
+    /// the *output* size only -- the crop (`sourceRect`) and the input mapping stay as they are.
+    var scale = 1.0
+    var scaleAuto = false
+    var scaleError: String? = nil
     var noInput = false
+    var noQuantise = false
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
     /// anything that is not plain ASCII.
@@ -101,10 +108,14 @@ func usage() -> String {
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
       --log <path>        write diagnostics to a file instead of over the picture
+      --scale <f|auto>    capture f (0 < f <= 1) of the pane's pixels per side and let the terminal
+                          upscale: 0.5 is a quarter of the bytes and visibly softer text (issue #60);
+                          'auto' starts at 1 and steps down while the pipe is behind (issue #64)
       --full-frame        disable tiling, always resend the whole frame
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
       --no-input          view only, do not inject events
+      --no-quantise       never drop colour precision (default: incompressible tiles go 5-6-5)
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
@@ -203,6 +214,18 @@ func parseArguments() -> Options {
         case "--zoom":
             if let value = Double(args[safe: i + 1] ?? ""), value.isFinite { options.zoom = value }
             i += 1
+        case "--scale":
+            // The parser does not throw; an unparsable value is carried to `run()` instead of
+            // silently meaning "1", because a typo here doubles the bytes on the wire.
+            if (args[safe: i + 1] ?? "").lowercased() == "auto" {
+                options.scaleAuto = true
+            } else if let value = Double(args[safe: i + 1] ?? ""), value.isFinite, value > 0, value <= 1 {
+                options.scale = value
+            } else {
+                options.scaleError = "--scale takes a fraction of the pane's pixels, "
+                    + "0 < scale <= 1 (e.g. 0.5); got \(args[safe: i + 1] ?? "nothing")"
+            }
+            i += 1
         case "--zoom-at":
             if let spec = args[safe: i + 1], case let parts = spec.split(separator: ","), parts.count == 2,
                let x = Double(parts[0]), let y = Double(parts[1]), x.isFinite, y.isFinite {
@@ -237,6 +260,7 @@ func parseArguments() -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
+        case "--no-quantise": options.noQuantise = true
         case "--cursor": options.drawsCursor = true
         case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
@@ -361,6 +385,13 @@ final class Desk {
     private var zoomFocus: CGPoint = .zero
     /// 1 for the synthetic paths (bench/selftest/replay), `--zoom` for a live capture.
     private var zoomScale = 1.0
+    /// The scale in force right now. With `--scale auto` the governor moves this; otherwise it is
+    /// `options.scale` and never changes (issue #64).
+    private var effectiveScale = 1.0
+    private var governor = ScaleGovernor()
+    /// Frames and late frames since the last stats tick, for the `late` column.
+    private var framesSinceTick = 0
+    private var lateSinceTick = 0
     private var geometry: TermGeometry?
     private var captureRestarting = false
     private var restartPending = false
@@ -371,8 +402,18 @@ final class Desk {
     /// Last `callbacks` count and when it last moved: a stream that stops delivering frames
     /// without calling `didStopWithError` is the failure this catches (issue #44).
     private var frameWatchdog: DispatchSourceTimer?
+    /// Serialises in-place pans: `updateConfiguration` calls must not overlap, and a pan that
+    /// arrives while one is in flight is folded into the next.
+    private var panInFlight = false
+    private var panPending = false
+    /// The reason carried over to a restart that had to queue behind another one.
+    private var pendingRestartReason: String?
     private var lastSeenCallbacks = 0
     private var lastFrameAt = Date()
+    /// Set when krd asks the stream for a frame (a pan, a restart): the frame is then *owed*.
+    private var expectFrameBy: Date?
+    /// How long a frame we asked for may take. The probe measured p50 42 ms, max 67 ms end to end.
+    private let FRAME_TIMEOUT: Double = 3
     /// When the in-flight restart started, so a restart that never returns cannot gate the
     /// watchdog forever (see `Capturer.stop`).
     private var restartStartedAt = Date()
@@ -471,6 +512,8 @@ final class Desk {
     }
 
     func run() async throws {
+        // Before any branch: --bench, --selftest and the live path all go through this writer.
+        writer.quantiseEnabled = !options.noQuantise
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
@@ -490,6 +533,18 @@ final class Desk {
             } else {
                 FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
             }
+        }
+        if let error = options.scaleError { throw DeskError.message(error) }
+        // The selftest is a byte contract about framing, not about resolution: it always captures
+        // at the pane's own pixel size, so `--scale` next to it is a usage error rather than a
+        // silent change of the sha256 people compare against.
+        if options.selftest && (options.scale != 1 || options.scaleAuto) {
+            throw DeskError.message("--selftest always captures at scale 1; drop --scale")
+        }
+        // `auto` is a reaction to a live write side: the synthetic paths have no pipe, so a scale
+        // that could move under them would make their numbers depend on the machine running them.
+        if options.scaleAuto && (options.bench || options.replay != nil) {
+            throw DeskError.message("--scale auto needs a live capture; --bench and --replay stay at scale 1")
         }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
         if let dir = options.replay, options.bench {
@@ -550,7 +605,8 @@ final class Desk {
                 geometry.cols = pane.cols
                 geometry.rows = pane.rows
             }
-            geometrySource = (queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")) + " · mock"
+            geometrySource = (queried != nil ? TermGeometry.lastAnswer.label
+                                             : (options.cell != nil ? "--cell" : "TIOCGWINSZ")) + " · mock"
             // Nothing below this line is mocked: same tiles, same encoder, same placements, same
             // chrome. Only the pixel source is different, which is why this needs no permission.
             let size = options.mockSize ?? (w: 1920, h: 1200)
@@ -624,10 +680,22 @@ final class Desk {
         // Prefer the terminal's own answer: sshd ptys report no pixel size at all.
         let queried = TermGeometry.query()
         let geometry = queried ?? TermGeometry.read()
-        geometrySource = queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")
+        geometrySource = queried != nil
+            ? TermGeometry.lastAnswer.label
+            : (options.cell != nil ? "--cell" : "TIOCGWINSZ")
+        if options.debug {
+            // Which question the terminal answered, in the log: a picture sized from the window
+            // measurement (or from a constant) is otherwise indistinguishable from a measured one.
+            Log.write("krd: geometry source \(geometrySource)\n")
+        }
         if geometry.pixelWidth == 0 || geometry.pixelHeight == 0 {
+            // Spell out the consequence (issue #56): the picture is merely soft and the exit code is
+            // 0, so "assuming a cell size" on its own is a line nobody can act on.
+            let w = Int(TermGeometry.fallbackCell.w), h = Int(TermGeometry.fallbackCell.h)
             Log.write(
-                "krd: terminal reports no pixel size; assuming a \(Int(TermGeometry.fallbackCell.w))x\(Int(TermGeometry.fallbackCell.h)) px cell (override with --cell)\n")
+                "krd: terminal reports no pixel size; assuming a \(w)x\(h) px cell -> the image will be "
+                + "\(geometry.cols * w)x\(geometry.rows * h) for a \(geometry.cols)x\(geometry.rows) pane; "
+                + "pass --cell <w>x<h> if that is wrong\n")
         }
 
         let target = try await makeCaptureTarget(using: content)
@@ -645,6 +713,7 @@ final class Desk {
         self.filter = filter
         self.geometry = geometry
         zoomScale = options.zoom > 1 ? options.zoom : 1
+        effectiveScale = options.scale
         configureSource(rect: sourceRect)
         self.shareable = content
         targetLabel = target.reason
@@ -750,8 +819,11 @@ final class Desk {
                 + (zoomScale > 1
                    ? " (zoom \(zoomScale) of \(Int(fullRect.width))x\(Int(fullRect.height)) centred \(Int(crop.midX)),\(Int(crop.midY)))"
                    : "")
-                + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells, "
-                + "\(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
+                + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells"
+                + (options.scaleAuto ? " (scale auto, \(ScaleGovernor.show(effectiveScale)))"
+                   : options.scale < 1 ? " (scale \(ScaleGovernor.show(options.scale)))" : "")
+                + layout.fitNote
+                + ", \(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
             Log.write(message)
         }
 
@@ -1136,23 +1208,24 @@ final class Desk {
         }
     }
 
-    /// Restart the stream when frames stop arriving *without* an error.
+    /// Two different kinds of silence, and only one of them is a failure.
     ///
-    /// `didStopWithError` is the loud failure; this is the quiet one, and the 30-minute soak hit
-    /// both (issue #44): after recovering from `-3805` the replacement stream delivered 75 frames
-    /// and then went silent for the rest of the run, with krd alive and every counter flat. Silent
-    /// is worse than dead, because nothing looks wrong.
+    /// **Expected frame.** When krd asks the stream for something -- a pan (`updateSource`), a
+    /// restart -- a frame is owed. If none arrives within `FRAME_TIMEOUT`, the stream is not doing
+    /// what it was told: restart it. This is precise, because krd knows what it asked for.
     ///
-    /// A static screen is not silence: ScreenCaptureKit sends `.idle` frames on every
-    /// `minimumFrameInterval` (measured 16/s on a still desktop here), and krd counts each callback
-    /// before deciding it is idle. So "no callback for 15 s" means the stream, not the content.
-    /// `KRD_STREAM_WATCHDOG=<seconds>` changes the limit, 0 turns it off.
+    /// **Long silence.** "No frames at all" looks like a dead stream, and in the #44 soak it was
+    /// (after `-3805` the replacement stream went quiet). But on a still desktop ScreenCaptureKit
+    /// sends *nothing*: measured with `probe/zoom_update_probe.swift` on macOS 26.6, 0 frames in a
+    /// 1 s window while the screen sat still, and the same in a 10-minute soak (56 s gaps between
+    /// sweeps). So a silence rule that assumes idle frames exist restarts a perfectly healthy stream
+    /// -- the first version of this did exactly that, three times in five minutes. It is therefore
+    /// opt-in: `KRD_STREAM_WATCHDOG=<seconds>` turns it on, `0` (the default) leaves it off.
     private func startFrameWatchdog() {
-        let limit = Double(ProcessInfo.processInfo.environment["KRD_STREAM_WATCHDOG"] ?? "15") ?? 15
-        guard limit > 0 else { return }
+        let limit = Double(ProcessInfo.processInfo.environment["KRD_STREAM_WATCHDOG"] ?? "0") ?? 0
         lastFrameAt = Date()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.schedule(deadline: .now() + 1, repeating: 5)
         timer.setEventHandler { [weak self] in self?.watchFrames(limit: limit) }
         timer.resume()
         frameWatchdog = timer
@@ -1166,17 +1239,18 @@ final class Desk {
         guard !cleanedUp, filter != nil else { return }
         let count = capturer.callbacks
         if count != lastSeenCallbacks {
-            // Frames are flowing again: the retry budget is earned back by delivery, not by a
-            // restart returning without throwing.
+            // Frames are flowing: the retry budget is earned back by delivery, not by a restart
+            // returning without throwing, and nothing is owed any more.
             lastSeenCallbacks = count
             lastFrameAt = Date()
+            expectFrameBy = nil
             if streamStopAttempts > 0 { streamStopAttempts = 0 }
             return
         }
         if captureRestarting {
             // A restart that has been "in flight" for longer than a stop plus a start can take is
-            // not in flight any more, it is parked. Clear it and let the retry below happen;
-            // otherwise a single hung `stopCapture()` freezes the picture for the session.
+            // not in flight any more, it is parked. Clear it and let the retry happen; otherwise a
+            // single hung `stopCapture()` freezes the picture for the session.
             let parked = Date().timeIntervalSince(restartStartedAt)
             if parked > 12 {
                 Log.write("krd: a capture restart has been parked for \(Int(parked))s; "
@@ -1186,20 +1260,32 @@ final class Desk {
             }
             return
         }
+        if let due = expectFrameBy, Date() >= due {
+            expectFrameBy = nil
+            let waited = Date().timeIntervalSince(due) + FRAME_TIMEOUT
+            retryStream(reason: String(format: "no frame %.1fs after asking for one", waited))
+            return
+        }
+        guard limit > 0 else { return }
         let silence = Date().timeIntervalSince(lastFrameAt)
         guard silence >= limit else { return }
         lastFrameAt = Date()
+        retryStream(reason: "no frames for \(Int(silence))s")
+    }
+
+    /// Count one failed attempt and restart, or give up once the budget is spent.
+    private func retryStream(reason: String) {
         streamStopAttempts += 1
         guard streamStopAttempts <= 5 else {
             frameWatchdog?.cancel()
             frameWatchdog = nil
-            warnRestartOnce("krd: no frames for \(Int(silence))s and 5 restarts did not help; "
+            warnRestartOnce("krd: \(reason) and 5 restarts did not help; "
                 + "the last frame stays on screen\n")
             return
         }
-        Log.write("krd: no frames for \(Int(silence))s; restarting the capture stream "
+        Log.write("krd: \(reason); restarting the capture stream "
             + "(attempt \(streamStopAttempts)/5)\n")
-        restartCapture(reason: "no frames arriving")
+        restartCapture(reason: reason)
     }
 
     /// The stream stopped on its own: restart it with backoff, bounded.
@@ -1472,14 +1558,54 @@ final class Desk {
     /// ScreenCaptureKit wants the crop relative to the filter's content: the window frame for a
     /// window filter, the display for a display filter. A full-frame capture sends nil so the
     /// terminal keeps getting exactly what it got before zoom existed.
-    private func cropForFilter() -> CGRect? {
-        let crop = currentCrop()
-        guard crop.width < fullRect.width - 0.5 || crop.height < fullRect.height - 0.5 else { return nil }
+    private func filterRect(for crop: CGRect) -> CGRect {
         // Builds differ on whether a display filter wants global points; KRD_ZOOM_GLOBAL_RECT=1
         // is the escape hatch when a crop on a secondary display lands somewhere else.
         let global = ProcessInfo.processInfo.environment["KRD_ZOOM_GLOBAL_RECT"] != nil
         let origin = global ? crop.origin : CGPoint(x: crop.minX - fullRect.minX, y: crop.minY - fullRect.minY)
         return CGRect(origin: origin, size: crop.size)
+    }
+
+    private func cropForFilter() -> CGRect? {
+        let crop = currentCrop()
+        guard crop.width < fullRect.width - 0.5 || crop.height < fullRect.height - 0.5 else { return nil }
+        return filterRect(for: crop)
+    }
+
+    // MARK: adaptive scale (issue #64)
+
+    /// One frame's worth of backpressure, from the frame path.
+    ///
+    /// "Late" is the causal version of "the link is losing": the *write* took longer than the
+    /// interval the frame had to fit in (`1000/fps`). Two reasons it is `write_ms` and not the whole
+    /// pipeline or the encoder: a slow encoder on a fast link is a different problem (and #26's
+    /// answer to it is a cheaper encoder, not fewer pixels), while a full pty is where a frame
+    /// actually sits — #26 measured 619 ms per write on a 20 MB/s link. Using the whole frame's
+    /// duration instead would also call a *content-limited* stream late: a photo repaint that only
+    /// happens twice a second takes longer than 50 ms to encode on any machine.
+    ///
+    /// Called on the frame thread, which is serial, so the governor needs no lock of its own.
+    private func noteFrame(writeMs: Double) {
+        guard options.scaleAuto else { return }
+        framesSinceTick += 1
+        let late = writeMs > 1000.0 / Double(max(options.fps, 1))
+        if late { lateSinceTick += 1 }
+        let now = benchNowMs() / 1000.0
+        if let change = governor.observe(at: now, late: late) {
+            DispatchQueue.main.async { [weak self] in self?.applyScaleChange(change) }
+        } else {
+            governor.settle(at: now)
+        }
+    }
+
+    /// Step the capture resolution in place: the same `updateSource` a pan uses (#57), so the stream
+    /// is not torn down and the terminal never loses its picture (issue #64).
+    private func applyScaleChange(_ change: ScaleGovernor.Change) {
+        guard options.scaleAuto, let geometry, change.to != effectiveScale else { return }
+        effectiveScale = change.to
+        applyLayout(geometry: geometry)
+        Log.write("krd: \(change.line)\n")
+        panCapture()
     }
 
     private func applyLayout(geometry: TermGeometry) {
@@ -1493,9 +1619,12 @@ final class Desk {
             let panelRows = chromeState.panel?.height ?? 0
             paneGeometry.rows = max(3, paneGeometry.rows - 1 - min(panelRows, paneGeometry.rows - 4))
         }
+        // The source's own size, so the grid never asks for a box bigger than the source
+        // (issue #69: ScreenCaptureKit pads that with black instead of upscaling).
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
-                                   bpp: writer.format.bytesPerPixel)
+                                   bpp: writer.format.bytesPerPixel, scale: effectiveScale,
+                                   source: fullRect.size)
         if chromeEnabled {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
@@ -1508,7 +1637,9 @@ final class Desk {
         grid = layout
         sourceRect = crop
         previousFrame = []
-        viewport = Viewport(pixelWidth: layout.pixelW, pixelHeight: layout.pixelH,
+        // Pane pixels, not capture pixels: SGR-Pixels coordinates are the terminal's own grid, so
+        // `--scale 0.5` must not move the mapping by a factor of two (issue #60).
+        viewport = Viewport(pixelWidth: layout.panePixelW, pixelHeight: layout.panePixelH,
                             cols: layout.paneCols, rows: layout.paneRows, sourceRect: crop)
         stateLock.unlock()
     }
@@ -1542,17 +1673,63 @@ final class Desk {
         guard dx != 0 || dy != 0 else { return }
         zoomFocus = CGPoint(x: crop.midX + dx, y: crop.midY + dy)
         applyLayout(geometry: geometry)
-        restartCapture()
+        panCapture()
+    }
+
+    /// Move the crop of the running stream. `SCStream.updateConfiguration` re-crops in place, so a
+    /// pan costs one message instead of a stop/start cycle (issue #54): no freeze while the stream
+    /// re-negotiates, and the stop path -- the one that wedged in the #44 soak -- leaves the hot
+    /// path entirely. `restartCapture` is still the fallback if the update is refused.
+    private func panCapture() {
+        guard !cleanedUp, filter != nil, let layout = currentGrid() else { return }
+        if panInFlight {                              // coalesce: one update at a time
+            panPending = true
+            return
+        }
+        panInFlight = true
+        let rect = filterRect(for: currentCrop())
+        let width = layout.pixelW, height = layout.pixelH
+        Task { [weak self] in
+            guard let self else { return }
+            var result: Capturer.Update = .noStream
+            do {
+                result = try await self.capturer.updateSource(rect, width: width, height: height)
+            } catch {
+                Log.write("krd: could not move the capture window (\(error)); restarting it instead\n")
+            }
+            DispatchQueue.main.async {
+                if result == .changed {
+                    // The update owes us a frame; the watchdog checks that it arrives rather than
+                    // waiting for one to be "overdue" by the silence rule, which a still screen
+                    // never satisfies.
+                    self.expectFrameBy = Date().addingTimeInterval(self.FRAME_TIMEOUT)
+                    if self.options.debug {
+                        let crop = self.currentCrop()
+                        Log.write("pan: source \(Int(crop.width))x\(Int(crop.height)) pt -> "
+                            + "\(width)x\(height) px (update, no restart)\n")
+                    }
+                } else if result == .noStream, !self.cleanedUp {
+                    self.restartCapture(reason: "a refused in-place pan")
+                }
+                self.panInFlight = false
+                if self.panPending {
+                    self.panPending = false
+                    self.panCapture()
+                }
+            }
+        }
     }
 
     /// Restart the stream against the current filter and layout.
     ///
-    /// One path for both triggers: a terminal resize and a display-set change (and the zoom
-    /// follow, which is the same operation with a different reason). `captureRestarting` keeps
-    /// two of them from starting a stream at the same time; the loser is queued, not dropped.
-    private func restartCapture(reason: String = "a zoom pan") {
+    /// This is the path for the triggers that really change the filter or the layout: a terminal
+    /// resize, a display-set change, a recovery restart, and the fallback when an in-place pan is
+    /// refused. A zoom *pan* does not come through here any more (issue #54): it re-crops the
+    /// running stream with `Capturer.updateSource`. `captureRestarting` keeps two restarts from
+    /// starting a stream at the same time; the loser is queued with its reason, not dropped.
+    private func restartCapture(reason: String = "a restart") {
         guard let filter, let layout = currentGrid(), !cleanedUp else { return }
-        if captureRestarting { restartPending = true; return }
+        if captureRestarting { restartPending = true; pendingRestartReason = reason; return }
         captureRestarting = true
         restartStartedAt = Date()
         let crop = cropForFilter()
@@ -1570,7 +1747,7 @@ final class Desk {
             self.captureRestarting = false
             if self.restartPending {
                 self.restartPending = false
-                self.restartCapture()
+                self.restartCapture(reason: self.pendingRestartReason ?? reason)
             }
         }
     }
@@ -1593,6 +1770,26 @@ final class Desk {
     /// while the app keeps running (pid alive, window gone — clicks would land on another window of
     /// that app or nowhere). Both downgrade to global injection, which the reader logs once.
     /// The window query is one entry, human-paced: a drag is tens of events per second, not thousands.
+    /// Which window the window server would deliver a click at `point` to: the first on-screen window
+    /// whose bounds contain it, since the list comes back front to back.
+    private func topmostWindow(at point: CGPoint) -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for entry in list {
+            // Only normal app windows: the Dock's own 1920x1200 window sits at layer 20 and would
+            // swallow every hit test otherwise.
+            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+                  let number = entry[kCGWindowNumber as String] as? Int,
+                  (entry[kCGWindowLayer as String] as? Int ?? 0) == 0,
+                  let x = bounds["X"] as? Double, let y = bounds["Y"] as? Double,
+                  let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double else { continue }
+            if CGRect(x: x, y: y, width: w, height: h).contains(point) {
+                return CGWindowID(number)
+            }
+        }
+        return nil
+    }
+
     private func aliveWindowPid() -> pid_t? {
         guard let target = windowTarget else { return nil }
         guard kill(target.pid, 0) == 0 else { return nil }
@@ -1604,6 +1801,7 @@ final class Desk {
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
         framesHandled += 1
+        let emittedBefore = writer.framesEmitted
 
         // A window mirror whose very first frame is essentially all black is almost certainly a
         // compositing layer that slipped past the layer test, not an app (issue #24). One line,
@@ -1626,7 +1824,13 @@ final class Desk {
         }
         // capture callback -> last byte out: the number that is actually felt (Q4 in
         // docs/BENCHMARK.md). `defer` so every early return is measured too.
-        defer { lastPipeMs = benchNowMs() - started }
+        defer {
+            lastPipeMs = benchNowMs() - started
+            // A deduped frame writes nothing, so it says nothing about the pipe (issue #64).
+            if writer.framesEmitted != emittedBefore {
+                noteFrame(writeMs: writer.lastWriteMs)
+            }
+        }
         guard let grid = currentGrid() else { return }
         guard width == grid.pixelW, height == grid.pixelH else {
             if !reportedFrameMismatch {
@@ -1679,10 +1883,10 @@ final class Desk {
             DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
                 let index = dirty[i]
                 let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
-                let level = writer.level(for: index)
+                let plan = writer.plan(for: index)
                 base[i] = ScreenWriter.compress(index: index, rect: rect,
                                                 pixels: grid.extract(pixels, rect: rect),
-                                                level: level)
+                                                level: plan.level, quantise: plan.quantise)
             }
         }
         writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
@@ -1690,7 +1894,7 @@ final class Desk {
         // Assembly stays serial: the escapes must reach the pty in a deterministic order.
         for case let tile? in packed {
             writer.emit(tile, sync: writer.perTileSync)
-            writer.observe(index: tile.index, ratio: tile.ratio)
+            writer.observe(index: tile.index, ratio: tile.ratio, quantisedIn: tile.isQuantised)
         }
         writer.endFrame()
     }
@@ -1762,8 +1966,13 @@ final class Desk {
             let layout = self.currentGrid()
             let tiles = frames - lastFrames
             let mbps = Double(bytes - lastBytes) / 1_048_576.0
+            // Frames the write side could not keep up with, since the previous tick (issue #64).
+            let late = self.lateSinceTick
+            let seen = self.framesSinceTick
+            self.lateSinceTick = 0
+            self.framesSinceTick = 0
             let line = String(
-                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f max=%.0f over5=%d]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d pipe=%.1f\n",
+                format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  ms[zlib=%.0f write=%.0f max=%.0f over5=%d]  %dx%d px %dx%d cells  cap=%d/%d/%d idle=%d bad=%d pipe=%.1f late=%d/%d\n",
                 tiles,
                 self.lastDirtyCount,
                 writer.lastFrameBytes / 1024,
@@ -1773,7 +1982,7 @@ final class Desk {
                 layout?.paneCols ?? 0, layout?.paneRows ?? 0,
                 capturer.framesDelivered, capturer.framesSkipped, capturer.callbacks,
                 capturer.idleFrames, capturer.badFrames,
-                self.lastPipeMs
+                self.lastPipeMs, late, frames
             )
             Log.write(line)
             statsJSON?.write(tiles: tiles, dirty: self.lastDirtyCount, kb: writer.lastFrameBytes / 1024,
@@ -1783,7 +1992,8 @@ final class Desk {
                              cells: (layout?.paneCols ?? 0, layout?.paneRows ?? 0),
                              delivered: capturer.framesDelivered, skipped: capturer.framesSkipped,
                              callbacks: capturer.callbacks, idle: capturer.idleFrames,
-                             bad: capturer.badFrames, pipeMs: self.lastPipeMs)
+                             bad: capturer.badFrames, pipeMs: self.lastPipeMs,
+                             late: late, frames: seen, scale: self.effectiveScale)
             writer.resetWriteStats()
             lastBytes = bytes
             lastFrames = frames
@@ -1971,6 +2181,8 @@ final class Desk {
         }
         if let target = windowTarget {
             reader.targetPid = { [weak self] in self?.aliveWindowPid() }
+            reader.targetWindow = { [weak self] in self?.windowTarget?.id }
+            reader.topmostWindow = { [weak self] point in self?.topmostWindow(at: point) }
             if options.debug {
                 Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
                           + "window \(target.id); a closed window falls back to global injection\n")

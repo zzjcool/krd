@@ -21,7 +21,7 @@ Measured, on the reference layout (2329×1452 px, 198 tiles):
 | option | wire per frame | vs today | quality | protocol change |
 |---|---:|---:|---|---|
 | today: `--format rgb`, zlib, base64 | 13.58 MB | 1.00× | lossless | — |
-| skip zlib when it does not pay | 13.57 MB | 1.00× | lossless | none (saves 137 ms of CPU) |
+| skip zlib when it does not pay | 13.57 MB | 1.00× | lossless | none — **shipped in #53** (saves 73 % of the encode CPU) |
 | 18-bit colour (6-6-6) before zlib | 10.53 MB | 1.47× | 42.3 dB (visually lossless) | none |
 | **16-bit colour (5-6-5) before zlib** | **9.90 MB** | **1.57×** | 36.5 dB (banding on ramps) | none |
 | 15-bit (5-5-5) | 9.00 MB | 1.72× | 35.3 dB | none |
@@ -275,16 +275,28 @@ The point is 13.58 → 2.49 MB, which is the difference between "cannot" and "wo
 **Recommendation: B (cheaper pixels), content-adaptive, then A — which turns out to mean "fewer
 pixels".** Not a video codec; not a protocol extension.
 
-- **M1 — stop wasting work (a day).** Skip zlib when the payload is not smaller than its input, per
-  tile. Removes 73 % of the encode CPU on this content, costs nothing on text. Also re-tune the bench
-  so the `photo` case is honest about being a worst case (a second case with photographic statistics).
-- **M2 — content-adaptive 16-bit (a few days).** Per tile: keep the zlib ratio of the last frame; if
-  a tile has been incompressible (> 1.05) for two frames, send it 5-6-5 from then on, and remember
-  that until it compresses well again. No flag needed for the common case, `--format`-style override
-  for people who want lossless. Expected: 13.58 → 9.90 MB on the worst case, 6.32 → 1.27 MB on a
-  photograph, with the text path bit-identical.
-- **M3 — capture scale (a few days).** `--scale 1|0.5|0.25` on the capture side, then a simple
-  "if the pipe cannot keep up, drop scale before dropping fps" policy. Composes with M2.
+- **M1 — stop wasting work (a day).** ✅ **shipped in #53** (`LevelPolicy` keeps one more state bit:
+  a tile whose last compression bought nothing is sent raw, and a cheap neighbour-delta predictor
+  rescues it the moment the content becomes compressible again). Measured on the `photo` case at the
+  reference layout: encode p50 **9.27 → 3.18 ms** (−66 %), wire **4,757,652 → 4,755,012 B** (raw beat
+  the zlib-expanded payload). Text/UI/gradient bytes are unchanged. The second half of this milestone
+  is shipped too: since #59 the encoder quantises to 5-6-5 first, and **#65 added the `photoReal`
+  case** that measures it on content with photographic statistics instead of hash noise. On the
+  pinned layout that case is **5,318,797 B payload / 7,124,315 B wire** losslessly at ratio 0.70, and
+  quantising takes it to 0.33 — a **2.14× gain against 1.29× on hash noise**, which is the number
+  that says whether the trick was worth it.
+- **M2 — content-adaptive 16-bit.** ✅ **shipped in #59**, with one correction to the plan above:
+  **it does not need a 16-bit wire format.** Quantising to 5-6-5 and still sending 3 bytes per pixel
+  is enough, because the low bits are what made the bytes incompressible — zlib then finds the
+  structure. Measured on the `photo` case at the reference layout: wire **13,572,455 → 10,523,552 B**
+  (**1.29×**, matching the arithmetic below), on photographic statistics **2.27×**, text/UI bytes
+  unchanged, cost ~37 dB PSNR and encode p50 8.6 → 15.8 ms. See `docs/ENCODING.md` for the mechanism.
+- **M3 — capture scale.** ✅ **shipped in #60**: `--scale 1|0.5|0.25` multiplies the capture's output
+  pixel size only — `sourceRect`, the placement's cell box and the input mapping are untouched.
+  `krd --bench`: wire 13,572,455 → **3,406,310 B** at 0.5 (**3.98×**) → **863,165 B** at 0.25
+  (**15.7×**); live typing session at 60×19 cells: 250.7 → 65.2 KB/s (**3.85×**) and CPU 15.9 % → 6.1 %.
+  Together with M2 that puts the colour-heavy case at **68 MB/s at 20 fps**, inside a local pty's
+  103 MB/s. Still open from this milestone: the "drop scale before dropping fps" policy.
 - **M4 — only if a terminal asks for it.** A 16-bit or YUV wire format. Needs kitty/Ghostty/Herdr
   buy-in; do not start it inside krd.
 

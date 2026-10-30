@@ -177,9 +177,14 @@ were found by the 30-minute soak ([TESTING §11](TESTING.md#11-soak-thirty-minut
 
 - `didStopWithError` restarts the stream, at most five times with 1-2-4-8-8 s backoff, one log line
   per attempt.
-- A watchdog (`KRD_STREAM_WATCHDOG`, 15 s, `0` off) restarts when no frame callback arrives.
-  A still screen is not silence: SCK sends `.idle` frames at the refresh rate, so 15 s of nothing is
-  the stream, not the content.
+- **A frame we asked for is owed.** After a pan (`updateSource`) or a restart, a watchdog checks
+  that a frame arrives within 3 s (the probe measured p50 42 ms) and restarts the stream if not. That
+  is precise, because krd knows what it asked for.
+- **Silence on its own means nothing** and this is measured, not assumed: on a still desktop
+  ScreenCaptureKit sends *no* frames at all (0 frames in a 1 s window, and 56 s gaps between pointer
+  sweeps in a 10-minute soak). An earlier version of this watchdog took "no frames for 15 s" as
+  death and restarted a healthy stream three times in five minutes. The long-silence rule is
+  therefore opt-in: `KRD_STREAM_WATCHDOG=<seconds>`, default `0` (off).
 - `Capturer.stop()` gives up after 2 s. `stopCapture()` on an already-dead stream never calls back on
   macOS 26, and `restartCapture` awaits it before clearing "a restart is in flight", so a single hung
   stop would wedge every later restart. The retry budget is earned back by *frames arriving*, not by
@@ -276,11 +281,20 @@ Three consequences worth knowing:
    slightly upscaled — full density is reached at `displayPixels / panePixels`, not at infinity.
 
 `--zoom-follow` pans the crop when the pointer enters the outer 15 % band of the picture, and only
-far enough to put it back on that edge (pan, not chase). Panning restarts the stream, because the
-crop is a capture-side setting: it clears `previousFrame` (one full repaint) and takes the
-`capturer.stop()`/`start()` round trip. That is the price of not paying for the full frame every
-frame; `KRD_ZOOM_GLOBAL_RECT=1` exists because a display filter on a secondary display may want
-global points instead of filter-relative ones.
+far enough to put it back on that edge (pan, not chase). A pan calls `SCStream.updateConfiguration`
+with the new `sourceRect` (`Capturer.updateSource`) instead of stopping and starting the stream: the
+picture keeps coming, no re-negotiation, and the stop/start path stays off the hot path entirely.
+It still clears `previousFrame` (the new crop is a new picture, so one full repaint), and the first
+frame after an update can still be the *old* crop because it was already in flight — measured in
+`probe/zoom_update_probe.swift`: it settles within one or two frames, p50 42 ms end to end, and a
+pan must count as stream activity so the frame watchdog does not read it as silence.
+A pan that asks for the rect the stream already has is skipped (`Capturer.Update.unchanged`): the
+crop is clamped at the display edge, so a pointer parked in a corner would otherwise send the same
+configuration four times a second, and an unchanged configuration produces no frame — which a caller
+waiting for one reads as a dead stream.
+`KRD_ZOOM_GLOBAL_RECT=1` exists because a display filter on a secondary display may want global
+points instead of filter-relative ones. Startup (`--zoom` / `--zoom-at`), a terminal resize and a
+display-set change still restart the stream: their filter or layout genuinely changes.
 
 
 Worked example — the configuration all the measurements use:
@@ -343,7 +357,7 @@ which is why §7.6 exists.
 | `--dry-run` | `InputReader(dryRun:)`: parse and log, never call `CGEvent.post` |
 | `--zoom <f>` | `applyLayout` → `Viewport.crop`; `Capturer.start(sourceRect:)` crops on the capture side |
 | `--zoom-at <x,y>` | `configureSource`: the focus the crop is centred on, in global points |
-| `--zoom-follow` | `followPointerIfNeeded`: pans the crop at the 15 % band, then restarts the stream |
+| `--zoom-follow` | `followPointerIfNeeded`: pans the crop at the 15 % band, then `Capturer.updateSource` (`updateConfiguration`, no restart) |
 | `--selftest` | `runSelfTest(layout:)`: synthetic frames (in the active `--format`) through the real `handleFrame`/`emit` |
 | `--bench` | `Bench.runStages`: dedupe → dirty → extract → zlib → base64 → escapes, staged timings, `--json` |
 | `--bench-wire` | `Bench.runWire`: one case at `--fps` through the real `handleFrame`, per-frame JSON on stderr |

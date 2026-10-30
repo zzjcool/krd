@@ -55,6 +55,8 @@ struct BenchConfig {
     var tiles: Int
     var rounds: Int
     var source: String
+    /// Capture scale (`--scale`): the picture is `px` pixels at this fraction of the pane's pixels.
+    var scale: String
     var machine: String
     var arch: String
     var cores: Int
@@ -74,6 +76,7 @@ struct BenchConfig {
             tiles: layout.count,
             rounds: rounds,
             source: "\(Int(source.width))x\(Int(source.height))",
+            scale: number(layout.scale),
             machine: sysctlString("hw.model"),
             arch: unameField(&uts.machine),
             cores: ProcessInfo.processInfo.activeProcessorCount,
@@ -88,7 +91,8 @@ struct BenchConfig {
         {"schema":1,"krd":"\(krdVersion)","build":"\(build)",\
         "machine":{"model":"\(machine)","arch":"\(arch)","cores":\(cores),"os":"\(os)"},\
         "config":{"pane":"\(pane)","cell":"\(cell)","tile":"\(tile)","format":"\(format)",\
-        "px":"\(px)","tiles":\(tiles),"rounds":\(rounds),"source":"\(source)"}}
+        "px":"\(px)","tiles":\(tiles),"rounds":\(rounds),"source":"\(source)",
+        "scale":\(scale)}}
         """
     }
 }
@@ -122,6 +126,20 @@ enum BenchContent: String, CaseIterable {
     case ui
     /// Smooth ramp: video pans and wallpapers; compresses well but costs zlib time.
     case gradient
+    /// A photograph, statistically: low-frequency structure plus a little grain. `noise` is the
+    /// worst case for compression and a poor model of the thing people actually mirror (issue #65).
+    case photoReal
+
+    /// Triangle wave in 0...255: the low-frequency structure a photograph has and hash noise does
+    /// not. Integer arithmetic on purpose -- `sin()` would make the bytes depend on the platform's
+    /// libm, and this case's whole value is that it is reproducible.
+    private static func wave(_ v: Int, period: Int, phase: Int) -> Int {
+        let p = ((v + phase) % period + period) % period
+        let half = max(period / 2, 1)
+        return (p < half ? p : period - p) * 255 / max(half - 1, 1)
+    }
+
+    private static func clamp8(_ v: Int) -> UInt8 { UInt8(min(255, max(0, v))) }
 
     /// `seed` shifts the pattern, so a "full repaint" round can differ from the previous one
     /// in every pixel without having to be rebuilt from a different generator.
@@ -144,6 +162,24 @@ enum BenchContent: String, CaseIterable {
             let border = (x + seed * 3) % 64 < 2 || (y + seed) % 48 < 2
             let base = UInt8(210 + block * 8)
             return border ? (90, 100, 120) : (base, base, UInt8(min(255, Int(base) + 6)))
+        case .photoReal:
+            // Luminance from two low-frequency waves (a photograph's structure), a gentle colour
+            // cast, and +-4 grain. Channels are *correlated* on purpose: that is what a real
+            // photograph has and hash noise does not, and it is what makes this case compress
+            // losslessly while `photo` cannot.
+            let lum = (Self.wave(x &* 2 &+ y, period: 2329, phase: seed &* 13) * 2
+                       + Self.wave(y &* 2 &+ x / 3, period: 1452, phase: seed &* 7)) / 3
+            let tint = (Self.wave(x &+ y &* 2, period: 1747, phase: seed &* 29) - 128) / 6
+            // Grain from an integer hash. Frozen constants, no RNG state, no clock: this is the
+            // whole determinism story for this case (two runs must be byte-identical).
+            var h = UInt32(truncatingIfNeeded: x &* 374_761_393)
+                ^ UInt32(truncatingIfNeeded: y &* 668_265_263)
+                ^ UInt32(truncatingIfNeeded: (seed &* 2_246_822_519) & 0x7fff_ffff)
+            h ^= h >> 15; h = h &* 2_246_822_519; h ^= h >> 13
+            let grain = Int(h % 21) - 10
+            return (Self.clamp8(lum + tint + grain),
+                    Self.clamp8(lum + grain),
+                    Self.clamp8(lum - tint + grain))
         case .gradient:
             let v = UInt8(truncatingIfNeeded: ((x + seed * 40) % 2329) * 255 / 2329)
             let w = UInt8(truncatingIfNeeded: ((y + seed * 20) % 1452) * 255 / 1452)
@@ -272,6 +308,8 @@ func benchCases(_ grid: TileGrid) -> [BenchCase] {
                   }),
         BenchCase(name: "photo", content: .noise, tiles: .exactlyAll,
                   patch: { px, grid, k in px = benchMakeFrame(grid, .noise, seed: k + 1) }),
+        BenchCase(name: "photoReal", content: .photoReal, tiles: .exactlyAll,
+                  patch: { px, grid, k in px = benchMakeFrame(grid, .photoReal, seed: k + 1) }),
         BenchCase(name: "gradient", content: .gradient, tiles: .exactlyAll,
                   patch: { px, grid, k in px = benchMakeFrame(grid, .gradient, seed: k + 1) }),
         BenchCase(name: "ui", content: .ui, tiles: .exactlyAll,
@@ -384,7 +422,7 @@ enum Bench {
                     tiles = 0
                 } else {
                     let rects = dirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
-                    let levels = dirty.map { writer.level(for: $0) }
+                    let plans = dirty.map { writer.plan(for: $0) }
 
                     // What the live path does: compress the dirty tiles on all cores.
                     var packed = [CompressedTile?](repeating: nil, count: dirty.count)
@@ -394,7 +432,8 @@ enum Bench {
                         DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
                             let pixels = layout.extract(px, rect: rects[i])
                             base[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
-                                                            pixels: pixels, level: levels[i])
+                                                            pixels: pixels, level: plans[i].level,
+                                                            quantise: plans[i].quantise)
                         }
                     }
                     parallelMsRound = benchNowMs() - parallelStart
@@ -403,7 +442,8 @@ enum Bench {
                     withUnsafeMutablePointer(to: &timing) { timingPtr in
                         for case let tile? in packed {
                             writer.emit(tile, sync: writer.perTileSync, timing: timingPtr)
-                            writer.observe(index: tile.index, ratio: tile.ratio)
+                            writer.observe(index: tile.index, ratio: tile.ratio,
+                                           quantisedIn: tile.isQuantised)
                         }
                     }
                     b64 = timing.base64Ms
@@ -430,7 +470,7 @@ enum Bench {
             // timer cannot add up per-tile costs without a lock.
             if serial, !lastDirty.isEmpty {
                 let rects = lastDirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
-                let levels = lastDirty.map { writer.level(for: $0) }
+                let plans = lastDirty.map { writer.plan(for: $0) }
                 var best = Double.infinity, bestExtract = 0.0, bestZlib = 0.0
                 for _ in 0..<3 {
                     var extract = 0.0, zlib = 0.0
@@ -440,7 +480,7 @@ enum Bench {
                         let pixels = layout.extract(lastFrame, rect: rects[i])
                         let t1 = benchNowMs()
                         _ = ScreenWriter.compress(index: lastDirty[i], rect: rects[i],
-                                                  pixels: pixels, level: levels[i])
+                                                  pixels: pixels, level: plans[i].level, quantise: plans[i].quantise)
                         let t2 = benchNowMs()
                         extract += t1 - t0; zlib += t2 - t1
                     }
@@ -637,17 +677,17 @@ final class StatsJSONWriter {
     func write(tiles: Int, dirty: Int, kb: Int, mbps: Double, zlibMs: Double, writeMs: Double,
                writeMaxMs: Double, writeOver5: Int, px: (Int, Int), cells: (Int, Int),
                delivered: Int, skipped: Int, callbacks: Int, idle: Int, bad: Int,
-               pipeMs: Double) {
+               pipeMs: Double, late: Int = 0, frames: Int = 0, scale: Double = 1) {
         guard let handle else { return }
         let line = String(
             format: "{\"t\":%.2f,\"tiles\":%d,\"dirty\":%d,\"kb\":%d,\"mbps\":%.3f,"
                 + "\"zlib_ms\":%.2f,\"write_ms\":%.2f,\"write_max_ms\":%.2f,\"write_over5\":%d,"
                 + "\"px\":[%d,%d],\"cells\":[%d,%d],"
                 + "\"delivered\":%d,\"skipped\":%d,\"callbacks\":%d,\"idle\":%d,\"bad\":%d,"
-                + "\"pipe_ms\":%.2f}\n",
+                + "\"pipe_ms\":%.2f,\"late\":%d,\"frames\":%d,\"scale\":%.3f}\n",
             (benchNowMs() - started) / 1000.0, tiles, dirty, kb, mbps, zlibMs, writeMs,
             writeMaxMs, writeOver5, px.0, px.1, cells.0, cells.1,
-            delivered, skipped, callbacks, idle, bad, pipeMs)
+            delivered, skipped, callbacks, idle, bad, pipeMs, late, frames, scale)
         handle.write(Data(line.utf8))
     }
 }

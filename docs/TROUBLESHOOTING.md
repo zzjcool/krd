@@ -105,8 +105,13 @@ If that fixes it, the terminal's `?2026` handling is the bug — note it in the 
 **Cause.** `TIOCGWINSZ` returned `0` for `ws_xpixel`/`ws_ypixel` (typical for sshd-created ptys and
 for panes that have not been laid out yet), so the cell size had to be guessed.
 **Fix.** Three-level fallback: `CSI 16 t` + `CSI 14 t` query (250 ms) → `TIOCGWINSZ` on stdout,
-stdin, `/dev/tty` → `--cell <w>x<h>` (default `8x20`). If your terminal answers neither query,
-pass the real cell size explicitly, e.g. `--cell 17x33`.
+stdin, `/dev/tty` → `--cell <w>x<h>` (default `8x20`). A terminal that answers **only** `CSI 14 t`
+(window size) is enough: the cell is derived as window ÷ grid, so the picture still matches the pane
+exactly (issue #56 — before that, such a terminal was treated as answering nothing and an 80x24 pane
+came out at 640x480). `--debug` prints which question was answered:
+`krd: geometry source CSI 16t+14t`, `CSI 14t (cell derived)`, `--cell` or `TIOCGWINSZ`. If your terminal answers neither query, the log
+says the consequence (`the image will be WxH for a CxR pane`) and you pass the real cell size
+explicitly, e.g. `--cell 17x33`.
 
 ### 11. Startup hangs: no output at all, process sits there
 
@@ -447,11 +452,15 @@ coordinate space (it takes global screen points, the same space as `CGEvent.loca
 
 ### 41. `--zoom-follow` stutters while dragging
 
-**Cause.** By design: panning moves the crop, and the crop is a *capture-side* setting, so the
-stream has to be restarted (`capturer.stop()` + `start()`) and the next frame is a full repaint.
-**Fix.** Nothing to fix — use `--zoom-at` for a fixed view when smooth panning matters, or zoom out
-one step so the pointer stays inside the visible rect for the whole drag. If the restart fails, the
-log says `krd: could not restart capture after a zoom pan: …` and the picture keeps the old crop.
+**Cause.** Two things, and only one of them is still true. Since #54 a pan is an
+`SCStream.updateConfiguration` (`Capturer.updateSource`), not a `stop()`/`start()` cycle, so the
+stream is not re-negotiated any more and the picture keeps coming. What remains by design: the new
+crop is a new picture, so the next frame is a full repaint (every tile dirty), and the first frame
+after the update can still be the old crop because it was already in flight.
+**Fix.** Nothing to fix — use `--zoom-at` for a fixed view when even a full repaint matters, or zoom
+out one step so the pointer stays inside the visible rect for the whole drag. If the update is
+refused, the log says `krd: could not move the capture window (…); restarting it instead` and krd
+falls back to the old stop/start path.
 
 ### 42. `krd ax press @e7` says the ref is stale, or "no snapshot holds @e7"
 
@@ -537,6 +546,36 @@ stream looks like from outside, and it writes a stack sample (`<work>/sample.txt
 that happens.
 
 If the picture freezes with **no** `capture stopped` line at all, you are seeing the quiet variant
-(no error callback, frames just stop). krd's frame watchdog restarts the stream after 15 s of
-silence — `KRD_STREAM_WATCHDOG=<seconds>` changes that, `0` turns it off — and the state of that
-investigation is in [TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on).
+(no error callback, frames just stop). Note that a *still* screen also produces no frames at all —
+that is normal, not a hang (measured: 0 frames in 1 s). What krd does watch is the frame it asked
+for: after a pan or a restart no frame for 3 s means a restart. For the older "no frames at all"
+rule, set `KRD_STREAM_WATCHDOG=<seconds>` (it is off by default, precisely because a quiet desktop
+trips it). The state of that investigation is in
+[TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on).
+
+### 48. `--window` shows black bands, and clicks land to the left of where I click
+
+Both halves were one bug (issue #69): the capture size came from the pane's box, and when that box is
+larger than the window ScreenCaptureKit does **not** upscale — it draws the window 1:1 in the top-left
+and pads the rest with black (31.8 % of the frame in a 70×24 pane on a 1024×678 window). The pointer
+was mapped across the whole padded box, so a click near the right edge of the picture was sent ~143 pt
+to its left.
+
+The frame is now the source at `min(boxW/srcW, boxH/srcH, 1)` px, placed in `ceil` cells anchored at
+the pane's top-left; the cells it does not reach are the terminal's own background, and a click there
+is ignored instead of guessed. `--debug` says which case you are in:
+
+```
+krd: source 1024x678 pt -> 1024x678 px in 61x21 cells (the source is smaller than the pane box:
+     1024x678 px at 1:1, 27x9 cells left to the terminal)
+```
+
+A window you *do* see a black band in after this is a window whose own content is black — check with
+`--record` and an image viewer rather than by eye on a phone-photo of the screen.
+
+Clicks in `--window` mode also had a second, unrelated failure on macOS 26: `CGEvent.postToPid`
+delivers keyboard events but silently drops **mouse** events (Safari and TextEdit both ignore them), so
+a mirrored window could not be clicked at all. krd now posts mouse events through the global tap while
+the mirrored window is the one on top at the pointer (`--debug` says
+`-> global tap (the mirrored window is on top)`), and keeps the pid path for a window that is covered
+(issue #17).
