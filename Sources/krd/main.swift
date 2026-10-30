@@ -674,6 +674,10 @@ final class Desk {
     /// its cells, so a tile's pixel count is sharpness and `--scale`/`--quality` stop moving the
     /// picture. Decided once, from `--placeholders` or from one probe of the terminal.
     private var placeholderTiles = false
+    /// `placeholderTiles` *and* a terminal that draws one image pixel per device pixel: the frame has
+    /// to be the picture's cell box there (`Desk.placeholderNeedsCellBox`, issue #86). Read by
+    /// `applyLayout`, which is also what a resize and a scale change go through.
+    private var placeholderFillsCells = false
     private var wallCanvas: WallCanvas?
     private var wallModel = WallModel()
     private var wallTimer: DispatchSourceTimer?
@@ -829,22 +833,40 @@ final class Desk {
         } else if !(options.bench || options.selftest) {
             placeholderTiles = TermGeometry.supportsPlaceholders() == true
         }
+        let deviceCell = Self.cellIsInDevicePixels(options)
         if Self.scaleNeedsPixelPlacements(placeholdersForced: options.placeholders,
                                           pinnedScale: options.scalePinned ? options.scale : nil,
-                                          deviceCell: Self.cellIsInDevicePixels(options)) {
+                                          deviceCell: deviceCell) {
             placeholderTiles = false
             Log.write("krd: --scale \(String(format: "%g", options.scale)) on a terminal that draws one image "
                       + "pixel per device pixel:\n"
                       + "         pixel placements, because a placeholder grid cannot stretch a smaller "
                       + "frame into its cells\n")
         }
+        // ...and the other half of the same question: on that terminal the frame has to *be* the
+        // cells, because a short one is a seam at every tile column (issue #86). See the helper for
+        // why a terminal that stretches its images keeps `--scale`.
+        placeholderFillsCells = Self.placeholderNeedsCellBox(placeholders: placeholderTiles,
+                                                             deviceCell: deviceCell)
         if options.debug || options.placeholders != nil {
             Log.write("krd: tiles as \(placeholderTiles ? "unicode placeholders (U=1)" : "pixel-sized placements")\n")
         }
         // One place decides the starting scale, for every path below -- live, --mock, --bench.
         // (It used to be set inside the live capture setup only, so `--mock --scale 0.5` quietly
         // drew at 1.)
-        effectiveScale = options.scale
+        //
+        // A frame that has to be the cell box has no pixels to give away, so the scale in force is 1
+        // - what the debug line and the status bar report, and what `TileGrid.make(fillsCells:)`
+        // enforces. When a scale below 1 survives the transport switch only because `--placeholders`
+        // was typed, it is said out loud instead of being applied halfway.
+        let scaleClampedByPlaceholders = placeholderFillsCells && options.scale < 0.999
+        effectiveScale = scaleClampedByPlaceholders ? 1 : options.scale
+        if scaleClampedByPlaceholders {
+            Log.write("krd: --scale \(String(format: "%g", options.scale)) is not applied: a placeholder frame on "
+                      + "this terminal is the picture's cell box,\n"
+                      + "         and fewer pixels than that is a seam at every tile column. "
+                      + "--no-placeholders captures at \(String(format: "%g", options.scale))\n")
+        }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
         if let dir = options.replay, options.bench {
             try await runReplay(dir: dir, discard: true)
@@ -1148,7 +1170,7 @@ final class Desk {
                    : "")
                 + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells"
                 + (options.scaleAuto ? " (scale auto, \(ScaleGovernor.show(effectiveScale)))"
-                   : options.scale < 1 ? " (scale \(ScaleGovernor.show(options.scale)))" : "")
+                   : effectiveScale < 1 ? " (scale \(ScaleGovernor.show(effectiveScale)))" : "")
                 + layout.fitNote
                 + ", \(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
             Log.write(message)
@@ -1570,6 +1592,20 @@ final class Desk {
             return false
         }
         return true
+    }
+
+    /// Whether the placeholder transport has to be given the picture's whole cell box (issue #86).
+    ///
+    /// WHY this is a second question and not part of `scaleNeedsPixelPlacements`: a placeholder grid
+    /// drawn one image pixel per device pixel cannot stretch a smaller frame back into its cells, so
+    /// there the frame *is* the cell box and `--scale` has no pixels to give away (a short tile is a
+    /// column of background at its right edge - measured on Rex as 14 vertical seams at `--scale
+    /// 0.8`). A terminal whose cell arrived in *points* draws the image at its own size and scales it
+    /// into the cells, so `--scale` stays what it always was there: bandwidth, not geometry
+    /// (`ScaleTransportTests.testATerminalThatStretchesKeepsPlaceholders`). Pure, so the one decision
+    /// is a test rather than a screenshot.
+    static func placeholderNeedsCellBox(placeholders: Bool, deviceCell: Bool) -> Bool {
+        placeholders && deviceCell
     }
 
     /// Whether the cell reached us in *device* pixels - the pty answered `ws_xpixel`, or the operator
@@ -2366,6 +2402,7 @@ final class Desk {
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
                                    bpp: writer.format.bytesPerPixel, scale: effectiveScale,
+                                   fillsCells: placeholderFillsCells,
                                    source: Viewport.layoutSource(crop: crop, full: fullRect),
                                    area: area)
         // `chromeAvailable`, not `chromeEnabled`: the bar alone is enough reason to lay the chrome

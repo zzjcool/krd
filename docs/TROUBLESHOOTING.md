@@ -328,6 +328,7 @@ the wall caps its request and upscales itself; two transports, two rules.
 | what you see | what it means |
 |---|---|
 | thin seams **every tile row** (10 rows → 9 lines), evenly spaced | frame shorter than the cell box: `grid wants` and `frame` disagree in the log |
+| thin seams **every tile column** (15 columns → 14 lines) at exactly one tile width's spacing, vertical only | each tile's image is narrower than the cells it sits on. Check `s=` against `c=` in a `KRD_DUMP`: on the placeholder transport `s` must be `c` x the cell - a frame below the cell box (`--scale < 1` on a terminal that draws one image pixel per device pixel) or a fractional cell used to break that (issue #86). A gap that survives a full repaint is not this one: a repaint re-places every tile at the same rects, so only a stale placement is what a resize clears |
 | seams only at the picture's right/bottom edge | the whole picture is short, not per tile: the placement is smaller than the box (§23e) |
 | one black band along one edge | aspect mismatch, which is the terminal's own cells - not a seam |
 | seams in **both** directions (14 vertical + 9 horizontal on a 118x38-cell page), picture "cut up" | this is `--scale < 1` on a terminal that draws one image pixel per device pixel: every tile shows at `scale` of its slot. The placeholder grid cannot stretch; the pixel placement path can. `--scale < 1` now picks it automatically (`ScaleTransportTests`); run `--no-placeholders` by hand if you have an older build |

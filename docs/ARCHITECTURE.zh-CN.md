@@ -212,8 +212,8 @@ if rows > geometry.rows { rows = geometry.rows
                           cols = round(rows * cellH * aspect / cellW) }
 cols = clamp(cols, tileCols, geometry.cols)        // 至少容得下一块瓦片
 rows = clamp(rows, tileRows, geometry.rows)
-pixelW = max(2, round(cols * cellW))               // SCStream 的输出尺寸
-pixelH = max(2, round(rows * cellH))
+pixelW = max(2, round(cols * cellW * scale))       // SCStream 的输出尺寸
+pixelH = max(2, round(rows * cellH * scale))
 ```
 
 `TileGrid.rect(tx, ty)` 同时给出瓦片的像素矩形和它的放置占位：
@@ -221,8 +221,8 @@ pixelH = max(2, round(rows * cellH))
 ```
 cx = min(tileCols, paneCols - tx*tileCols)         // 这块瓦片有几格宽（边缘瓦片更小）
 cy = min(tileRows, paneRows - ty*tileRows)
-x0 = round(tx*tileCols * cellW);  x1 = round((tx*tileCols + cx) * cellW)
-y0 = round(ty*tileRows * cellH);  y1 = round((ty*tileRows + cy) * cellH)
+x0 = round(tx*tileCols * cellW * scale);  x1 = round((tx*tileCols + cx) * cellW * scale)
+y0 = round(ty*tileRows * cellH * scale);  y1 = round((ty*tileRows + cy) * cellH * scale)
 → (x0, y0, max(1,x1-x0), max(1,y1-y0), col: originCol+tx*tileCols, row: originRow+ty*tileRows,
    cols: cx, rows: cy)
 ```
@@ -233,6 +233,12 @@ y0 = round(ty*tileRows * cellH);  y1 = round((ty*tileRows + cy) * cellH)
 
 四舍五入只发生在矩形边界上，所以瓦片正好铺满画面，既不留缝也不重叠；`cols`/`rows` 永远是整数格，
 因此任何 placement 都不需要亚格偏移，终端也不需要重采样。
+
+这两条边界只由 `格子 × 格子尺寸` 算出来，所以一块瓦片的像素矩形**就是**它自己那块格子（用自己的边界算
+`x1 - x0`，而不是按比例切帧）。这正是终端不能原谅的另一半：按“一图素一设备像素”画的终端没办法拉
+伸这个差额，瓦片的图像只要比它的格子少一个像素，就会在那块瓦片的边上露一条背景带（issue #86）。
+`scale` 把矩形和帧按同一比例缩小——而没法把它拉回去的传输路径会通过 `make(fillsCells:)` 直接要
+格子本身的大小。占位符网格就是这种路径，所以 `--scale < 1` 永远不会把一个占位符帧变小。
 
 ### 缩放：少看一点，但按原密度看
 

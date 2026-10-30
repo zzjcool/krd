@@ -237,8 +237,8 @@ if rows > geometry.rows { rows = geometry.rows
                           cols = round(rows * cellH * aspect / cellW) }
 cols = clamp(cols, tileCols, geometry.cols)        // never smaller than one tile
 rows = clamp(rows, tileRows, geometry.rows)
-pixelW = max(2, round(cols * cellW))               // the SCStream output size
-pixelH = max(2, round(rows * cellH))
+pixelW = max(2, round(cols * cellW * scale))       // the SCStream output size
+pixelH = max(2, round(rows * cellH * scale))
 ```
 
 `TileGrid.rect(tx, ty)` returns a tile's pixel rect **and** its placement footprint:
@@ -246,8 +246,8 @@ pixelH = max(2, round(rows * cellH))
 ```
 cx = min(tileCols, paneCols - tx*tileCols)         // cells in this tile (edge tiles are smaller)
 cy = min(tileRows, paneRows - ty*tileRows)
-x0 = round(tx*tileCols * cellW);  x1 = round((tx*tileCols + cx) * cellW)
-y0 = round(ty*tileRows * cellH);  y1 = round((ty*tileRows + cy) * cellH)
+x0 = round(tx*tileCols * cellW * scale);  x1 = round((tx*tileCols + cx) * cellW * scale)
+y0 = round(ty*tileRows * cellH * scale);  y1 = round((ty*tileRows + cy) * cellH * scale)
 → (x0, y0, max(1,x1-x0), max(1,y1-y0), col: originCol+tx*tileCols, row: originRow+ty*tileRows,
    cols: cx, rows: cy)
 ```
@@ -260,6 +260,14 @@ picture maps to the right source point.
 Rounding happens only at the rect edges, so tiles tile the picture with no gaps and no overlap;
 `cols`/`rows` are always whole cells, which is why no placement ever needs a sub-cell offset and
 the terminal never resamples.
+
+Those edges are `cells x cell` and nothing else, so a tile's pixel rect **is** that tile's own cell
+box (`x1 - x0` at its own boundaries, never a proportion of the frame). That is the half a terminal
+cannot forgive: one that draws an image pixel per device pixel has no way to stretch the difference,
+so a tile image a pixel short of its box shows as a column of background at that tile's edge (issue
+#86). `scale` shrinks the rects and the frame by the same factor - a transport that cannot stretch
+that back asks `make(fillsCells:)` for the cell box itself. A placeholder grid is such a transport,
+so `--scale < 1` never shortens a placeholder frame.
 
 ### Zoom: showing less at full density
 

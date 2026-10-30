@@ -40,20 +40,22 @@ final class TileFrameTests: XCTestCase {
         for ty in 0..<g.tilesY {
             for tx in 0..<g.tilesX {
                 let r = g.rect(tx, ty)
-                // A terminal drawing 1:1 leaves a seam wherever these two disagree, so one pixel of
-                // rounding is the budget - not the six percent the old frame was short by.
-                XCTAssertEqual(Double(r.w), Double(r.cols) * g.cellW, accuracy: 1,
+                // Exact, not "within a pixel": a terminal drawing 1:1 leaves a seam wherever these
+                // two disagree, so the budget for the difference is zero (issue #86). The pixels come
+                // from the same `cells x cell` arithmetic as the frame, at both edges.
+                XCTAssertEqual(Double(r.w), Double(r.cols) * g.cellW,
                                "tile \(tx),\(ty): \(r.w) px for \(r.cols) cells")
-                XCTAssertEqual(Double(r.h), Double(r.rows) * g.cellH, accuracy: 1,
+                XCTAssertEqual(Double(r.h), Double(r.rows) * g.cellH,
                                "tile \(tx),\(ty): \(r.h) px for \(r.rows) cells")
-                XCTAssertLessThanOrEqual(abs(r.x - (r.col - g.originCol) * Int(g.cellW)), 1)
+                XCTAssertEqual(r.x, (r.col - g.originCol) * Int(g.cellW))
+                XCTAssertEqual(r.y, (r.row - g.originRow) * Int(g.cellH))
             }
         }
     }
 
     func testTheTilesStillTileTheWholePicture() {
-        // Proportional splitting exists so no pixel row or column is lost or doubled: the seams are
-        // a rounding problem, not a licence to change the coverage arithmetic.
+        // The rects are the cell boxes and they are contiguous, so no pixel column or row is lost or
+        // doubled - that also keeps `extract`/`dirty`'s `pixelW` stride honest from the other side.
         let g = displayPage()
         let last = g.rect(g.tilesX - 1, g.tilesY - 1)
         XCTAssertEqual(last.x + last.w, g.pixelW)
