@@ -270,12 +270,21 @@ Restart-path facts already hit once (do not relearn them):
 
 ## 12. Phases
 
-- **P0 measure three things** (the whole budget rests on them):
-  1. `SCScreenshotManager.captureImage` one-shot latency, display vs window, and whether N calls in a row degrade;
-  2. whether **N concurrent `SCStream`s are viable in one process** (today's `Capturer` is written as a
-     single-stream object, and issue #44 records how fragile streams are);
-  3. whether SCK scales or refuses when each stream is configured at a **different size** (the card's pixel size).
-  The answer decides between "four small streams" and "one big stream plus CPU cropping".
+- **P0 done (measured 2026-10-30 in the tart VM `kraal-agent`)** — all three have answers:
+  1. **one-shot capture exists and is fast**: `SCScreenshotManager.captureImage`, display 1920×1200 →
+     **25.9 ms**, windows 877×499 → **19.4 ms**, 702×679 → **28.7 ms**, 360×180 → **18.3 ms**;
+     **a whole wall's four panels = 92.4 ms**, once, not per frame. Five in a row do not degrade.
+  2. **four concurrent `SCStream`s work**: one display + three windows in one process, 10 fps target,
+     **23/23/22/22 frames** in 2.3 s - no stream starved, none stepped on the others. So "four small
+     streams" is a real fallback, but the wall does not need it.
+  3. **SCK scales, it never stretches**: a 1920×1200 display asked for 1200×300 returns 1200×300 with
+     the content in **x∈[0,480)** (= 300×1.6) and pure black elsewhere, **anchored top-left**; asking
+     for 400×250 (the same aspect) fills the box. So: **ask in the content's own aspect and SCK hands
+     back 1:1 content**; black padding only appears when the aspects disagree.
+  **Verdict: the wall takes four one-shot captures, no streams.** No frame loop, no dedupe, no stream
+  lifecycle: when the 1 s tick sees the model change, capture (~92 ms), compress, place. `Capture.swift`
+  and its single-stream logic are untouched - P2 adds a parallel path, it does not rework the mirror.
+
 - **P1** `WindowOrder` + `WallLayout` + the text layer (text cards and empty frames first, opt-in `--start wall`).
 - **P2** single-panel capture → compress → cache → dedupe → mask fallback.
 - **P3** everything open + scrolling + `⤢` + the mouse hit map.
