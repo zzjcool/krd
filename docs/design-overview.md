@@ -152,10 +152,10 @@ a card reads as a window lying on the wall, not a window in a frame.
 
 | case | handling |
 |---|---|
-| landscape (16:10 / 1.54) | the width fills the stage's columns and the height is whatever the aspect gives (~44 of 53 rows at a 137×73 pane on an 8×16 cell); the band's leftover rows are wall |
+| landscape (16:10 / 1.54) | the width fills the stage's columns and **the band is exactly the rows the aspect gives** (`WallLayout.make(stageAspect:)`: 42 of a 137×73 pane's rows on an 8×16 cell); the rows a tall pane has over go to the card band, which then shows fewer, wider cards |
 | where the cell size comes from | the terminal, not the pty: over ssh `ws_xpixel/ws_ypixel` are 0, so `runWall` asks `CSI 16t`/`14t` (as the mirror does) and keeps the 8×20 fallback only for a terminal that answers nothing. The fallback's cell *aspect* is 0.40; Rex's is 0.51, and that alone left 36% of the stage empty - the picture looked smaller than its frame |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
-| window card | the card rect **never changes** (43×13 cells at 137×44); the picture fits inside at the window's own aspect, the rest is transparent |
+| window card | the card rect is the layout's and the picture fits inside it at the window's own aspect: 43×13 cells at 137×44, 66×22 at 137×73, where the card band inherits the rows the stage does not need. A picture never resizes its own card |
 | rounded corners | every picture's own corners are cut to a radius of **one twenty-fourth of its short side** (`PanelImage.cornerRadius`), and the pixels outside the arc keep alpha 0 - so a display or a window reads as an object lying on the wall instead of a rectangle cut out of it. macOS rounds its windows anyway, so the card pictures lose nothing; the stage is where it shows |
 | one height per row | the cards of a page are drawn at **one height** - the tallest one every picture can reach without cropping, i.e. the widest window's (`WallPanels.sharedCardHeight`, then `PanelImage.fit(maxHeight:)`). Per-window fitting left a 16:9 card shorter than a square one, so the row's top and bottom edges disagreed ("窗口的最高高度需要保持一致"). The cost is that one wide window shortens its neighbours while it is on the page; the alternative would be cropping, which the design rules out |
 | the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
@@ -175,11 +175,14 @@ fix is to stop shipping a canvas at all. The image is the picture, the placement
 between the picture and its band are simply not painted - which is what the mirror has always done with the cells its
 letterbox leaves over, and nobody has ever reported those as a bug.
 
-Two consequences, both accepted. The picture is **smaller than its band** (a 16:10 display in a 53-row stage at 8×16
-cells uses 42 rows), so the band's slack shows as wall above and below the picture instead of inside it; and because a
-caption hangs one row under its picture, that slack now sits between the caption and the divider. The alternative - a
-panel that always fills its band - means stretching by however wrong the cell aspect is, and a stretched desktop is a
-worse lie than a letterboxed one.
+**The band is the picture, never a box the picture sits in.** A tall pane's row budget used to give the stage more rows
+than a 16:10 picture can use (53 against 42 at 137×73), and because a caption hangs one row under its picture, that
+slack showed up as wall *between* the picture and the divider - reported as "the display is smaller than its frame",
+right after the black ring. `WallLayout.make(stageAspect:cellAspect:)` now sizes the stage band from the picture and
+gives the rows it does not need to the card band, which takes them by showing **fewer, wider cards** (`per` is a
+maximum): at 137×73 that is two cards of 66×22 with 528×357 px pictures instead of three of 43×13 with 344×218, and the
+wall has no band slack anywhere. What it never does is stretch the picture to fill a band - a stretched desktop is a
+worse lie than a letterboxed one, and the aspect is the one thing the wall knows for certain.
 
 The cells under a picture still have to be cleared first: the placeholder box and any older placement live in the same
 cells. `WallCanvas`'s `.picture` branch writes spaces over the picture's rect (spaces only, no visible glyph, so the
