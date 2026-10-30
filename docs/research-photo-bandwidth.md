@@ -282,13 +282,18 @@ pixels".** Not a video codec; not a protocol extension.
   the zlib-expanded payload). Text/UI/gradient bytes are unchanged. The remaining item from this
   milestone — a second `photo` case with photographic statistics instead of hash noise — is still
   open.
-- **M2 — content-adaptive 16-bit (a few days).** Per tile: keep the zlib ratio of the last frame; if
-  a tile has been incompressible (> 1.05) for two frames, send it 5-6-5 from then on, and remember
-  that until it compresses well again. No flag needed for the common case, `--format`-style override
-  for people who want lossless. Expected: 13.58 → 9.90 MB on the worst case, 6.32 → 1.27 MB on a
-  photograph, with the text path bit-identical.
-- **M3 — capture scale (a few days).** `--scale 1|0.5|0.25` on the capture side, then a simple
-  "if the pipe cannot keep up, drop scale before dropping fps" policy. Composes with M2.
+- **M2 — content-adaptive 16-bit.** ✅ **shipped in #59**, with one correction to the plan above:
+  **it does not need a 16-bit wire format.** Quantising to 5-6-5 and still sending 3 bytes per pixel
+  is enough, because the low bits are what made the bytes incompressible — zlib then finds the
+  structure. Measured on the `photo` case at the reference layout: wire **13,572,455 → 10,523,552 B**
+  (**1.29×**, matching the arithmetic below), on photographic statistics **2.27×**, text/UI bytes
+  unchanged, cost ~37 dB PSNR and encode p50 8.6 → 15.8 ms. See `docs/ENCODING.md` for the mechanism.
+- **M3 — capture scale.** ✅ **shipped in #60**: `--scale 1|0.5|0.25` multiplies the capture's output
+  pixel size only — `sourceRect`, the placement's cell box and the input mapping are untouched.
+  `krd --bench`: wire 13,572,455 → **3,406,310 B** at 0.5 (**3.98×**) → **863,165 B** at 0.25
+  (**15.7×**); live typing session at 60×19 cells: 250.7 → 65.2 KB/s (**3.85×**) and CPU 15.9 % → 6.1 %.
+  Together with M2 that puts the colour-heavy case at **68 MB/s at 20 fps**, inside a local pty's
+  103 MB/s. Still open from this milestone: the "drop scale before dropping fps" policy.
 - **M4 — only if a terminal asks for it.** A 16-bit or YUV wire format. Needs kitty/Ghostty/Herdr
   buy-in; do not start it inside krd.
 
