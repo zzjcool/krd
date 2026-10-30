@@ -982,14 +982,18 @@ def cmd_render(args, context):
     human = "\n".join(human)
     if misfits:
         human += "\n%d picture(s) do not match their cell box: %s" % (len(misfits), misfits[:3])
-    context.emit(payload, human)
     if not frames:
-        return EXIT_FAIL, payload
-    if not frames and not args.allow_empty:
-        raise KagentError(
-            "the stream decoded to no frame at all: the program never drew, or it died first "
-            "(run without --quiet to see its own output; --allow-empty if drawing nothing is "
-            "the expected result)", EXIT_UNKNOWN)
+        # Before emitting: "no frame" is not a verdict about the picture, it is a failed
+        # measurement, and the two must not share an exit code (5 vs 1 is the whole reason this
+        # scaffold has exit codes at all). A program that legitimately draws nothing says so with
+        # --allow-empty.
+        if not args.allow_empty:
+            raise KagentError(
+                "the stream decoded to no frame at all: the program never drew, or it died first "
+                "(run without --quiet to see its own output; --allow-empty if drawing nothing is "
+                "the expected result)", EXIT_UNKNOWN)
+        human += "\nno frame decoded, allowed by --allow-empty"
+    context.emit(payload, human)
 
     if args.strict_fit and misfits:
         return EXIT_FAIL, payload
@@ -1039,6 +1043,11 @@ def cmd_pane(args, context):
                 print("no placeholder cells: the pixel path is in use, or nothing was drawn")
             return EXIT_OK, {"runs": found}
         text = panes.capture(context.artifacts, args.name, "vt" if args.vt else "text")
+        if args.vt:
+            # The vt buffer carries every colour change the program made. A person reading a footer
+            # sees the words, not the SGR codes, so strip them -- everything except the graphics
+            # escapes, which are what `--runs` and a decoder need.
+            text = render.strip_sgr(text)
         if context.json:
             context.emit({"text": text})
         else:

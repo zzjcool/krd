@@ -74,6 +74,16 @@ Refs (`@e481`) are numbered per dump, so they cannot be cross-referenced between
 `press @e481` each, in the same invocation that printed it. Roles print short (`button`), not
 `AXButton`.
 
+### 2½. One line per app, and one verb nobody remembers
+
+```bash
+kagent screen                        # every app with windows, its pid and title, and who has focus
+kagent front                         # the one app and window that will receive a keystroke
+```
+
+`screen` is the cheapest "what is on the desk right now" there is — one line per window plus the
+focused element — and it is what `doctor` prints to prove Accessibility is reading something real.
+
 ### 3. Hands
 
 ```bash
@@ -88,8 +98,10 @@ kagent key cmd+shift+a
 kagent app focus Safari
 ```
 
-`click --mark` presses through Accessibility and **falls back to the centre point** when the node
-refuses (`AXTextField` does not implement `AXPress`). A refusal is an answer, not a failure.
+`move 812 340` moves the pointer without clicking (hover states, tooltips, the drag a person starts
+and abandons). `click --mark` presses through Accessibility and **falls back to the centre point**
+when the node refuses (`AXTextField` does not implement `AXPress`). A refusal is an answer, not a
+failure.
 
 `type` sends each character as a keycode *and* a unicode string, because the two are not
 interchangeable: a text field takes the string, a terminal only takes the keycode. `key` and `type`
@@ -162,7 +174,8 @@ frames=2  pane=2482x1518 px  pictures=4  misfits=0
 picture 1  cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
 ```
 
-`cells` is `[col, row, cols, rows]`, and `native` is what was actually transmitted, so the comparison
+`cells` is `[col, row, cols, rows]`, 1-based like every other coordinate in this tool (a `--pane
+146x46` has columns 1..146 and rows 1..46), and `native` is what was actually transmitted, so the comparison
 is against the image the terminal was handed, not the box echoed back.
 
 `fit` says how the two relate, and the answer depends on the transport, because the two are not
@@ -185,7 +198,11 @@ interchangeable:
 * `pixels` — a terminal whose `TIOCGWINSZ` reports device pixels, so krd takes one pixel per cell and
   sizes every picture to its box exactly. This is the only mode in which `--selftest` fills its
   tiles: the selftest never probes for placeholders, so on a points terminal it has no device cell to
-  ask for and falls back to 8x16. The first line also says how
+  ask for and falls back to 8x16.
+
+For the last of bit of fidelity, pass `--cell 8x16`: that is the cell Rex reports, and the cell
+aspect takes part in the card sizing (`WallLayout.cardRows`). Most checks use `17x33` because it
+makes the arithmetic obvious; both are real panes. The first line also says how
 the run ended: `exited 0` (krd finished) or `stopped at the 12.0s deadline` (`--seconds`, default 12,
 is how long it gets to draw before the pty closes). A run that decodes no frame is a failed
 measurement — exit 2 — unless you pass `--allow-empty`.
@@ -213,6 +230,23 @@ Each is a shell script that fails with a sentence, and each was written against 
 ```bash
 for check in agent/checks/*.sh; do sh "$check" || echo "FAILED $check"; done
 ```
+
+### 5½. A real terminal, driven
+
+`render` measures a pty it owns. `pane` drives a real one: it opens a pane in Rex, runs a command in
+it, reads the buffer back, and types into it.
+
+```bash
+kagent pane run krd -- ./.build/release/krd --wall   # a pane running the product
+kagent pane read krd --vt                            # its buffer, decoded like a capture
+kagent pane send krd -- "q"                          # type into it
+kagent pane key krd -- ctrl-c                        # one key, by name
+kagent pane ls ; kagent pane close krd               # what this run opened, and the way out
+```
+
+This is the closest thing to "a person is using it": a real terminal, a real pty, a real cell size.
+`render` is for repeatability and CI; `pane` is for the question "does it look like this in the
+terminal I actually use".
 
 ## Scenarios
 

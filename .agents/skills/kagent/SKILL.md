@@ -16,7 +16,8 @@ agent/bin/kagent doctor            # every capability, measured. Fix anything re
 ```
 
 `doctor` prints one line per capability: `target`, `hand (CGEvents)`, `eye (screen capture)`,
-`text (Accessibility)`, `windows`, `pixels (escape decoder)`, `krd build`, `terminal instrument`.
+`text (Accessibility)`, `windows`, `pixels (escape decoder)`, `krd build`, `no wedged krd`,
+`terminal instrument`.
 Exit 0 means the whole chain works; a red `hand` means Accessibility is missing and **nothing you
 click will happen**, so stop instead of testing against a dead machine.
 
@@ -25,6 +26,8 @@ click will happen**, so stop instead of testing against a dead machine.
 ```bash
 # look — a JPEG plus the coordinate contract, or numbered boxes on everything clickable
 agent/bin/kagent see --marks --grid 200
+# what is on the desk, one line per window, and who will get the next keystroke
+agent/bin/kagent screen ; agent/bin/kagent front
 # read — the accessibility tree as lines (cheap, and assertable). No --app means the focused app;
 # --app Finder / --pid 495 reads another one.
 agent/bin/kagent text -i -d 6

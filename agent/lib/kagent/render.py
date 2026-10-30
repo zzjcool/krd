@@ -245,6 +245,13 @@ def text_layer(stream, cols):
 CSI = re.compile(r"\x1b\[([0-9;:?<>=!]*)([@-~])")
 
 
+def strip_sgr(text):
+    """Drop colour/style escapes, keep graphics and cursor movement."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return re.sub(r"\x1b\[(?![?]?\d*\s*q)[0-9;:]*m", "", text)
+
+
 def screen_of(stream, cols, rows):
     """The text buffer a terminal would hold, as {row: {col: char}}.
 
