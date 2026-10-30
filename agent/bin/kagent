@@ -81,8 +81,6 @@ def main(argv=None):
         else:
             sys.stderr.write("kagent: %s\n" % error)
         return error.code
-    if payload is not None and not isinstance(payload, int):
-        pass
     return code
 
 
@@ -390,6 +388,34 @@ def cmd_doctor(args, context):
 
     check("krd build", build)
 
+    def wedged():
+        """A krd left running on the target is not a bug by itself; one that has been running for
+        ten minutes and ignores kill is — it wedges ScreenCaptureKit for every later run, and the
+        next agent sees "the wall draws nothing" instead of "someone left a process behind"."""
+        result = target.run_sh("ps -Ao pid,stat,etime,comm | grep -E '[k]rd$' || true", timeout=30)
+        rows = [line.split() for line in result.text.strip().splitlines() if line.strip()]
+
+        def seconds(etime):
+            # `ps` prints [[dd-]hh:]mm:ss
+            days, _, rest = etime.partition("-")
+            parts = [int(p) for p in (rest or days).split(":") if p.isdigit()]
+            while len(parts) < 3:
+                parts.insert(0, 0)
+            total = parts[0] * 3600 + parts[1] * 60 + parts[2]
+            return total + (int(days) * 86400 if rest else 0)
+
+        long_lived = [r for r in rows if len(r) >= 3 and seconds(r[2]) > 300]
+        if not rows:
+            return predicates.PASS, "none running"
+        if long_lived:
+            return predicates.UNKNOWN, "%d krd process(es) older than a minute: %s — " \
+                "`pkill -9 -x krd` if you did not start them" % (
+                    len(long_lived), " ".join(" ".join(r[:3]) for r in long_lived))
+        return predicates.PASS, "%d krd process(es), all recent" % len(rows)
+
+    if context.target.remote:
+        check("no wedged krd", wedged)
+
     if context.target.remote:
         def terminal():
             if shutil.which("rex") is None:
@@ -512,7 +538,6 @@ def cmd_click(args, context):
 
 def cmd_move(args, context):
     act.move(context.target, args.x, args.y)
-    context.artifact_record = True
     context.artifacts.record({"kind": "move", "at": [args.x, args.y]})
     context.emit({"at": [args.x, args.y]}, "moved to %d,%d" % (args.x, args.y))
     return EXIT_OK, {}
@@ -959,7 +984,7 @@ def cmd_prove(args, context):
                                                    before["stderr"]))
         if not args.quiet:
             sys.stderr.write("arm 2/2: working tree\n")
-        current = arm("after", REPO, context.target._local_krd())
+        current = arm("after", REPO, core.Target.local_krd())
         evidence["arms"].append(current)
         (artifacts.dir / "after.txt").write_text(
             "$ %s\nexit %d  (%ss)\n\n%s\n%s" % (check.name, current["exit"],

@@ -160,10 +160,10 @@ class Target:
     @property
     def krd(self):
         return self.expand(os.environ.get("KAGENT_KRD") or
-                           ("~/bin/krd" if self.remote else self._local_krd()))
+                           ("~/bin/krd" if self.remote else self.local_krd()))
 
     @staticmethod
-    def _local_krd():
+    def local_krd():
         candidate = REPO / ".build" / "release" / "krd"
         return str(candidate) if candidate.exists() else "krd"
 

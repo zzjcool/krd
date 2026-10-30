@@ -279,10 +279,8 @@ def resolve_window(target, spec):
 def render_text(data):
     """The text channel as lines: indent is the tree, the brackets are the frame."""
     lines = []
-    title = " ".join(filter(None, [data.get("app") or "", "—", data.get("title") or ""]))
     lines.append("%s (pid %s) %s" % (data.get("app") or "?", data.get("pid") or "?",
                                      ("· " + data["title"]) if data.get("title") else ""))
-    _ = title
     for node in data.get("nodes", []):
         role = ROLE_SHORT.get(node.get("role"), node.get("role") or "?")
         name = label_of(node)
