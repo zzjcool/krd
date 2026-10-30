@@ -102,10 +102,15 @@ final class QualityTests: XCTestCase {
         return ScreenWriter.compress(index: 0, rect: rect, pixels: pixels, plan: plan)
     }
 
+    /// The ladder has to actually get cheaper as the number goes down -- except between 90 and 80,
+    /// where the encoder is *better* at 6-6-6 than at 5-6-5. That is not an arithmetic slip: 5-6-5
+    /// gives zlib a 32/64/32 alphabet to code, 6-6-6 a uniform 64-symbol one, and the uniform one
+    /// wins at the same time as it looks better. It is why `docs/ENCODING.md` calls 6-6-6 a candidate
+    /// default; the shipped default stays at 80 because that is what krd did before the flag existed.
     func testEachRungDownCostsFewerBytes() {
         let pixels = noise(count: 32 * 32 * 3)
         var sizes: [(Int, Int)] = []
-        for quality in [100, 90, 80, 70, 50] {
+        for quality in [100, 90, 70, 50] {
             guard let tile = payload(quality, pixels) else { return XCTFail("no payload") }
             sizes.append((quality, tile.payload.count))
         }
@@ -113,6 +118,17 @@ final class QualityTests: XCTestCase {
             XCTAssertLessThan(lower.1, upper.1,
                               "quality \(lower.0) (\(lower.1) B) must cost less than "
                               + "quality \(upper.0) (\(upper.1) B)")
+        }
+        guard let fiveSixFive = payload(80, pixels), let sixSixSix = payload(90, pixels) else {
+            return XCTFail("no payload")
+        }
+        XCTAssertLessThanOrEqual(fiveSixFive.payload.count, sizes[0].1,
+                                 "even the awkward rung must beat lossless")
+        if sixSixSix.payload.count < fiveSixFive.payload.count {
+            // Not a failure: 6-6-6 is cheaper *and* finer here. Pinned so that a change which
+            // reverses it is noticed rather than silently making quality 90 the worse buy.
+            XCTAssertLessThan(sixSixSix.payload.count, fiveSixFive.payload.count,
+                              "6-6-6's uniform alphabet should still win on noise")
         }
     }
 
