@@ -276,6 +276,17 @@ final class DisplayWidthTests: XCTestCase {
 
     /// End to end: a pane whose target name is Chinese must not push the bar past the last column
     /// or leave half a glyph at the edge.
+    /// A window title is written by whatever app owns the window, so the wall cannot assume it is
+    /// one line of printable text: a `\n` in it scrolls the grid the picture is positioned on, and an
+    /// `ESC` would let the title emit its own escape sequence.
+    func testControlCharactersNeverReachTheGrid() {
+        XCTAssertEqual(DisplayWidth.truncate("a\nb", to: 10), "a b")
+        XCTAssertEqual(DisplayWidth.truncate("a\u{1B}[2Jb", to: 10), "a [2Jb")
+        XCTAssertEqual(DisplayWidth.truncate("tab\there", to: 10), "tab here")
+        XCTAssertEqual(DisplayWidth.truncate("bell\u{7}", to: 10), "bell ")
+        XCTAssertFalse(DisplayWidth.truncate("x\ny", to: 10).contains("\n"))
+    }
+
     func testWideTargetStaysInsideTheStatusLine() {
         for cols in [20, 24, 30, 46, 80, 84, 120] {
             var m = ChromeMetrics()

@@ -32,7 +32,12 @@ final class WallProcessTests: XCTestCase {
         let child = Process()
         child.executableURL = binary
         // `--pane` keeps the numbers the golden tests use, so the paint is the 60x24 wall.
-        child.arguments = ["--wall", "--pane", "60x24"]
+        // `--demo` for the same reason the golden wall tests use it: the wall paints **window
+        // titles**, which on a developer's machine contain anything at all — a window showing this
+        // repository is titled `zzjcool/krd: …`, and that made this assertion fail on the very
+        // desktop it was written on while passing on CI. The invariant is about the bytes we emit,
+        // so the content has to be fixed.
+        child.arguments = ["--wall", "--demo", "--pane", "60x24"]
         // All three descriptors are the pty: that is the whole point — the child's stderr is its
         // pane, and the wall draws on the same bytes.
         let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
@@ -83,6 +88,9 @@ final class WallProcessTests: XCTestCase {
         XCTAssertFalse(stream.contains(0x0A),
                        "the wall put a 0x0A on the tty (\(stream.filter { $0 == 0x0A }.count) of them)")
         let text = String(decoding: stream, as: UTF8.self)
+        // The demo model's titles are fixed ("16:9 window", …): if one of them is missing, the
+        // hermeticity above is broken and the two assertions below would be measuring nothing.
+        XCTAssertTrue(text.contains("16:9 window"), "the wall did not paint the demo model")
         XCTAssertFalse(text.contains("input:"),
                        "the wall logged reader diagnostics onto its own pane")
         XCTAssertFalse(text.contains("krd:"),
@@ -114,7 +122,12 @@ final class WallProcessTests: XCTestCase {
         var stream: [UInt8] = []
         let child = Process()
         child.executableURL = binary
-        child.arguments = ["--wall", "--pane", "60x24"]
+        // `--demo` for the same reason the golden wall tests use it: the wall paints **window
+        // titles**, which on a developer's machine contain anything at all — a window showing this
+        // repository is titled `zzjcool/krd: …`, and that made this assertion fail on the very
+        // desktop it was written on while passing on CI. The invariant is about the bytes we emit,
+        // so the content has to be fixed.
+        child.arguments = ["--wall", "--demo", "--pane", "60x24"]
         let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         child.standardInput = pane
         child.standardOutput = pane
