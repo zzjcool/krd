@@ -17,6 +17,16 @@ public struct TileGrid {
     public let pixelH: Int
     /// Bytes per pixel in the frame buffer we are handed (3 for RGB, 4 for RGBA).
     public let bpp: Int
+    /// Image pixels per pane pixel: 1 captures what the pane can show, 0.5 captures half as many
+    /// in each direction (a quarter of the bytes) and lets the terminal upscale. `pixelW/pixelH`
+    /// and the pixel rects below are already scaled; the cells (`paneCols/paneRows`, `rect().col/row/
+    /// cols/rows`) are not, because the picture must still fill the same cell box.
+    public let scale: Double
+
+    /// The pane's own pixel size: what a terminal means by an SGR-Pixels mouse coordinate.
+    /// `pixelW/pixelH` is what we *ask the capturer for*, which is smaller when `scale < 1`.
+    public var panePixelW: Int { max(2, Int((Double(paneCols) * cellW).rounded())) }
+    public var panePixelH: Int { max(2, Int((Double(paneRows) * cellH).rounded())) }
 
     public var tilesX: Int { (paneCols + tileCols - 1) / tileCols }
     public var tilesY: Int { (paneRows + tileRows - 1) / tileRows }
@@ -28,7 +38,10 @@ public struct TileGrid {
     /// (issue #21). `krd` forwards its `TermGeometry` through an extension with the old signature.
     public static func make(paneCols: Int, paneRows: Int, cellW: Double, cellH: Double,
                             aspect: Double, tileCols: Int, tileRows: Int,
-                            bpp: Int = 3) -> TileGrid {
+                            bpp: Int = 3, scale: Double = 1) -> TileGrid {
+        // Anything outside (0, 1] is "no scaling": a negative or absurd scale would ask for a
+        // zero-pixel stream, which ScreenCaptureKit refuses.
+        let captureScale = (scale.isFinite && scale > 0 && scale <= 1) ? scale : 1
         // Largest cell rectangle with the source aspect that fits the pane.
         var cols = paneCols
         var rows = Int((Double(cols) * cellW / aspect / cellH).rounded())
@@ -42,9 +55,9 @@ public struct TileGrid {
             paneCols: cols, paneRows: rows,
             cellW: cellW, cellH: cellH,
             tileCols: tileCols, tileRows: tileRows,
-            pixelW: max(2, Int((Double(cols) * cellW).rounded())),
-            pixelH: max(2, Int((Double(rows) * cellH).rounded())),
-            bpp: bpp
+            pixelW: max(2, Int((Double(cols) * cellW * captureScale).rounded())),
+            pixelH: max(2, Int((Double(rows) * cellH * captureScale).rounded())),
+            bpp: bpp, scale: captureScale
         )
     }
 
@@ -52,10 +65,11 @@ public struct TileGrid {
     public func rect(_ tx: Int, _ ty: Int) -> (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int) {
         let cx = min(tileCols, paneCols - tx * tileCols)
         let cy = min(tileRows, paneRows - ty * tileRows)
-        let x0 = Int((Double(tx * tileCols) * cellW).rounded())
-        let y0 = Int((Double(ty * tileRows) * cellH).rounded())
-        let x1 = Int((Double(tx * tileCols + cx) * cellW).rounded())
-        let y1 = Int((Double(ty * tileRows + cy) * cellH).rounded())
+        // Pixel rects follow the capture scale; the cell box does not (`col/row/cols/rows` below).
+        let x0 = Int((Double(tx * tileCols) * cellW * scale).rounded())
+        let y0 = Int((Double(ty * tileRows) * cellH * scale).rounded())
+        let x1 = Int((Double(tx * tileCols + cx) * cellW * scale).rounded())
+        let y1 = Int((Double(ty * tileRows + cy) * cellH * scale).rounded())
         return (x0, y0, max(1, x1 - x0), max(1, y1 - y0),
                 tx * tileCols + 1, ty * tileRows + 1, cx, cy)
     }

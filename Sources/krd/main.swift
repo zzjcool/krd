@@ -16,6 +16,11 @@ struct Options {
     var zoomAt: CGPoint? = nil
     /// Pan the crop when the pointer reaches the edge of the picture (`--zoom-follow`).
     var zoomFollow = false
+    /// Capture at a fraction of the pane's pixels (`--scale 0.5`): a quarter of the bytes for half
+    /// the resolution in each direction, upscaled by the terminal into the same cell box. It changes
+    /// the *output* size only -- the crop (`sourceRect`) and the input mapping stay as they are.
+    var scale = 1.0
+    var scaleError: String? = nil
     var noInput = false
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
@@ -92,6 +97,8 @@ func usage() -> String {
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
       --log <path>        write diagnostics to a file instead of over the picture
+      --scale <f>         capture f (0 < f <= 1) of the pane's pixels per side and let the terminal
+                          upscale: 0.5 is a quarter of the bytes and visibly softer text (issue #60)
       --full-frame        disable tiling, always resend the whole frame
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
@@ -171,6 +178,16 @@ func parseArguments() -> Options {
         case "--window": options.windowQuery = args[safe: i + 1]; i += 1
         case "--zoom":
             if let value = Double(args[safe: i + 1] ?? ""), value.isFinite { options.zoom = value }
+            i += 1
+        case "--scale":
+            // The parser does not throw; an unparsable value is carried to `run()` instead of
+            // silently meaning "1", because a typo here doubles the bytes on the wire.
+            if let value = Double(args[safe: i + 1] ?? ""), value.isFinite, value > 0, value <= 1 {
+                options.scale = value
+            } else {
+                options.scaleError = "--scale takes a fraction of the pane's pixels, "
+                    + "0 < scale <= 1 (e.g. 0.5); got \(args[safe: i + 1] ?? "nothing")"
+            }
             i += 1
         case "--zoom-at":
             if let spec = args[safe: i + 1], case let parts = spec.split(separator: ","), parts.count == 2,
@@ -425,6 +442,13 @@ final class Desk {
                       wantsLogging: options.debug || options.logPath != nil || options.statsJSON != nil)
         if let where_ = Log.path {
             FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
+        }
+        if let error = options.scaleError { throw DeskError.message(error) }
+        // The selftest is a byte contract about framing, not about resolution: it always captures
+        // at the pane's own pixel size, so `--scale` next to it is a usage error rather than a
+        // silent change of the sha256 people compare against.
+        if options.selftest && options.scale != 1 {
+            throw DeskError.message("--selftest always captures at scale 1; drop --scale")
         }
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
         if let dir = options.replay, options.bench {
@@ -688,8 +712,9 @@ final class Desk {
                 + (zoomScale > 1
                    ? " (zoom \(zoomScale) of \(Int(fullRect.width))x\(Int(fullRect.height)) centred \(Int(crop.midX)),\(Int(crop.midY)))"
                    : "")
-                + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells, "
-                + "\(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
+                + " -> \(layout.pixelW)x\(layout.pixelH) px in \(layout.paneCols)x\(layout.paneRows) cells"
+                + (options.scale < 1 ? " (scale \(options.scale))" : "")
+                + ", \(layout.tilesX)x\(layout.tilesY) tiles of \(layout.tileCols)x\(layout.tileRows) cells\n"
             Log.write(message)
         }
 
@@ -1254,7 +1279,7 @@ final class Desk {
         }
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
-                                   bpp: writer.format.bytesPerPixel)
+                                   bpp: writer.format.bytesPerPixel, scale: options.scale)
         if chromeEnabled {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
@@ -1267,7 +1292,9 @@ final class Desk {
         grid = layout
         sourceRect = crop
         previousFrame = []
-        viewport = Viewport(pixelWidth: layout.pixelW, pixelHeight: layout.pixelH,
+        // Pane pixels, not capture pixels: SGR-Pixels coordinates are the terminal's own grid, so
+        // `--scale 0.5` must not move the mapping by a factor of two (issue #60).
+        viewport = Viewport(pixelWidth: layout.panePixelW, pixelHeight: layout.panePixelH,
                             cols: layout.paneCols, rows: layout.paneRows, sourceRect: crop)
         stateLock.unlock()
     }

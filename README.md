@@ -50,6 +50,8 @@ krd --window Safari          # mirror a single window (a backdrop window is refu
 krd --zoom 2                 # show half the screen at twice the density (crop on the capture side)
 krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global screen points
 krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
+krd --scale 0.5              # capture half the pixels per side and let the terminal upscale:
+                             # 4x fewer bytes on colour-heavy content, visibly softer text
 krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —

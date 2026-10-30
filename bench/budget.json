@@ -12,7 +12,10 @@
     "'catch a large regression, not a 5% one' rule as the rest of this file, deliberately not a tight",
     "ratchet: photo is deterministic noise, so 0.9% would be exactly reproducible, but it would fire",
     "on any framing/tile change and invite someone to widen it silently, which is how budgets rot.",
-    "The number to ratchet down when a fix lands is in docs/research-photo-bandwidth.md."
+    "The number to ratchet down when a fix lands is in docs/research-photo-bandwidth.md.",
+    "Every budget here is measured at --scale 1 (the default). --scale 0.5 captures a quarter of the",
+    "pixels and cuts photo wire to 3.4 MB, so it is a deliberate way to go under these numbers, not a",
+    "way to pass them: a run that changes the scale must say so next to its result."
   ],
   "encode": [
     {"case": "char",     "field": "bytes.payload", "max": 900},

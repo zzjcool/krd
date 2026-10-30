@@ -236,6 +236,8 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 1
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`、`CGPreflightPostEventAccess()`、显示器/窗口枚举（在目标 Mac 上跑，看 TCC 是不是问题所在） |
 | `probe/zoom_update_probe.swift` | 运行中的 `SCStream` 能否用 `updateConfiguration` 就地改裁剪：10 次平移的延迟、稳定帧数、像素证据，以及每次裁剪内的活性检查（issue #54 就是先过这道门） |
 | `probe/display_probe.swift` | 哪种显示器变化机制会触发：`now`、`list`、`set <i>`（真的改分辨率）、`watch [--appkit]` 十秒内打印 CoreGraphics 回调与 AppKit 通知 |
+| `probe/scale_probe.py` | `--scale` 换来了什么（字节/秒、CPU、原始帧尺寸、从流里读回的 kitty placement 框），以及它会不会移动指针：同一个终端像素在两种缩放下各点一次，比较 TextEdit 的光标位置 |
+| `probe/ax_caret_probe.swift` | 上面那个指针测试的验证器：读 `AXSelectedTextRange` 和文本区 frame，每个窗口一行、最前面的在前 |
 | `probe/photo_codec.py` | issue #26 各方案（16 位量化、更少像素、不压 zlib）下彩色重内容一帧的字节数，用同一套 kitty framing，基线行与 `krd --bench` 的 `photo` 字节一致 |
 | `probe/ax_probe.swift` | headless 客户端能读到什么：AX 的 warm-up 陷阱、不依赖屏录的窗口清单、逐窗口节点数与 walk 耗时、剪枝前后体积（只读） |
 
