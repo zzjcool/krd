@@ -65,6 +65,15 @@ struct Options {
     var record: String? = nil
     var recordFrames = 60
     var statsJSON: String? = nil
+    /// The TUI layer: a status line plus panels on the rows the picture does not use.
+    var dev = false
+    /// Force the layer off, even with `--dev` (scripts, CI, `--bench`).
+    var noChrome = false
+    /// Open a panel at startup, for screenshots and for `--dev --selftest` without input.
+    var devPanel: String? = nil
+    /// Replace ScreenCaptureKit with a desktop drawn in process. No permission, runs forever.
+    var mock = false
+    var mockSize: (w: Int, h: Int)? = nil
 }
 
 func usage() -> String {
@@ -96,6 +105,11 @@ func usage() -> String {
                           moves; --no-cursor is still accepted and means the same as the default)
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
+      --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
+      --no-chrome         force the TUI layer off, e.g. for scripts
+      --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
+      --mock              draw the desktop in process: no screen, no permission, runs forever
+      --mock-size WxH     size of the generated desktop (default 1920x1200)
       --list              list displays and windows, then exit
       -v, --version       print the version and exit
 
@@ -244,6 +258,15 @@ func parseArguments() -> Options {
         case let arg where arg.hasPrefix("--clipboard-paste="):
             options.clipboardPaste = String(arg.dropFirst("--clipboard-paste=".count))
         case "--debug": options.debug = true
+        case "--dev": options.dev = true
+        case "--dev-panel": options.devPanel = args[safe: i + 1]; i += 1
+        case "--mock": options.mock = true
+        case "--mock-size":
+            let spec = args[safe: i + 1] ?? ""
+            i += 1
+            let parts = spec.split(separator: "x").compactMap { Int($0) }
+            if parts.count == 2, parts[0] > 8, parts[1] > 8 { options.mockSize = (parts[0], parts[1]) }
+        case "--no-chrome": options.noChrome = true
         case "--list": options.listOnly = true
         case "-v", "--version": print("krd \(krdVersion)"); exit(0)
         case "-h", "--help": print(usage()); exit(0)
@@ -342,15 +365,42 @@ final class Desk {
     private var viewport = Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero)
     private var previousFrame: [UInt8] = []
     private var lastDirtyCount = 0
+    /// Frames that reached the encoder, not tiles: the number a human means by "fps".
+    private var framesHandled = 0
+    private var chromeSampleFrames = 0
+    private var chromeSampleDelivered = 0
 
     private var resizeSource: DispatchSourceSignal?
     private var statsTimer: DispatchSourceTimer?
+    // TUI layer (--dev). Everything below is written on the main queue at 1 Hz; the picture
+    // never waits for it and the writer serializes the two.
+    private let chrome = Chrome()
+    private var chromeState = ChromeState()
+    private var chromeMetrics = ChromeMetrics()
+    private var chromeGeometry: ChromeGeometry?
+    private var chromeTimer: DispatchSourceTimer?
+    private var chromeDirty = true
+    private var chromeSampleBytes = 0
+    private var chromeSampleQueue = 0
+    private var chromeSampleTiles = 0
+    private var chromeSampleTime = Date()
+    private var chromeToastUntil = Date()
+    private var pipeSamples: [Double] = []
+    private var targetLabel = "-"
+    private var shareable: SCShareableContent?
+    private var mock: MockDesktop?
+    private var geometrySource = "-"
+
+    private var chromeEnabled: Bool { options.dev && !options.noChrome }
     /// Wall time from capture callback to last byte out, per frame.
     private(set) var lastPipeMs = 0.0
     private var recorder: FrameRecorder?
 
     init(options: Options) {
         self.options = options
+        if let name = options.devPanel, let panel = ChromePanel(rawValue: name) {
+            chromeState.panel = panel
+        }
         if let format = options.pixelFormat { writer.format = format }
         capturer.format = writer.format
         capturer.showsCursor = options.drawsCursor
@@ -400,6 +450,8 @@ final class Desk {
         }
 
         if options.selftest {
+            targetLabel = "selftest"
+            geometrySource = options.pane != nil ? "pane override" : "tty"
             if let cell = options.cell { TermGeometry.fallbackCell = cell }
             var geometry = TermGeometry.read()
             if let pane = options.pane { geometry.cols = pane.cols; geometry.rows = pane.rows }
@@ -409,8 +461,46 @@ final class Desk {
             applyLayout(geometry: geometry)
             guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
             writer.beginSession()
+            startChrome()          // --dev --selftest is how the layer is tested without a screen
             try await runSelfTest(layout: layout)
             return
+        }
+
+        if options.mock {
+            if let cell = options.cell { TermGeometry.fallbackCell = cell }
+            let queried = TermGeometry.query()
+            var geometry = queried ?? TermGeometry.read()
+            // --pane is how a dev tool reproduces "it looks wrong at 137x60" without a 137x60 pane.
+            if let pane = options.pane {
+                geometry.cols = pane.cols
+                geometry.rows = pane.rows
+            }
+            geometrySource = (queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")) + " · mock"
+            // Nothing below this line is mocked: same tiles, same encoder, same placements, same
+            // chrome. Only the pixel source is different, which is why this needs no permission.
+            let size = options.mockSize ?? (w: 1920, h: 1200)
+            useLiteralSource(CGRect(x: 0, y: 0, width: size.w, height: size.h))
+            targetLabel = "mock \(size.w)×\(size.h)"
+            self.filter = nil
+            applyLayout(geometry: geometry)
+            guard let layout = currentGrid() else {
+                throw DeskError.message("could not compute a tile layout")
+            }
+            writer.beginSession()
+            startChrome()
+            installSignalCleanup()
+            installResizeHandler()
+            if options.debug || options.statsJSON != nil { startStats() }
+            startInput()
+            let mock = MockDesktop(width: layout.pixelW, height: layout.pixelH, bpp: layout.bpp,
+                                   fps: options.fps) { [weak self] pixels, width, height in
+                self?.handleFrame(pixels: pixels, width: width, height: height)
+            }
+            self.mock = mock
+            mock.start()
+            Log.write("krd: mock \(layout.pixelW)x\(layout.pixelH) px @\(options.fps) fps, "
+                      + "\(layout.tilesX)x\(layout.tilesY) tiles, no capture\n")
+            while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -447,7 +537,9 @@ final class Desk {
 
         if let cell = options.cell { TermGeometry.fallbackCell = cell }
         // Prefer the terminal's own answer: sshd ptys report no pixel size at all.
-        let geometry = TermGeometry.query() ?? TermGeometry.read()
+        let queried = TermGeometry.query()
+        let geometry = queried ?? TermGeometry.read()
+        geometrySource = queried != nil ? "CSI 16t" : (options.cell != nil ? "--cell" : "TIOCGWINSZ")
         if geometry.pixelWidth == 0 || geometry.pixelHeight == 0 {
             Log.write(
                 "krd: terminal reports no pixel size; assuming a \(Int(TermGeometry.fallbackCell.w))x\(Int(TermGeometry.fallbackCell.h)) px cell (override with --cell)\n")
@@ -469,6 +561,8 @@ final class Desk {
         self.geometry = geometry
         zoomScale = options.zoom > 1 ? options.zoom : 1
         configureSource(rect: sourceRect)
+        self.shareable = content
+        targetLabel = target.reason
         applyLayout(geometry: geometry)
         guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
 
@@ -496,6 +590,7 @@ final class Desk {
         }
 
         writer.beginSession()
+        startChrome()
         installSignalCleanup()
         installResizeHandler()
         installDisplayChangeHandler()
@@ -504,33 +599,7 @@ final class Desk {
         try await capturer.start(filter: filter, sourceRect: cropForFilter(),
                                  width: layout.pixelW, height: layout.pixelH, fps: options.fps)
 
-        if !options.noInput {
-            let reader = InputReader(viewport: { [weak self] in self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero) },
-                                     dryRun: options.dryRun) { [weak self] in self?.shutdown() }
-            reader.trace = options.debug
-            reader.ime = options.ime
-            if options.debug {
-                Log.write("krd: ime \(options.ime.rawValue) (auto = keys where the terminal reports them, "
-                          + "raw = keys only, unicode = inject the character)\n")
-            }
-            if let target = windowTarget {
-                reader.targetPid = { [weak self] in self?.aliveWindowPid() }
-                if options.debug {
-                    Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
-                              + "window \(target.id); a closed window falls back to global injection\n")
-                }
-            }
-            let active = reader.start()
-            input = reader
-            if options.debug {
-                Log.write("krd: input active=\(active)\n")
-            }
-            if options.debug {
-                let trusted = AXIsProcessTrusted()
-                Log.write(
-                    "krd: accessibility trusted=\(trusted) (clicks/keys need it; see System Settings > Privacy > Accessibility)\n")
-            }
-        }
+        startInput()
 
         // Clipboard bridge (issue #18). `--no-input` keeps the target-to-terminal half only: the
         // other half presses keys into the mirrored machine, so it is dropped rather than trusted.
@@ -1134,9 +1203,25 @@ final class Desk {
     private func applyLayout(geometry: TermGeometry) {
         let crop = Viewport.crop(full: fullRect, scale: zoomScale, focus: zoomFocus)
         let aspect = crop.width / max(crop.height, 1)
-        let layout = TileGrid.make(geometry: geometry, aspect: aspect,
+        // The status line owns the last row (plus whatever a panel asked for). The picture is
+        // fitted into the rest, so the cell math, the mouse mapping and the tile grid all stay in
+        // the same coordinate space.
+        var paneGeometry = geometry
+        if chromeEnabled, paneGeometry.rows > 4 {
+            let panelRows = chromeState.panel?.height ?? 0
+            paneGeometry.rows = max(3, paneGeometry.rows - 1 - min(panelRows, paneGeometry.rows - 4))
+        }
+        let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
                                    bpp: writer.format.bytesPerPixel)
+        if chromeEnabled {
+            // --full-frame draws one image the size of the picture, so the chrome still fits.
+            chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
+                                           imageCols: layout.paneCols, imageRows: layout.paneRows,
+                                           panel: chromeState.panel)
+            chrome.invalidate()
+            chromeDirty = true
+        }
         stateLock.lock()
         grid = layout
         sourceRect = crop
@@ -1236,6 +1321,7 @@ final class Desk {
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
+        framesHandled += 1
 
         // A window mirror whose very first frame is essentially all black is almost certainly a
         // compositing layer that slipped past the layer test, not an app (issue #24). One line,
@@ -1256,7 +1342,6 @@ final class Desk {
                           + "         --list now marks those entries; mirror the screen with --display <n>\n")
             }
         }
-
         // capture callback -> last byte out: the number that is actually felt (Q4 in
         // docs/BENCHMARK.md). `defer` so every early return is measured too.
         defer { lastPipeMs = benchNowMs() - started }
@@ -1341,14 +1426,20 @@ final class Desk {
     }
 
     private func handleResize() {
-        guard filter != nil, !cleanedUp else { return }
+        guard !cleanedUp, filter != nil || mock != nil else { return }
         let geometry = TermGeometry.read()
         applyLayout(geometry: geometry)
         guard let layout = currentGrid(), layout.pixelW > 8, layout.pixelH > 8 else { return }
         writer.clear()
-        // Same path as a display change: one place decides whether a stream is already
-        // starting, so a resize during a plug event queues instead of racing it.
-        restartCapture(reason: "a terminal resize")
+        chrome.invalidate()
+        chromeDirty = true
+        if let mock {
+            mock.resize(width: layout.pixelW, height: layout.pixelH)
+        } else {
+            // Same path as a display change: one place decides whether a stream is already
+            // starting, so a resize during a plug event queues instead of racing it.
+            restartCapture(reason: "a terminal resize")
+        }
         if options.debug {
             Log.write("resize: \(layout.pixelW)x\(layout.pixelH) in \(layout.paneCols)x\(layout.paneRows) cells\n")
         }
@@ -1411,6 +1502,269 @@ final class Desk {
         statsTimer = timer
     }
 
+    // MARK: TUI layer
+
+    /// Starts the 1 Hz chrome tick. Sampling is separate from drawing: the numbers refresh once
+    /// a second, the bytes go out only when something actually changed.
+    private func startChrome() {
+        guard chromeEnabled else { return }
+        chromeState.toast = "^\\ then ? for keys"
+        chromeToastUntil = Date().addingTimeInterval(8)
+
+        sampleChrome()
+        drawChrome()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.sampleChrome()
+            self.drawChrome()
+        }
+        timer.resume()
+        chromeTimer = timer
+    }
+
+    /// Fill `chromeMetrics` from the same counters the `--debug` line prints, plus the rates
+    /// (which the line only implies) and the switches that are otherwise invisible.
+    private func sampleChrome() {
+        let now = Date()
+        let elapsed = max(0.001, now.timeIntervalSince(chromeSampleTime))
+        let bytes = writer.totalBytes
+        let tiles = writer.framesEmitted
+        let dTiles = tiles - chromeSampleTiles
+        let dBytes = bytes - chromeSampleBytes
+        chromeSampleTime = now
+        chromeSampleTiles = tiles
+        chromeSampleBytes = bytes
+
+        let layout = currentGrid()
+        let cells = currentViewport()
+        var m = chromeMetrics
+        m.version = krdVersion
+        m.target = targetLabel
+        m.fpsTarget = options.fps
+        m.fps = Double(framesHandled - chromeSampleFrames) / elapsed
+        m.captureFps = Double(capturer.framesDelivered - chromeSampleDelivered) / elapsed
+        chromeSampleFrames = framesHandled
+        chromeSampleDelivered = capturer.framesDelivered
+        m.mbps = Double(dBytes) / 1_048_576.0 / elapsed
+        m.kbPerFrame = writer.lastFrameBytes / 1024
+        m.tilesPerSec = Int(Double(dTiles) / elapsed)
+        m.dirty = lastDirtyCount
+        m.tilesTotal = layout?.count ?? 0
+        m.clock = krdClock.string(from: now)
+        let queue = ptyQueueBytes()
+        m.queueBytes = queue
+        if queue >= 0 {
+            // Bytes written minus bytes that piled up = bytes the pty actually drained.
+            let drained = max(0, dBytes - (queue - chromeSampleQueue))
+            m.drainMbps = Double(drained) / 1_048_576.0 / elapsed
+            chromeSampleQueue = queue
+        }
+        m.queueMs = queue > 0 && m.mbps > 0.01 ? Double(queue) / (m.mbps * 1_048_576) * 1000 : 0
+        m.pipeMs = lastPipeMs
+        pipeSamples.append(lastPipeMs)
+        if pipeSamples.count > 300 { pipeSamples.removeFirst(pipeSamples.count - 300) }
+        m.pipeP99Ms = pipeSamples.max() ?? 0
+        m.capMs = -1                       // not measured yet: splitting it needs PTS (#52)
+        m.e2eMs = lastPipeMs
+        m.zlibMs = writer.lastCompressMs
+        m.writeMs = writer.lastWriteMs
+        m.writeMaxMs = writer.writeMaxMs
+        m.writeOver5 = writer.writeOver5Ms
+        m.callbacks = capturer.callbacks
+        m.delivered = capturer.framesDelivered
+        m.skipped = capturer.framesSkipped
+        m.idle = capturer.idleFrames
+        m.bad = capturer.badFrames
+        m.pxW = layout?.pixelW ?? 0
+        m.pxH = layout?.pixelH ?? 0
+        m.cellsW = cells.cols
+        m.cellsH = cells.rows
+        m.cellW = layout?.cellW ?? 0
+        m.cellH = layout?.cellH ?? 0
+        m.format = writer.format == .rgb ? "rgb f=24" : "rgba f=32"
+        m.sync = writer.syncLabel
+        m.quiet = writer.quietLabel
+        m.inputActive = input != nil
+        m.dryRun = options.dryRun
+        m.cursorDrawn = options.drawsCursor
+        m.logPath = Log.path ?? "-"
+        m.recording = recorderLabel()
+        m.geometrySource = geometrySource
+        m.envSwitches = activeEnvSwitches()
+        m.devices = deviceRows()
+        m.tileSpec = "\(options.tileCols)x\(options.tileRows)"
+        m.mbpsHistory.append(m.mbps)
+        m.latencyHistory.append(m.e2eMs)
+        if m.mbpsHistory.count > 60 { m.mbpsHistory.removeFirst() }
+        if m.latencyHistory.count > 60 { m.latencyHistory.removeFirst() }
+        if Date() > chromeToastUntil { chromeState.toast = nil }
+        // the log panel is I/O: only pay for it while it is open
+        if chromeState.panel == .log { m.logTail = readLogTail() }
+        chromeMetrics = m
+        writer.resetWriteStats()
+        chromeDirty = true
+    }
+
+    /// Bytes sitting in the pty's output buffer. sshd normally drains it at once and buffers in
+    /// userspace, so this stays 0 while the picture is seconds behind — which is exactly why the
+    /// status line carries a wall clock instead of pretending this is a lag meter.
+    private func ptyQueueBytes() -> Int {
+        var pending: Int32 = 0
+        // TIOCOUTQ = _IOR('t', 115, int) = 0x40047473; the macro is not imported into Swift.
+        let request: UInt = 0x4004_7473
+        guard ioctl(STDOUT_FILENO, request, &pending) == 0 else { return -1 }
+        return max(0, Int(pending))
+    }
+
+    private static let krdClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    private var krdClock: DateFormatter { Desk.krdClock }
+
+    /// Displays first (the active one starred), then windows: the same information `--list`
+    /// prints, refreshed once a second.
+    private func deviceRows() -> [String] {
+        guard let content = shareable else { return [] }
+        var rows: [String] = []
+        let activeID = targetLabel
+        for (index, display) in content.displays.enumerated() {
+            let bounds = CGDisplayBounds(display.displayID)
+            let active = activeID.hasPrefix("display \(index) ")
+            rows.append("\(active ? "*" : " ") [\(index)] display \(Int(bounds.width))×\(Int(bounds.height)) pt")
+        }
+        for window in content.windows where window.frame.width > 60 {
+            let app = window.owningApplication?.applicationName ?? "?"
+            let title = String((window.title ?? "-").prefix(40))
+            rows.append("   window \(window.windowID)  \(app) — \(title)")
+        }
+        return Array(rows.prefix(24))
+    }
+
+    private func startInput() {
+        guard !options.noInput else { return }
+        let reader = InputReader(
+            viewport: { [weak self] in
+                self?.currentViewport() ?? Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1,
+                                                    sourceRect: .zero)
+            },
+            dryRun: options.dryRun) { [weak self] in self?.shutdown() }
+        reader.onChromeKey = { [weak self] byte in self?.chromeKey(byte) ?? false }
+        reader.onChromeClick = { [weak self] row, col in self?.chromeClick(row: row, col: col) }
+        reader.trace = options.debug
+        reader.ime = options.ime
+        if options.debug {
+            Log.write("krd: ime \(options.ime.rawValue) (auto = keys where the terminal reports them, "
+                      + "raw = keys only, unicode = inject the character)\n")
+        }
+        if let target = windowTarget {
+            reader.targetPid = { [weak self] in self?.aliveWindowPid() }
+            if options.debug {
+                Log.write("krd: window mode — events go to pid \(target.pid) (\(target.name)), "
+                          + "window \(target.id); a closed window falls back to global injection\n")
+            }
+        }
+        let active = reader.start()
+        input = reader
+        if options.debug {
+            Log.write("krd: input active=\(active)\n")
+            Log.write("krd: accessibility trusted=\(AXIsProcessTrusted()) (clicks/keys need it; "
+                      + "see System Settings > Privacy > Accessibility)\n")
+        }
+    }
+
+    private func recorderLabel() -> String {
+        guard let recorder else { return "off" }
+        return "\(recorder.count)/\(options.recordFrames) frames"
+    }
+
+    private func activeEnvSwitches() -> String {
+        let env = ProcessInfo.processInfo.environment
+        let keys = ["KRD_Q", "KRD_FORMAT", "KRD_SYNC", "KRD_NOSYNC", "KRD_REAP", "KRD_DUMP",
+                    "KRD_GRID", "KRD_QUADRANTS", "KRD_DELTEST", "KRD_RAWDUMP"]
+        let active = keys.filter { env[$0] != nil }
+        if active.isEmpty { return "none" }
+        return active.map { "\($0)=\(env[$0] ?? "")" }.joined(separator: " ")
+    }
+
+    private func readLogTail(_ lines: Int = 12) -> [String] {
+        guard let path = Log.path, let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return Array(text.split(separator: "\n", omittingEmptySubsequences: false).suffix(lines)).map(String.init)
+    }
+
+    /// Draw and write, on the main queue. `ScreenWriter.writeChrome` is serialized against the
+    /// tile flush, so this can never split a base64 payload.
+    private func drawChrome() {
+        guard chromeEnabled, chromeDirty, let geometry = chromeGeometry else { return }
+        chromeDirty = false
+        let bytes = chrome.draw(geometry: geometry, metrics: chromeMetrics, state: chromeState)
+        writer.writeChrome(bytes)
+    }
+
+    /// `Ctrl-\` (prefix) and the byte after it. Returns true when the byte belongs to the chrome.
+    private func chromeKey(_ byte: UInt8) -> Bool {
+        guard chromeEnabled else { return false }
+        if chromeState.prefix {
+            chromeState.prefix = false
+            switch byte {
+            case 0x1C: chromeState.panel = nil
+            case UInt8(ascii: "q"): shutdown()
+            case UInt8(ascii: "?"), UInt8(ascii: "h"): chromeState.panel = .help
+            case UInt8(ascii: "s"): chromeState.panel = .stats
+            case UInt8(ascii: "f"): chromeState.panel = .settings
+            case UInt8(ascii: "d"): chromeState.panel = .devices
+            case UInt8(ascii: "l"): chromeState.panel = .log
+            default: break
+            }
+            applyPanel()
+            return true
+        }
+        if byte == 0x1C {
+            chromeState.prefix = true
+            chromeDirty = true
+            return true
+        }
+        if byte == 0x1B, chromeState.panel != nil {
+            chromeState.panel = nil
+            applyPanel()
+            return true
+        }
+        return false
+    }
+
+    private func chromeClick(row: Int, col: Int) {
+        guard chromeEnabled, let geometry = chromeGeometry else { return }
+        switch chrome.hitTest(row: row, col: col, geometry: geometry) {
+        case .statusSegment(let id):
+            switch id {
+            case "stats": chromeState.panel = .stats
+            case "help": chromeState.panel = .help
+            case "fps": chromeState.panel = .settings
+            case "target": chromeState.panel = .devices
+            default: break
+            }
+            applyPanel()
+        case .insidePanel:
+            break                                   // clicks inside a panel are not forwarded
+        case .outside:
+            break
+        }
+    }
+
+    /// A panel changes the layout: the picture keeps its rows when the panel fits underneath,
+    /// and steps aside when it does not.
+    private func applyPanel() {
+        // The panel's rows come out of the picture, which changes the capture size. The resize
+        // path already knows how to do that: re-measure, re-fit, clear, restart the stream.
+        handleResize()
+        chromeDirty = true
+    }
+
     func shutdown() {
         guard !cleanedUp else { return }
         cleanedUp = true
@@ -1423,6 +1777,10 @@ final class Desk {
             CGDisplayRemoveReconfigurationCallback(krdDisplayChanged, Unmanaged.passUnretained(self).toOpaque())
             displayCallbackRegistered = false
         }
+        chromeTimer?.cancel()
+        chromeTimer = nil
+        mock?.stop()
+        mock = nil
         input?.restore()
         writer.endSession()
         exit(0)

@@ -33,7 +33,7 @@ final class FrameRecorder {
     private let handle: FileHandle
     private let dir: String
     private let limit: Int
-    private var count = 0
+    private(set) var count = 0
     private let started = benchNowMs()
     private var failed = false
 

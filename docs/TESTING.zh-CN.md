@@ -47,6 +47,19 @@ krd --selftest --fps 30 --tile 32x16   # fewer, bigger tiles
 
 时长：40 帧 × 250 ms ≈ 10 s，然后 `endSession()`。
 
+### TUI 层
+
+`--dev` 用同样的办法验证 —— 标定图案走真实管线，状态栏写在它下面那一行：
+
+```bash
+make dev-mock                          # 进程内画出来的桌面：不需要权限，而且不会停
+make dev-selftest                      # = krd --selftest --dev --pane 137x44 --cell 17x33
+krd --selftest --dev --dev-panel stats # 面板预先打开，方便截图或报 bug
+```
+
+看三件事：状态栏紧贴画面下方（绝不压画面）、打开面板是让画面**缩小**而不是被盖住、
+`Ctrl-\\` 再 `q` 退出后终端回到原样（没留在备用屏幕里）。
+
 ## 2. `KRD_GRID=1` —— 瓦片定位
 
 | | |

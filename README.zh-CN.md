@@ -51,6 +51,8 @@ krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
 krd --display 1 --fps 30
 krd --no-input               # 只看不动
 krd --cursor                 # 把目标端的指针画进画面（默认不画：画了之后鼠标每动一下都会弄脏瓦片）
+krd --dev                    # TUI 层：画面下面一条状态栏 + 面板
+krd --mock --dev             # 同上，但屏幕是模拟的：不需要任何权限
 krd --debug                  # 统计写日志文件，不会打到画面上
 krd --format rgba            # 终端不认 f=24 时退回 f=32
 krd --bench                  # 在合成帧上给编码器计时，不需要终端

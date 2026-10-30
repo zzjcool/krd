@@ -36,6 +36,11 @@ final class InputReader {
     /// With --debug every recognised event is logged, so "nothing happens" can be split
     /// into "the terminal never sent it" vs "the click went to the wrong place".
     var trace = false
+    /// Prefix-mode byte handling for the TUI layer (`--dev`). Returns true when the byte belongs
+    /// to the chrome, i.e. must not reach the remote desktop.
+    var onChromeKey: ((UInt8) -> Bool)?
+    /// A click outside the picture, in 1-based cells: the status line and its panels.
+    var onChromeClick: ((Int, Int) -> Void)?
 
     /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
     /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
@@ -259,6 +264,10 @@ final class InputReader {
         let spot: String
         if pixelMouse {
             guard viewport.contains(pixel: cx, cy) else {
+                if !motion, let click = onChromeClick {
+                    let cell = TermGeometry.read().cellSize
+                    click(Int(Double(cy) / max(cell.h, 1)) + 1, Int(Double(cx) / max(cell.w, 1)) + 1)
+                }
                 if !motion { downButton = nil }
                 return
             }
@@ -266,6 +275,7 @@ final class InputReader {
             spot = "px(\(cx),\(cy))"
         } else {
             guard viewport.contains(cell: cx, cy) else {
+                if !motion { onChromeClick?(cy, cx) }
                 if !motion { downButton = nil }
                 return
             }
@@ -393,6 +403,7 @@ final class InputReader {
     }
 
     private func handleControl(_ byte: UInt8) {
+        if onChromeKey?(byte) == true { return }
         switch byte {
         case 0x1C:                                          // Ctrl-\ : leave
             onQuit()

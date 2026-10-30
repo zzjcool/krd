@@ -54,11 +54,22 @@ krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
+krd --dev                    # TUI layer: a status line and panels under the picture
+krd --mock --dev             # the same, with the screen mocked: no permission needed
 krd --debug                  # stats to a log file, never to the screen
 krd --format rgba            # fall back to f=32 if the terminal rejects f=24
 krd --bench                  # time the encoder on synthetic frames, no terminal needed
 make bench                   # every layer + budget verdicts -> bench/report.md
 ```
+
+`--dev` adds a status line (`fps`, `MB/s`, latency) and five panels — stats, devices, settings,
+log, help — reached with `Ctrl-\` then `s`/`d`/`f`/`l`/`?`, or by clicking the segment you want.
+The picture keeps every row above the status line; a panel takes its rows out of the picture and
+gives them back when it closes. `make dev` is the shortcut.
+
+`--mock` swaps ScreenCaptureKit for a desktop drawn in process (`--mock-size WxH`, default
+1920x1200). Tiles, dirty rects, the encoder, the placements and the chrome are all the real
+code — only the pixels are synthetic, so it needs no permission and never stops. `make dev-mock`.
 
 Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a real machine.
 Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
