@@ -160,7 +160,7 @@ func usage() -> String {
       --zoom-follow       pan the crop when the pointer reaches the edge of the picture
       --tile <c>x<r>      dirty-tile size in cells (default 8x4; 16x8 = fewer, bigger images)
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
-      --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
+      --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x16)
       --log <path>        write diagnostics to a file instead of over the picture
       --scale <f|auto>    how many pixels to capture per side, terminal upscales (issue #60).
                           auto (default) starts at 1 and steps down only while the pipe is behind,
@@ -189,8 +189,8 @@ func usage() -> String {
       --cursor            draw the pointer into the picture (default: hidden — the pane already
                           follows the local pointer, and a drawn one dirties tiles as the mouse
                           moves; --no-cursor is still accepted and means the same as the default)
-      --dpr <n>           device pixels per reported pixel for the pixel-sized path (default: 2
-                          when the terminal only answers CSI 16t/14t, 1 when the pty reports them)
+      --dpr <n>           device pixels per reported cell, i.e. picture quality (default: 2 when
+                          the terminal answered CSI 16t/14t in points, 1 when the pty reported pixels)
       --demo             draw a test pattern instead of the desk (no capture, no permission)
       --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
                           pixel-sized placement. Default: one probe at startup, then the answer
