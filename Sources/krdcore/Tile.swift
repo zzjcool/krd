@@ -9,7 +9,19 @@ public struct CompressedTile {
     public let rect: TileRect
     public let payload: [UInt8]
     /// compressed / raw, remembered so the next frame can pick a zlib level for this tile.
+    /// Exactly 1.0 when the payload is the raw pixels (issue #53).
     public let ratio: Double
+    /// False when `payload` is raw pixels because zlib bought nothing on this tile. `emit` then
+    /// leaves `o=z` off the escape: the terminal decodes the bytes as they are.
+    public let isCompressed: Bool
+
+    public init(index: Int, rect: TileRect, payload: [UInt8], ratio: Double, isCompressed: Bool = true) {
+        self.index = index
+        self.rect = rect
+        self.payload = payload
+        self.ratio = ratio
+        self.isCompressed = isCompressed
+    }
 }
 
 public typealias TileRect = (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)
@@ -23,14 +35,22 @@ public typealias TileRect = (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int,
 public struct LevelPolicy {
     private var ratio: [Double]
     private var level: [Int]
+    /// Tiles whose last compression bought nothing: `level(for:)` says 0 and `compress` decides
+    /// whether to send the pixels raw or re-test them cheaply.
+    private var skipped: [Bool]
     private let threshold: Double
     private let hysteresis: Double
     private let textLevel: Int
     private let photoLevel: Int
 
+    /// `compressed / raw` at or above this means zlib bought nothing. 1.0 inclusive on purpose: a
+    /// tile sent raw reports exactly 1.0, so the state has to be stable at 1.0 as well as above it.
+    public static let skipAt = 1.0
+
     public init(tiles: Int, textLevel: Int = 9, photoLevel: Int = 1) {
         ratio = [Double](repeating: -1, count: tiles)      // -1 = never seen
         level = [Int](repeating: 5, count: tiles)          // first frame: middle ground
+        skipped = [Bool](repeating: false, count: tiles)
         threshold = 0.10
         hysteresis = 0.03
         self.textLevel = textLevel
@@ -39,14 +59,28 @@ public struct LevelPolicy {
 
     public var count: Int { level.count }
 
+    /// 0 means "do not compress this tile" (issue #53); every other value is a zlib level.
     public func level(for index: Int) -> Int {
         guard index < level.count else { return 5 }
-        return level[index]
+        return skipped[index] ? 0 : level[index]
     }
+
+    /// How many tiles the encoder is currently sending raw (tests and diagnostics).
+    public var skippedCount: Int { skipped.lazy.filter { $0 }.count }
 
     mutating func observe(index: Int, ratio newRatio: Double) {
         guard index < level.count else { return }
         ratio[index] = newRatio
+
+        // Does compression pay for this tile at all? Enter at >= 1.0 (nothing gained, or expanded);
+        // leave only once zlib wins clearly again (below 1.0 - hysteresis), so a tile hovering at
+        // break-even does not flap between two encodings every frame.
+        if newRatio >= Self.skipAt {
+            skipped[index] = true
+        } else if newRatio < Self.skipAt - hysteresis {
+            skipped[index] = false
+        }
+
         if newRatio < threshold - hysteresis {
             level[index] = textLevel
         } else if newRatio > threshold + hysteresis {

@@ -21,7 +21,7 @@ Measured, on the reference layout (2329×1452 px, 198 tiles):
 | option | wire per frame | vs today | quality | protocol change |
 |---|---:|---:|---|---|
 | today: `--format rgb`, zlib, base64 | 13.58 MB | 1.00× | lossless | — |
-| skip zlib when it does not pay | 13.57 MB | 1.00× | lossless | none (saves 137 ms of CPU) |
+| skip zlib when it does not pay | 13.57 MB | 1.00× | lossless | none — **shipped in #53** (saves 73 % of the encode CPU) |
 | 18-bit colour (6-6-6) before zlib | 10.53 MB | 1.47× | 42.3 dB (visually lossless) | none |
 | **16-bit colour (5-6-5) before zlib** | **9.90 MB** | **1.57×** | 36.5 dB (banding on ramps) | none |
 | 15-bit (5-5-5) | 9.00 MB | 1.72× | 35.3 dB | none |
@@ -275,9 +275,13 @@ The point is 13.58 → 2.49 MB, which is the difference between "cannot" and "wo
 **Recommendation: B (cheaper pixels), content-adaptive, then A — which turns out to mean "fewer
 pixels".** Not a video codec; not a protocol extension.
 
-- **M1 — stop wasting work (a day).** Skip zlib when the payload is not smaller than its input, per
-  tile. Removes 73 % of the encode CPU on this content, costs nothing on text. Also re-tune the bench
-  so the `photo` case is honest about being a worst case (a second case with photographic statistics).
+- **M1 — stop wasting work (a day).** ✅ **shipped in #53** (`LevelPolicy` keeps one more state bit:
+  a tile whose last compression bought nothing is sent raw, and a cheap neighbour-delta predictor
+  rescues it the moment the content becomes compressible again). Measured on the `photo` case at the
+  reference layout: encode p50 **9.27 → 3.18 ms** (−66 %), wire **4,757,652 → 4,755,012 B** (raw beat
+  the zlib-expanded payload). Text/UI/gradient bytes are unchanged. The remaining item from this
+  milestone — a second `photo` case with photographic statistics instead of hash noise — is still
+  open.
 - **M2 — content-adaptive 16-bit (a few days).** Per tile: keep the zlib ratio of the last frame; if
   a tile has been incompressible (> 1.05) for two frames, send it 5-6-5 from then on, and remember
   that until it compresses well again. No flag needed for the common case, `--format`-style override
