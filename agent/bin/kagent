@@ -810,6 +810,7 @@ def cmd_vt(args, context):
 
 
 def cmd_render(args, context):
+    marker = "%d-%s" % (os.getpid(), time.strftime("%H%M%S"))
     command = args.cmdline
     if command and command[0] == "--":
         command = command[1:]
@@ -842,8 +843,15 @@ def cmd_render(args, context):
         # `ssh -tt` makes the far end a terminal; `stty` makes it the size the caller asked for.
         # Without the stty the remote pty keeps its default 80x24 and krd draws a smaller wall,
         # which is exactly the kind of "it works here" that this scaffold exists to prevent.
-        remote = "stty rows %d cols %d 2>/dev/null; exec %s" % (
-            rows, cols, " ".join(_shquote(a) for a in command))
+        # Killable by name from this side. `krd --wall` ignores SIGTERM and outlives the ssh
+        # connection that started it, and one survivor wedges ScreenCaptureKit for every later run:
+        # the next agent then sees "the wall draws no pictures" and calls it a product bug. The pid
+        # file is written next to the process, not into the stream, so it cannot be confused with
+        # what krd draws.
+        remote_pid_file = "/tmp/kagent-run-%s.pid" % marker
+        remote = ("stty rows %d cols %d 2>/dev/null; %s & guard=$!; "
+                  "echo $guard > %s; wait $guard; exit $?" % (
+                      rows, cols, " ".join(_shquote(a) for a in command), remote_pid_file))
         import shlex
         local_command = ["ssh", "-tt"] + context.target.ssh_options + [context.target.host, remote]
     resizes = []
@@ -854,6 +862,15 @@ def cmd_render(args, context):
     stream, status, seconds, answered = render.run_under_pty(
         local_command, cols=cols, rows=rows, seconds=args.seconds, cell=cell,
         terminal=args.terminal, resizes=resizes)
+    killed = None
+    if context.target.remote:
+        # The ssh is gone; make sure the program it started is too. A survivor is not a warning,
+        # it is the wedge that makes every later capture hang.
+        pid_file = "/tmp/kagent-run-%s.pid" % marker
+        done = context.target.run_sh(
+            "p=$(cat %s 2>/dev/null); if [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null; then "
+            "kill -9 \"$p\" && echo killed; fi; rm -f %s" % (pid_file, pid_file), timeout=30)
+        killed = "killed" in done.text
     prefix = args.png or str(context.artifacts.dir / "vt")
     stream_path = Path("%s.vt" % prefix)
     stream_path.parent.mkdir(parents=True, exist_ok=True)

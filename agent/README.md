@@ -174,6 +174,23 @@ line is read back without a screenshot.
 this repo paid for twice: a 1:1 terminal leaves slivers between tiles whose pixels differ from their
 cell box.
 
+## The checks that exist today
+
+Each is a shell script that fails with a sentence, and each was written against a real failure mode:
+
+| check | what it refuses to accept |
+|---|---|
+| `decoder-golden.sh` | the decoder drifting from krd's chunking, `U=1` placeholders, or `a=d` deletes |
+| `selftest-pictures-fill-cells.sh` | a tile whose pixels are not its cell box (the 1:1 seam bug) |
+| `wall-cards-keep-their-aspect.sh` | a card whose cell aspect does not match its window's pixel aspect |
+| `wall-survives-a-resize.sh` | a relayout that leaves the old placements behind |
+| `wall-fits-any-pane.sh` | a picture outside the pane, over the scroll bar or footer, or overlapping another |
+| `demo-note-tells-the-truth.sh` | krd's own debug footer claiming pixels that are not its cells x cell |
+
+```bash
+for check in agent/checks/*.sh; do sh "$check" || echo "FAILED $check"; done
+```
+
 ## Scenarios
 
 A scenario is JSON, because the two people who read it are a model and a reviewer.
