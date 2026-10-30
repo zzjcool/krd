@@ -11,6 +11,14 @@ final class InputReader {
     private let currentViewport: () -> Viewport
     private let onQuit: () -> Void
     private let dryRun: Bool
+    /// `false` = parse everything, inject nothing, and — unlike `--dry-run` — say nothing about it
+    /// either. The wall (`--wall`) is the one mode with no remote desktop behind it, and the dry-run
+    /// log has nowhere to go but the terminal that *is* the wall: `Log`'s sink is stderr until a
+    /// file is configured, so a single `input: key code=12` line ended in a `\n` on the last row and
+    /// scrolled the whole picture. Measured in a pty session. So this flag is not "dry run, quietly":
+    /// it is the whole local half of the reader, and `--wall` also routes `Log` to a file
+    /// (`main.swift` `Log.configure`) so the diagnostics nobody can suppress still land in one.
+    private let forward: Bool
     /// `nil` = display mode, post globally. Non-nil = `--window`: ask it for the pid every event, so
     /// a window that closed mid-session is noticed instead of silently clicking into whatever is in
     /// front (issue #17).
@@ -39,8 +47,11 @@ final class InputReader {
     /// Prefix-mode byte handling for the TUI layer (`--dev`). Returns true when the byte belongs
     /// to the chrome, i.e. must not reach the remote desktop.
     var onChromeKey: ((UInt8) -> Bool)?
-    /// A click outside the picture, in 1-based cells: the status line and its panels.
-    var onChromeClick: ((Int, Int) -> Void)?
+    /// A click outside the picture, in 1-based cells: the status line and its panels, and — with
+    /// `--wall` — the whole pane, which has no picture at all. The flag is `report.isWheel`: a wall
+    /// click is a click on a control, and a wheel report over it must not enter anything, so the
+    /// receiver has to be able to tell the two apart.
+    var onChromeClick: ((Int, Int, Bool) -> Void)?
 
     /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
     /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
@@ -62,9 +73,11 @@ final class InputReader {
     private var pixelMouse = false
     private var savedTermios: termios?
 
-    init(viewport: @escaping () -> Viewport, dryRun: Bool = false, onQuit: @escaping () -> Void) {
+    init(viewport: @escaping () -> Viewport, dryRun: Bool = false, forward: Bool = true,
+         onQuit: @escaping () -> Void) {
         self.currentViewport = viewport
         self.dryRun = dryRun
+        self.forward = forward
         self.onQuit = onQuit
     }
 
@@ -264,9 +277,14 @@ final class InputReader {
         let spot: String
         if pixelMouse {
             guard viewport.contains(pixel: cx, cy) else {
-                if !motion, let click = onChromeClick {
+                // Press only: a release is the same click again, and the wall's bar *steps* per
+                // click (`cardStep(per)`), so delivering both would move two pages for one click.
+                // The chrome path opened a panel twice before this and that was invisible, because
+                // opening an already-open panel is a no-op.
+                if !motion, !report.isRelease, let click = onChromeClick {
                     let cell = TermGeometry.read().cellSize
-                    click(Int(Double(cy) / max(cell.h, 1)) + 1, Int(Double(cx) / max(cell.w, 1)) + 1)
+                    click(Int(Double(cy) / max(cell.h, 1)) + 1, Int(Double(cx) / max(cell.w, 1)) + 1,
+                          report.isWheel)
                 }
                 if !motion { downButton = nil }
                 return
@@ -275,7 +293,7 @@ final class InputReader {
             spot = "px(\(cx),\(cy))"
         } else {
             guard viewport.contains(cell: cx, cy) else {
-                if !motion { onChromeClick?(cy, cx) }
+                if !motion, !report.isRelease { onChromeClick?(cy, cx, report.isWheel) }
                 if !motion { downButton = nil }
                 return
             }
@@ -376,6 +394,9 @@ final class InputReader {
     /// Terminals that cannot read OSC 52 simply never answer - the timeout below says so once,
     /// instead of leaving "Ctrl-V did nothing" to be diagnosed from scratch.
     private func requestPaste() {
+        // The OSC 52 read goes to the *terminal*, not to the target, so it is not covered by the
+        // dry-run gate below — and a wall has no pasteboard to hand anything to either.
+        guard forward else { return }
         guard clipboard.toTarget else {
             if trace { log("clipboard: Ctrl-V ignored, out direction off") }
             return
@@ -472,6 +493,9 @@ final class InputReader {
     }
 
     private func postKey(_ code: CGKeyCode, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
+        // The wall has no remote desktop: nothing is injected, and nothing is *logged* about
+        // injecting (see `forward`). This is checked before the trace line, not after it.
+        guard forward else { return }
         if dryRun || trace {
             log("key code=\(code) flags=\(flags.rawValue)"
                 + (phase == .press ? "" : " phase=\(phase)") + pidSuffix())
@@ -485,6 +509,7 @@ final class InputReader {
     }
 
     private func postUnicode(_ ch: Character, _ flags: CGEventFlags, phase: KeyReport.Phase = .press) {
+        guard forward else { return }        // same reason as `postKey`
         if dryRun || trace {
             log("text \(ch.debugDescription) flags=\(flags.rawValue)"
                 + (phase == .press ? "" : " phase=\(phase)") + pidSuffix())
@@ -502,6 +527,7 @@ final class InputReader {
     }
 
     private func postMouse(_ type: CGEventType, button: MouseButton, at point: CGPoint, flags: CGEventFlags) {
+        guard forward else { return }        // same reason as `postKey`
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: button.cgButton) else { return }
         // Always set the flags from the report itself. A CGEvent built with a nil source inherits
@@ -520,6 +546,7 @@ final class InputReader {
 
     /// `kind` follows xterm: 64 up, 65 down, 66 left, 67 right.
     private func postScroll(_ kind: Int, flags: CGEventFlags) {
+        guard forward else { return }        // same reason as `postKey`
         let vertical = kind < 2
         let sign: Int32 = kind % 2 == 0 ? 1 : -1            // the even codes are up / left
         guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1,

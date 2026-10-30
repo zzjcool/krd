@@ -70,8 +70,16 @@ struct Viewport {
         )
     }
 
+    /// Whether a mouse report belongs to the picture, i.e. is forwarded to the remote desktop.
+    ///
+    /// A **zero-size** viewport contains nothing, and that guard is load-bearing: the wall
+    /// (`--wall`) has no picture, so its viewport is size zero — while `(1...max(cols, 1))` calls
+    /// `(1, 1)` "inside the picture", which turned a click on the wall's own header row into a
+    /// remote click at the screen origin (`Input.swift:267-279`). A viewport with no cells must
+    /// never route into the remote path. No mirroring path builds a zero-size viewport
+    /// (`TileGrid.make` floors the pane at 1), so today's picture cannot change from this.
     func contains(cell cx: Int, _ cy: Int) -> Bool {
-        (1...max(cols, 1)).contains(cx) && (1...max(rows, 1)).contains(cy)
+        cols > 0 && rows > 0 && (1...cols).contains(cx) && (1...rows).contains(cy)
     }
 
     /// Pixel position inside the placement (SGR-Pixels mouse mode) -> global screen point.
@@ -87,7 +95,7 @@ struct Viewport {
     }
 
     func contains(pixel px: Int, _ py: Int) -> Bool {
-        px >= 0 && py >= 0 && px <= pixelWidth && py <= pixelHeight
+        pixelWidth > 0 && pixelHeight > 0 && px >= 0 && py >= 0 && px <= pixelWidth && py <= pixelHeight
     }
 
     /// The part of `full` a `scale`-times zoom shows, centred on `focus`.

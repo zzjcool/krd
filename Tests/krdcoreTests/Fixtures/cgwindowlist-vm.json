@@ -1,0 +1,119 @@
+[
+  {
+    "kCGWindowBounds" : {
+      "Height" : 30,
+      "Width" : 31,
+      "X" : 1703,
+      "Y" : 0
+    },
+    "kCGWindowLayer" : 25,
+    "kCGWindowName" : "Item-0",
+    "kCGWindowNumber" : 34,
+    "kCGWindowOwnerName" : "Control Center",
+    "kCGWindowOwnerPID" : 415
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 30,
+      "Width" : 42,
+      "X" : 1734,
+      "Y" : 0
+    },
+    "kCGWindowLayer" : 25,
+    "kCGWindowName" : "BentoBox-0",
+    "kCGWindowNumber" : 33,
+    "kCGWindowOwnerName" : "Control Center",
+    "kCGWindowOwnerPID" : 415
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 30,
+      "Width" : 144,
+      "X" : 1776,
+      "Y" : 0
+    },
+    "kCGWindowLayer" : 25,
+    "kCGWindowName" : "Clock",
+    "kCGWindowNumber" : 30,
+    "kCGWindowOwnerName" : "Control Center",
+    "kCGWindowOwnerPID" : 415
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 30,
+      "Width" : 1920,
+      "X" : 0,
+      "Y" : 0
+    },
+    "kCGWindowLayer" : 24,
+    "kCGWindowName" : "Menubar",
+    "kCGWindowNumber" : 23,
+    "kCGWindowOwnerName" : "Window Server",
+    "kCGWindowOwnerPID" : 202
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 1200,
+      "Width" : 1920,
+      "X" : 0,
+      "Y" : 0
+    },
+    "kCGWindowLayer" : 20,
+    "kCGWindowName" : "Dock",
+    "kCGWindowNumber" : 6,
+    "kCGWindowOwnerName" : "Dock",
+    "kCGWindowOwnerPID" : 414
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 679,
+      "Width" : 702,
+      "X" : 567,
+      "Y" : 279
+    },
+    "kCGWindowLayer" : 0,
+    "kCGWindowName" : "admin — scroll.sh — -zsh — 95×42",
+    "kCGWindowNumber" : 26,
+    "kCGWindowOwnerName" : "Terminal",
+    "kCGWindowOwnerPID" : 407
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 180,
+      "Width" : 360,
+      "X" : 8,
+      "Y" : 218
+    },
+    "kCGWindowLayer" : -2147483601,
+    "kCGWindowName" : "Featured",
+    "kCGWindowNumber" : 32,
+    "kCGWindowOwnerName" : "Notification Center",
+    "kCGWindowOwnerPID" : 490
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 180,
+      "Width" : 180,
+      "X" : 188,
+      "Y" : 38
+    },
+    "kCGWindowLayer" : -2147483601,
+    "kCGWindowName" : "Forecast",
+    "kCGWindowNumber" : 31,
+    "kCGWindowOwnerName" : "Notification Center",
+    "kCGWindowOwnerPID" : 490
+  },
+  {
+    "kCGWindowBounds" : {
+      "Height" : 180,
+      "Width" : 180,
+      "X" : 8,
+      "Y" : 38
+    },
+    "kCGWindowLayer" : -2147483601,
+    "kCGWindowName" : "Month",
+    "kCGWindowNumber" : 25,
+    "kCGWindowOwnerName" : "Notification Center",
+    "kCGWindowOwnerPID" : 490
+  }
+]
