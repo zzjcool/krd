@@ -31,6 +31,14 @@ struct ChromeGeometry: Equatable {
     var statusRow: Int
     var panelTop: Int
     var panelHeight: Int
+    /// 0-based row of the mirror's own bar, when it has one. The bar is not the `--dev` chrome: it
+    /// is the window furniture the wall's mirrors are dressed in (traffic lights, title, and the
+    /// button that shrinks the mirror back into the wall).
+    var barRow: Int? = nil
+    /// Whether the `--dev` status line and panels are drawn at all. The bar can be on with `--dev`
+    /// off, and the dev line's `target` segment is a measurement ("window 128444 moved to -192,…")
+    /// that has no business in window furniture at the bottom of the pane.
+    var devStatus: Bool = true
 
     var chromeTop: Int { imageRows }
 }
@@ -65,6 +73,9 @@ struct ChromeState {
 struct ChromeMetrics {
     var version = ""
     var target = "-"
+    /// What the bar calls this window: the app and its title, or the display's size. Empty when the
+    /// caller did not set it, in which case the bar shows no title at all rather than a diagnosis.
+    var title = ""
     var fpsTarget = 20
     var fps = 0.0
     var captureFps = 0.0
@@ -145,6 +156,9 @@ final class Chrome {
 
     enum Style: UInt8 {
         case plain, dim, bright, accent, warn, bad, reverse
+        /// The bar is reversed end to end, so its own text needs the reverse bit too - otherwise a
+        /// bright title would punch a hole in the furniture.
+        case barDim, barBright
         var sgr: String {
             switch self {
             case .plain: return "0"
@@ -154,6 +168,8 @@ final class Chrome {
             case .warn: return "33"
             case .bad: return "31"
             case .reverse: return "7"
+            case .barDim: return "7;2;37"
+            case .barBright: return "7;1;97"
             }
         }
     }
@@ -170,14 +186,17 @@ final class Chrome {
     /// hides the picture — squeezing a 12-row panel into a picture that has no slack is worse
     /// than not showing the picture while the panel is open.
     static func layout(paneCols: Int, paneRows: Int, imageCols: Int, imageRows: Int,
-                       panel: ChromePanel?) -> ChromeGeometry {
+                       bar: Bool = false, dev: Bool = true, panel: ChromePanel?) -> ChromeGeometry {
         let cols = max(2, paneCols)
         let rows = max(2, paneRows)
-        // One row is always reserved for the status line.
+        // `imageRows` already excludes the status line and the panel (the Desk subtracts them before
+        // fitting the picture), so this clamp is bookkeeping. The bar is *inside* that area: it is
+        // row 0 and the picture is centred in the rows below it.
         let pictureRows = max(1, min(imageRows, rows - 1))
         var geo = ChromeGeometry(cols: cols, rows: rows, imageRows: pictureRows,
                                  imageCols: min(imageCols, cols), statusRow: pictureRows,
-                                 panelTop: pictureRows + 1, panelHeight: 0)
+                                 panelTop: pictureRows + 1, panelHeight: 0,
+                                 barRow: bar ? 0 : nil, devStatus: dev)
         guard let panel else { return geo }
         // Desk already took these rows out of the picture before fitting it, so this is a
         // bookkeeping check: clamp instead of floating a panel over the tiles.
@@ -194,9 +213,55 @@ final class Chrome {
         for y in geometry.chromeTop..<rows {
             for x in 0..<cols { set(x, y, " ", .plain) }
         }
-        drawStatus(geometry: geometry, m: m, state: state)
-        if let panel = state.panel { drawPanel(panel, geometry: geometry, m: m) }
-        return render(from: geometry.chromeTop)
+        if let barRow = geometry.barRow {
+            drawBar(row: barRow, geometry: geometry, m: m)
+        }
+        if geometry.devStatus {
+            drawStatus(geometry: geometry, m: m, state: state)
+            if let panel = state.panel { drawPanel(panel, geometry: geometry, m: m) }
+        }
+        return render(from: min(geometry.chromeTop, geometry.barRow ?? Int.max))
+    }
+
+    // MARK: bar
+
+    /// The mirror's top bar: a macOS window dressed for a terminal pane.
+    ///
+    /// Left: three traffic lights (decoration - `--dev` has no window to close). Middle: what is
+    /// being mirrored. Right: the live rate, the clock, and the one control that matters, `[ - ]`,
+    /// which shrinks this window back into the wall it came from. One row, reversed end to end so it
+    /// reads as furniture rather than as picture.
+    private func drawBar(row: Int, geometry: ChromeGeometry, m: ChromeMetrics) {
+        guard row >= 0, row < rows, cols > 0 else { return }
+        for x in 0..<cols { set(x, row, " ", .reverse) }
+        // Left cluster. The dots are the macOS window buttons; a click anywhere on them does what
+        // the red one does, because there is only one thing a window can do here.
+        var x = 0
+        for dot in [" ● ", " ● ", " ● "] {
+            text(x, row, dot, .reverse, hit: "shrink")
+            x += DisplayWidth.of(dot)
+        }
+        x += 1
+        // The title gets whatever the right side does not need, and is cut rather than wrapped.
+        let button = " [ - ] "
+        let clock = m.clock.isEmpty || cols < 44 ? "" : "  " + m.clock
+        let rate = cols < 66 ? "" : String(format: "%4.0f fps  ·  %.1f MB/s", m.fps, m.mbps)
+        let right = DisplayWidth.of(button) + DisplayWidth.of(clock) + DisplayWidth.of(rate)
+        let room = max(0, cols - x - right - 1)
+        if room > 8 {
+            let title = DisplayWidth.truncate(m.title, to: room)
+            text(x, row, title, .barBright, hit: "shrink")
+        }
+        var rx = cols - DisplayWidth.of(button)
+        if !clock.isEmpty {
+            rx -= DisplayWidth.of(clock)
+            text(rx, row, clock, .barDim)
+        }
+        if !rate.isEmpty, rx - DisplayWidth.of(rate) > x {
+            rx -= DisplayWidth.of(rate)
+            text(rx, row, rate, .barDim)
+        }
+        text(cols - DisplayWidth.of(button), row, button, .barBright, hit: "shrink")
     }
 
     /// Force a full repaint on the next draw (after a resize or a cleared screen).
@@ -206,7 +271,9 @@ final class Chrome {
     func hitTest(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeHit {
         let y = row - 1, x = col - 1
         guard y >= 0, y < rows, x >= 0, x < cols else { return .outside }
-        if y == geometry.statusRow {
+        // The status line and the bar are both single rows of clickable text; everything else the
+        // chrome draws is either the picture (not ours) or a panel (which swallows its own clicks).
+        if y == geometry.statusRow || y == geometry.barRow {
             let id = cells[y * cols + x].hit
             return id.isEmpty ? .outside : .statusSegment(id)
         }

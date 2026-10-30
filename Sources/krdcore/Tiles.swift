@@ -42,6 +42,15 @@ public struct TileGrid {
     /// The on-screen size at `scale == 1`, i.e. the source x `fit` (may be larger than the source).
     public let fittedW: Int
     public let fittedH: Int
+    /// Where the picture block starts inside the terminal, in 1-based cells.
+    ///
+    /// `(1, 1)` whenever the picture fills its area, which is the common case. A picture smaller
+    /// than its area - a window whose own pixels are fewer than the pane's, or a pane taller than
+    /// the source's aspect - is *centred* in it instead of pinned to the top-left: a picture with
+    /// all the slack on one side reads as a rendering bug, and the slack is where the eye looks
+    /// first (design §6.7).
+    public let originCol: Int
+    public let originRow: Int
 
     /// The placement's pixel size: where the picture actually is on screen, and therefore what an
     /// SGR-Pixels mouse coordinate has to be mapped against (issue #71).
@@ -74,10 +83,14 @@ public struct TileGrid {
     ///
     /// Plain numbers rather than a terminal struct: the core has no tty and no `TermGeometry`
     /// (issue #21). `krd` forwards its `TermGeometry` through an extension with the old signature.
+    /// `area` is the cell rectangle the picture may use - the pane minus whatever chrome owns
+    /// (`top`/`left` are 1-based, `cols`/`rows` the size). Omitted (or equal to the pane) it is the
+    /// pane itself and the block lands at `(1, 1)`, which is every caller that predates centring.
     public static func make(paneCols: Int, paneRows: Int, cellW: Double, cellH: Double,
                             aspect: Double, tileCols: Int, tileRows: Int,
                             bpp: Int = 3, scale: Double = 1,
-                            source: CGSize = CGSize(width: 0, height: 0)) -> TileGrid {
+                            source: CGSize = CGSize(width: 0, height: 0),
+                            area: (top: Int, left: Int, cols: Int, rows: Int)? = nil) -> TileGrid {
         // Anything outside (0, 1] is "no scaling": a negative or absurd scale would ask for a
         // zero-pixel stream, which ScreenCaptureKit refuses.
         let captureScale = (scale.isFinite && scale > 0 && scale <= 1) ? scale : 1
@@ -115,6 +128,11 @@ public struct TileGrid {
             cols = min(paneCols, max(1, Int((Double(fittedW) / cellW).rounded(.up))))
             rows = min(paneRows, max(1, Int((Double(fittedH) / cellH).rounded(.up))))
         }
+        // Centre the block in the area it was given. Integer halves floor, so a spare row or column
+        // (the odd case) goes to the right/bottom - the same rule every layout uses.
+        let area = area ?? (top: 1, left: 1, cols: paneCols, rows: paneRows)
+        let originRow = area.top + max(0, (area.rows - rows) / 2)
+        let originCol = area.left + max(0, (area.cols - cols) / 2)
         return TileGrid(
             paneCols: cols, paneRows: rows,
             cellW: cellW, cellH: cellH,
@@ -123,7 +141,8 @@ public struct TileGrid {
             pixelH: max(2, Int((known ? source.height * capture : Double(boxH) * captureScale).rounded())),
             bpp: bpp, scale: captureScale,
             fit: fit, sourceW: source.width, sourceH: source.height, boxW: boxW, boxH: boxH,
-            boxCols: boxCols, boxRows: boxRows, fittedW: fittedW, fittedH: fittedH
+            boxCols: boxCols, boxRows: boxRows, fittedW: fittedW, fittedH: fittedH,
+            originCol: originCol, originRow: originRow
         )
     }
 
@@ -141,7 +160,7 @@ public struct TileGrid {
         let x1 = Int((Double(tx * tileCols + cx) / Double(max(paneCols, 1)) * Double(pixelW)).rounded())
         let y1 = Int((Double(ty * tileRows + cy) / Double(max(paneRows, 1)) * Double(pixelH)).rounded())
         return (x0, y0, max(1, x1 - x0), max(1, y1 - y0),
-                tx * tileCols + 1, ty * tileRows + 1, cx, cy)
+                originCol + tx * tileCols, originRow + ty * tileRows, cx, cy)
     }
 
     /// Copy one tile out of a full frame into a tight buffer.

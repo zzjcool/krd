@@ -484,7 +484,8 @@ public final class ScreenWriter {
 
     // MARK: full frame (fallback / comparison)
 
-    public func emitFullFrame(rgba: [UInt8], width: Int, height: Int, cols: Int, rows: Int) {
+    public func emitFullFrame(rgba: [UInt8], width: Int, height: Int,
+                              row: Int = 1, col: Int = 1, cols: Int, rows: Int) {
         // Same reasoning as emitTile: one fixed image id and placement id, overwritten in
         // place. Nothing is ever deleted, so no terminal can lose the picture to `a=d`.
         let newID = 2
@@ -499,7 +500,7 @@ public final class ScreenWriter {
 
         let b64 = Data(compressed).base64EncodedString()
         let chars = Array(b64.utf8)
-        append("\u{1B}[1;1H")
+        append("\u{1B}[\(row);\(col)H")
         var i = 0
         var first = true
         while i < chars.count {

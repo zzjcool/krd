@@ -248,8 +248,14 @@ cx = min(tileCols, paneCols - tx*tileCols)         // cells in this tile (edge t
 cy = min(tileRows, paneRows - ty*tileRows)
 x0 = round(tx*tileCols * cellW);  x1 = round((tx*tileCols + cx) * cellW)
 y0 = round(ty*tileRows * cellH);  y1 = round((ty*tileRows + cy) * cellH)
-→ (x0, y0, max(1,x1-x0), max(1,y1-y0), col: tx*tileCols+1, row: ty*tileRows+1, cols: cx, rows: cy)
+→ (x0, y0, max(1,x1-x0), max(1,y1-y0), col: originCol+tx*tileCols, row: originRow+ty*tileRows,
+   cols: cx, rows: cy)
 ```
+
+`originCol`/`originRow` (`make(area:)`) are `1, 1` unless the picture is smaller than the space it was
+given: then the block is **centred** in that area and every placement moves with it (design §6.7). The
+same two numbers go into `Viewport`, so a click in the margin is not forwarded and a click on the
+picture maps to the right source point.
 
 Rounding happens only at the rect edges, so tiles tile the picture with no gaps and no overlap;
 `cols`/`rows` are always whole cells, which is why no placement ever needs a sub-cell offset and

@@ -351,3 +351,86 @@ final class ClockTests: XCTestCase {
         XCTAssertTrue(bar(cols: 120).contains("pipe 54 ms"))
     }
 }
+
+/// The mirror's top bar (design §6.8): one reversed row with the window's name and the one control a
+/// terminal window can have - shrink back into the wall it came from. It is not the `--dev` status
+/// line: that one is a measurement and lives at the bottom, this one is furniture and lives on top.
+final class ChromeBarTests: XCTestCase {
+    private func geometry(cols: Int = 100, rows: Int = 30, bar: Bool = true, dev: Bool = false,
+                          pictureRows: Int = 28) -> ChromeGeometry {
+        Chrome.layout(paneCols: cols, paneRows: rows, imageCols: cols,
+                      imageRows: (bar ? 1 : 0) + pictureRows, bar: bar, dev: dev, panel: nil)
+    }
+
+    private func drawn(_ geometry: ChromeGeometry, title: String = "Terminal — admin — scroll.sh")
+        -> (text: String, chrome: Chrome) {
+        let chrome = Chrome()
+        var metrics = ChromeMetrics()
+        metrics.title = title
+        metrics.clock = "12:34:56"
+        metrics.fps = 18
+        metrics.mbps = 1.8
+        let bytes = chrome.draw(geometry: geometry, metrics: metrics, state: ChromeState())
+        // The bytes are positioned writes: keep the printable ones and drop the escapes.
+        var text = ""
+        var i = 0
+        let chars = Array(String(decoding: bytes, as: UTF8.self))
+        var skipping = false
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\u{1B}" { skipping = true; i += 1; continue }
+            if skipping {
+                if c == "m" || c == "H" { skipping = false }
+                i += 1
+                continue
+            }
+            text.append(c)
+            i += 1
+        }
+        return (text, chrome)
+    }
+
+    func testTheBarOwnsTheFirstRowAndThePictureStartsUnderIt() {
+        let geo = geometry()
+        XCTAssertEqual(geo.barRow, 0)
+        XCTAssertEqual(geo.imageRows, 1 + 28)
+        XCTAssertEqual(geo.statusRow, geo.imageRows, "the dev line would start here, and it is off")
+    }
+
+    func testTheBarNamesTheWindowAndOffersTheWayBack() {
+        let geo = geometry()
+        let (text, _) = drawn(geo)
+        XCTAssertTrue(text.contains("Terminal — admin — scroll.sh"))
+        XCTAssertTrue(text.contains("[ - ]"), "the shrink button is the whole point of the bar")
+        XCTAssertTrue(text.contains("12:34:56"), "the clock is what a macOS menu bar is for")
+        XCTAssertTrue(text.contains("18 fps"))
+    }
+
+    func testTheButtonIsOneClickTargetAcrossTheWholeRow() {
+        let geo = geometry()
+        let (_, chrome) = drawn(geo)
+        // The right end of the row is the button; the traffic lights on the left do the same thing.
+        XCTAssertEqual(chrome.hitTest(row: 1, col: geo.cols - 2, geometry: geo),
+                       .statusSegment("shrink"))
+        XCTAssertEqual(chrome.hitTest(row: 1, col: 2, geometry: geo), .statusSegment("shrink"))
+        // A row that is neither the bar nor the status line belongs to the picture.
+        XCTAssertEqual(chrome.hitTest(row: 5, col: 2, geometry: geo), .outside)
+    }
+
+    func testTheDevStatusLineIsNotDrawnWhenOnlyTheBarIsOn() {
+        let geo = geometry(dev: false)
+        let (text, _) = drawn(geo)
+        // `target` is the dev line's measurement; it must not appear in window furniture.
+        XCTAssertFalse(text.contains("window 128444"))
+    }
+
+    func testAPaneTooNarrowForTheRightSideKeepsTheButton() {
+        // 24 columns: the clock and the rate are dropped, the button is not - it is the only
+        // affordance, and a bar without it is decoration pretending to be a control.
+        let geo = geometry(cols: 24, pictureRows: 20)
+        let (text, chrome) = drawn(geo)
+        XCTAssertTrue(text.contains("[ - ]"))
+        XCTAssertFalse(text.contains("12:34:56"))
+        XCTAssertEqual(chrome.hitTest(row: 1, col: 22, geometry: geo), .statusSegment("shrink"))
+    }
+}

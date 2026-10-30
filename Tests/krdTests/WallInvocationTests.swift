@@ -193,3 +193,27 @@ final class DeskSetupFailureTests: XCTestCase {
                        "display 3 is not in the shareable list")
     }
 }
+
+/// The bar is window furniture, so it is on for a window the wall handed over (that is the only place
+/// a reader can "shrink back"), and off for a mirror someone typed by hand - where a status bar on top
+/// of a picture would be a new thing to explain rather than a familiar one.
+final class MirrorBarDefaultTests: XCTestCase {
+    func testAWindowEnteredFromTheWallWearsTheBar() {
+        let options = parseArguments(["krd", "--window", "42", "--wall-at", "0:1"])
+        XCTAssertEqual(options.bar, nil, "unset, i.e. decided by where the pane came from")
+        XCTAssertNotNil(options.wallAt)
+    }
+
+    func testABareMirrorStaysBare() {
+        let options = parseArguments(["krd", "--mirror"])
+        XCTAssertNil(options.bar)
+        XCTAssertNil(options.wallAt)
+    }
+
+    func testBothSpellingsWinInTheirOwnDirection() {
+        XCTAssertEqual(parseArguments(["krd", "--mirror", "--bar"]).bar, true)
+        XCTAssertEqual(parseArguments(["krd", "--window", "1", "--bar", "--no-bar"]).bar, false)
+        XCTAssertEqual(parseArguments(["krd", "--window", "1", "--wall-at", "0:0", "--no-bar"]).bar, false,
+                       "--no-bar overrides the wall's default")
+    }
+}

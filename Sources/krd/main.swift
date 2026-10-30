@@ -94,6 +94,10 @@ struct Options {
     /// A failed mirror's sentence, and the status it left with (`--said <exit> <text>`), so the wall
     /// it returns to can paint the reason in its footer instead of coming back without a word.
     var said: (exit: Int32, text: String)? = nil
+    /// The mirror's top bar (`--bar` / `--no-bar`). Unset means "when the wall handed the pane
+    /// over": a window entered from the landing screen comes dressed as one, with the button that
+    /// shrinks it back, while `krd --window <q>` typed by hand stays bare like it always was.
+    var bar: Bool? = nil
     /// The wall's glyph table (`--symbols`): `emoji` unless the terminal draws `▲ ▣ ⤢` two cells
     /// wide, which would slide the bar off the column a click maps to.
     var symbols: WallSymbols = .emoji
@@ -153,6 +157,9 @@ func usage() -> String {
       --mirror            the whole display as one picture at --fps (the old behaviour; plain krd
                           now opens the wall: the display on top, the three most recent windows
                           below, both scrolling on the right bar)
+      --bar / --no-bar    the mirror's one-row macOS bar: window name, rate, clock, and the [ - ]
+                          button that shrinks it back into the wall. On by default for a window
+                          the wall handed over, off for a mirror you started yourself
       --symbols <m>       the wall's glyphs: emoji (default) or ascii, for terminals that draw
                           ▲ ▣ ⤢ two cells wide
       --mock              draw the desktop in process: no screen, no permission, runs forever
@@ -360,6 +367,8 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
         // The default since phase 4; kept because scripts and muscle memory spell it.
         case "--wall": options.wall = true
         case "--mirror": options.wall = false
+        case "--bar": options.bar = true
+        case "--no-bar": options.bar = false
         case "--wall-at":
             // `<stage>:<card>`. Parsed by the same function both times, so the wall that hands over
             // and the wall that comes back cannot disagree about the spelling.
@@ -489,7 +498,7 @@ final class Desk {
     /// A restart that failed is worth one line, not one per plug event.
     private var restartFailureReported = false
     /// The `--window` target: events go to this process instead of the window manager (issue #17).
-    private var windowTarget: (pid: pid_t, id: CGWindowID, name: String)?
+    private var windowTarget: (pid: pid_t, id: CGWindowID, name: String, title: String)?
     /// Clipboard bridge (issue #18) and the 4 Hz timer that watches the target pasteboard.
     private var clipboard: ClipboardBridge?
     private var clipboardTimer: DispatchSourceTimer?
@@ -562,6 +571,14 @@ final class Desk {
     /// The wall owns the whole pane, so `--dev` has no rows to take: the layer stays off even when
     /// both flags are given.
     private var chromeEnabled: Bool { options.dev && !options.noChrome && !options.wall }
+    /// The mirror's own top bar (design §6.8). Independent of `--dev`: that is a diagnostic surface
+    /// at the bottom, this is the window's furniture at the top.
+    private var barEnabled: Bool { options.bar ?? (options.wallAt != nil) }
+    /// Chrome bytes are drawn whenever *either* layer is on: one painter, one geometry, one write
+    /// path, so the bar cannot end up in a different coordinate space than the status line.
+    private var chromeAvailable: Bool { chromeEnabled || barEnabled }
+    /// What the bar calls the window, e.g. "Terminal — admin — scroll.sh" or "display 1 · 1024×768".
+    private var barTitle = ""
     /// Wall time from capture callback to last byte out, per frame.
     private(set) var lastPipeMs = 0.0
     private var recorder: FrameRecorder?
@@ -678,6 +695,7 @@ final class Desk {
             let size = options.mockSize ?? (w: 1920, h: 1200)
             useLiteralSource(CGRect(x: 0, y: 0, width: size.w, height: size.h))
             targetLabel = "mock \(size.w)×\(size.h)"
+            barTitle = targetLabel
             self.filter = nil
             applyLayout(geometry: geometry)
             guard let layout = currentGrid() else {
@@ -770,6 +788,19 @@ final class Desk {
         trackedDisplayID = target.displayID
         displayCount = target.displayCount
         if let windowTarget = target.window { self.windowTarget = windowTarget }
+        // The bar's title, from the same target: an app and its window, or a display and its size.
+        // Not the `--debug` sentence, which is a measurement ("moved to -192,-1050") and would read
+        // as noise in window furniture.
+        if let window = target.window {
+            let title = window.title.trimmingCharacters(in: .whitespaces)
+            barTitle = title.isEmpty ? window.name : "\(window.name) — \(title)"
+        } else {
+            // Which display it is, in the terms the wall's caption uses (`main · 1/3`).
+            let boxes = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true))?
+                .displays.map { CGDisplayBounds($0.displayID) } ?? []
+            let index = boxes.firstIndex(of: target.rect).map { $0 + 1 } ?? 1
+            barTitle = "display \(index) · \(Int(target.rect.width))×\(Int(target.rect.height))"
+        }
         if options.debug {
             // Always said, not only when it fell back: `--display 1` on a one-display Mac is a
             // surprise worth one line even though nothing went wrong.
@@ -1244,7 +1275,7 @@ final class Desk {
         /// One sentence for `--debug`, from `DisplayPick`.
         var reason: String
         var fellBack: Bool
-        var window: (pid: pid_t, id: CGWindowID, name: String)?
+        var window: (pid: pid_t, id: CGWindowID, name: String, title: String)?
     }
 
     /// Build what the stream should capture. Startup and every display-set change go through
@@ -1283,9 +1314,10 @@ final class Desk {
                     + "is the desktop backdrop, not a window — ScreenCaptureKit hands back the bare\n"
                     + "         layer, which composites to black. Mirror the whole screen instead: \(advice)")
             }
-            var windowTarget: (pid: pid_t, id: CGWindowID, name: String)?
+            var windowTarget: (pid: pid_t, id: CGWindowID, name: String, title: String)?
             if let app = window.owningApplication, app.processID > 0 {
-                windowTarget = (app.processID, window.windowID, app.applicationName)
+                windowTarget = (app.processID, window.windowID, app.applicationName,
+                                window.title ?? "")
             }
             return CaptureTarget(filter: SCContentFilter(desktopIndependentWindow: window),
                                  rect: window.frame, displayID: nil,
@@ -1858,21 +1890,30 @@ final class Desk {
         // The status line owns the last row (plus whatever a panel asked for). The picture is
         // fitted into the rest, so the cell math, the mouse mapping and the tile grid all stay in
         // the same coordinate space.
-        var paneGeometry = geometry
-        if chromeEnabled, paneGeometry.rows > 4 {
+        // The rows the mirror's own bar owns at the top of the pane, and the rest: the picture may
+        // use what is left after the bar and the chrome, and its block is centred in that area
+        // (design §6.7). Slice of the same subtraction whether or not either is on.
+        let barRows = barEnabled ? 1 : 0
+        var pictureRows = max(1, geometry.rows - barRows)
+        if chromeEnabled, pictureRows > 4 {
             let panelRows = chromeState.panel?.height ?? 0
-            paneGeometry.rows = max(3, paneGeometry.rows - 1 - min(panelRows, paneGeometry.rows - 4))
+            pictureRows = max(3, pictureRows - 1 - min(panelRows, pictureRows - 4))
         }
+        var paneGeometry = geometry
+        paneGeometry.rows = pictureRows
+        let area = (top: 1 + barRows, left: 1, cols: geometry.cols, rows: pictureRows)
         // The source's own size, so the grid never asks for a box bigger than the source
         // (issue #69: ScreenCaptureKit pads that with black instead of upscaling).
         let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
                                    bpp: writer.format.bytesPerPixel, scale: effectiveScale,
-                                   source: fullRect.size)
-        if chromeEnabled {
+                                   source: fullRect.size, area: area)
+        if chromeAvailable {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
-                                           imageCols: layout.paneCols, imageRows: layout.paneRows,
+                                           imageCols: layout.originCol - 1 + layout.paneCols,
+                                           imageRows: barRows + pictureRows,
+                                           bar: barRows > 0, dev: chromeEnabled,
                                            panel: chromeState.panel)
             chrome.invalidate()
             chromeDirty = true
@@ -1884,7 +1925,10 @@ final class Desk {
         // Pane pixels, not capture pixels: SGR-Pixels coordinates are the terminal's own grid, so
         // `--scale 0.5` must not move the mapping by a factor of two (issue #60).
         viewport = Viewport(pixelWidth: layout.panePixelW, pixelHeight: layout.panePixelH,
-                            cols: layout.paneCols, rows: layout.paneRows, sourceRect: crop)
+                            cols: layout.paneCols, rows: layout.paneRows, sourceRect: crop,
+                            originCol: layout.originCol, originRow: layout.originRow,
+                            originPixelX: (layout.originCol - 1) * Int(layout.cellW.rounded()),
+                            originPixelY: (layout.originRow - 1) * Int(layout.cellH.rounded()))
         stateLock.unlock()
     }
 
@@ -2125,6 +2169,7 @@ final class Desk {
 
         if options.fullFrame {
             writer.emitFullFrame(rgba: pixels, width: width, height: height,
+                                 row: grid.originRow, col: grid.originCol,
                                  cols: grid.paneCols, rows: grid.paneRows)
             writer.endFrame()
             return
@@ -2264,7 +2309,7 @@ final class Desk {
     /// Starts the 1 Hz chrome tick. Sampling is separate from drawing: the numbers refresh once
     /// a second, the bytes go out only when something actually changed.
     private func startChrome() {
-        guard chromeEnabled else { return }
+        guard chromeAvailable else { return }
         chromeState.toast = "^\\ then ? for keys"
         chromeToastUntil = Date().addingTimeInterval(8)
 
@@ -2359,6 +2404,7 @@ final class Desk {
         if Date() > chromeToastUntil { chromeState.toast = nil }
         // the log panel is I/O: only pay for it while it is open
         if chromeState.panel == .log { m.logTail = readLogTail() }
+        m.title = barTitle
         chromeMetrics = m
         writer.resetWriteStats()
         chromeDirty = true
@@ -2476,7 +2522,7 @@ final class Desk {
     /// Draw and write, on the main queue. `ScreenWriter.writeChrome` is serialized against the
     /// tile flush, so this can never split a base64 payload.
     private func drawChrome() {
-        guard chromeEnabled, chromeDirty, let geometry = chromeGeometry else { return }
+        guard chromeAvailable, chromeDirty, let geometry = chromeGeometry else { return }
         chromeDirty = false
         let bytes = chrome.draw(geometry: geometry, metrics: chromeMetrics, state: chromeState)
         writer.writeChrome(bytes)
@@ -2532,9 +2578,16 @@ final class Desk {
             }
             return
         }
-        guard chromeEnabled, let geometry = chromeGeometry else { return }
+        guard chromeAvailable, let geometry = chromeGeometry else { return }
         switch chrome.hitTest(row: row, col: col, geometry: geometry) {
         case .statusSegment(let id):
+            // The bar's one control: a click on `[ - ]` (or on the traffic lights, which is what a
+            // red one does) shrinks this window back into the wall. Same path as `Ctrl-\`, so the
+            // two ways out cannot drift.
+            if id == "shrink" {
+                shutdown()
+                return
+            }
             switch id {
             case "stats": chromeState.panel = .stats
             case "help": chromeState.panel = .help

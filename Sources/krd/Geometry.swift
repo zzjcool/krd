@@ -58,12 +58,18 @@ struct Viewport {
     var rows: Int
     /// Source region in global screen *points* (CGEvent coordinate space).
     var sourceRect: CGRect
+    /// Where the placement starts inside the terminal: 1-based cells, and the same in window
+    /// pixels. `(1, 1)` / `(0, 0)` for every picture that fills its pane; a centred picture is the
+    /// one case where a report's cell is not already relative to the placement (`TileGrid.originRow`).
+    var originCol: Int = 1
+    var originRow: Int = 1
+    var originPixelX: Int = 0
+    var originPixelY: Int = 0
 
-
-    /// Terminal cell (1-based, relative to the placement origin) -> global screen point.
+    /// Terminal cell (1-based, absolute in the pane) -> global screen point.
     func point(forCell cx: Int, _ cy: Int) -> CGPoint {
-        let fx = (Double(cx) - 0.5) / Double(max(cols, 1))
-        let fy = (Double(cy) - 0.5) / Double(max(rows, 1))
+        let fx = (Double(cx - originCol) + 0.5) / Double(max(cols, 1))
+        let fy = (Double(cy - originRow) + 0.5) / Double(max(rows, 1))
         return CGPoint(
             x: sourceRect.minX + fx * sourceRect.width,
             y: sourceRect.minY + fy * sourceRect.height
@@ -79,15 +85,17 @@ struct Viewport {
     /// never route into the remote path. No mirroring path builds a zero-size viewport
     /// (`TileGrid.make` floors the pane at 1), so today's picture cannot change from this.
     func contains(cell cx: Int, _ cy: Int) -> Bool {
-        cols > 0 && rows > 0 && (1...cols).contains(cx) && (1...rows).contains(cy)
+        cols > 0 && rows > 0
+            && (originCol..<(originCol + cols)).contains(cx)
+            && (originRow..<(originRow + rows)).contains(cy)
     }
 
     /// Pixel position inside the placement (SGR-Pixels mouse mode) -> global screen point.
     /// A cell is ~17x33 px here, so cell coordinates cannot address a traffic-light button;
     /// pixels can, and the terminal is asking the right question in the first place.
     func point(forPixel px: Int, _ py: Int) -> CGPoint {
-        let fx = min(max(Double(px) / Double(max(pixelWidth, 1)), 0), 1)
-        let fy = min(max(Double(py) / Double(max(pixelHeight, 1)), 0), 1)
+        let fx = min(max(Double(px - originPixelX) / Double(max(pixelWidth, 1)), 0), 1)
+        let fy = min(max(Double(py - originPixelY) / Double(max(pixelHeight, 1)), 0), 1)
         return CGPoint(
             x: sourceRect.minX + fx * sourceRect.width,
             y: sourceRect.minY + fy * sourceRect.height
@@ -95,7 +103,9 @@ struct Viewport {
     }
 
     func contains(pixel px: Int, _ py: Int) -> Bool {
-        pixelWidth > 0 && pixelHeight > 0 && px >= 0 && py >= 0 && px <= pixelWidth && py <= pixelHeight
+        pixelWidth > 0 && pixelHeight > 0
+            && (originPixelX...(originPixelX + pixelWidth)).contains(px)
+            && (originPixelY...(originPixelY + pixelHeight)).contains(py)
     }
 
     /// The part of `full` a `scale`-times zoom shows, centred on `focus`.
@@ -255,11 +265,12 @@ extension TileGrid {
     /// `TermGeometry` owns the tty and stays in this module; the arithmetic is `krdcore`'s
     /// (issue #21). Same numbers in, same grid out — call sites did not change.
     static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int,
-                     bpp: Int = 3, scale: Double = 1, source: CGSize = CGSize(width: 0, height: 0)) -> TileGrid {
+                     bpp: Int = 3, scale: Double = 1, source: CGSize = CGSize(width: 0, height: 0),
+                     area: (top: Int, left: Int, cols: Int, rows: Int)? = nil) -> TileGrid {
         let cell = geometry.cellSize
         return make(paneCols: geometry.cols, paneRows: geometry.rows,
                     cellW: cell.w, cellH: cell.h, aspect: aspect,
                     tileCols: tileCols, tileRows: tileRows, bpp: bpp, scale: scale,
-                    source: source)
+                    source: source, area: area)
     }
 }

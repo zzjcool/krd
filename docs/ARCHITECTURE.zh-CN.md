@@ -223,8 +223,13 @@ cx = min(tileCols, paneCols - tx*tileCols)         // 这块瓦片有几格宽�
 cy = min(tileRows, paneRows - ty*tileRows)
 x0 = round(tx*tileCols * cellW);  x1 = round((tx*tileCols + cx) * cellW)
 y0 = round(ty*tileRows * cellH);  y1 = round((ty*tileRows + cy) * cellH)
-→ (x0, y0, max(1,x1-x0), max(1,y1-y0), col: tx*tileCols+1, row: ty*tileRows+1, cols: cx, rows: cy)
+→ (x0, y0, max(1,x1-x0), max(1,y1-y0), col: originCol+tx*tileCols, row: originRow+ty*tileRows,
+   cols: cx, rows: cy)
 ```
+
+`originCol`/`originRow`（`make(area:)`）在画面比给它的区域小时不是 `1, 1`：那时整块画面**居中**放在区域里，
+所有放置位置跟着走（设计 §6.7）。同样这两个数也进 `Viewport`，所以点在留白上的点击不会被转发、
+点在画面上的点击映射到正确的源坐标。
 
 四舍五入只发生在矩形边界上，所以瓦片正好铺满画面，既不留缝也不重叠；`cols`/`rows` 永远是整数格，
 因此任何 placement 都不需要亚格偏移，终端也不需要重采样。

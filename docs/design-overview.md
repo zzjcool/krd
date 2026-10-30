@@ -184,6 +184,44 @@ cards resized to their windows, the second click would miss.
 Give up a panel rather than show an 8-cell-wide thumbnail. One at a time plus scrolling is the only arrangement
 where "each one is legible" and "the cost is bounded" are both true.
 
+## 6.7 The picture is centred (the mirror)
+
+**The block is centred in the space it was given, not pinned to the corner.** A window whose own pixels are fewer
+than the pane's (a 98×111 panel in a 137×44 pane), or a display taller than the pane's aspect, used to leave all the
+slack on the right and bottom. That reads as a rendering bug, not as a margin: the eye checks the frame first, and one
+sided slack fails the check ("不管是窗口还是桌面，这里应该需要居中").
+
+| | |
+|---|---|
+| the area | the pane, minus the mirror's bar (1 row, §6.8), minus the `--dev` status line and panel rows. The picture is fitted into what is left (§6.6's rule) and centred inside it |
+| a spare cell | an odd leftover row or column goes right/bottom, the way every layout rounds |
+| the slack | stays the terminal's own background: the mirror never paints it, and the session's `ESC[2J` cleared it at the start. A resize clears again (`handleResize` → `writer.clear()`), so nothing stale can survive a shrink |
+| the mouse | the same origin is subtracted in **both** directions: `Viewport.originCol/originRow` for SGR cells, `originPixelX/Y` for SGR-Pixels. Without it every click lands a few cells up and to the left of the pointer |
+| the code | `TileGrid.make(area:)` → `originRow/originCol`, used by `rect()` (which is what a tile's placement is) and by `--full-frame`'s single image |
+
+The wall is not affected: its panels are placed by `WallLayout` with their own rects, which is why the wall never had
+this bug.
+
+## 6.8 The mirror wears a bar
+
+A mirror the **wall handed over** (`--wall-at`) gets one row of macOS window furniture at the top:
+
+```
+ ●  ●  ●   Terminal — admin — scroll.sh            18 fps  ·  1.8 MB/s  20:07:17  [ - ]
+```
+
+* reversed end to end, so it reads as furniture and not as picture;
+* the title is the window's app and title, or `display 1 · 1440×2560`;
+* `[ - ]` (and the traffic lights, which is what a red one does) **shrinks the window back into the wall**, on the
+  page it was clicked from. It runs the same path as `Ctrl-\`: `shutdown()` → `exec` the wall with `--wall-at`;
+* narrow panes drop the rate and then the clock; **the button is never dropped** — a bar without it is decoration
+  pretending to be a control;
+* on by default only for a handed-over mirror. `krd --window <q>` typed by hand stays bare (it never came from a
+  shelf, and a status bar would be a new thing to explain); `--bar` / `--no-bar` overrides either way.
+
+It is not the `--dev` line: that one is a measurement (`pipe 54 ms`) and lives at the bottom. Both can be on at once,
+and the bar costs the picture exactly one row.
+
 ## 7. Entering is today's code path
 
 `focus(window)` is today's `--window` (pid-targeted injection, alive-window fallback, backdrop refusal);

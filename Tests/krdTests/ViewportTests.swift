@@ -171,3 +171,57 @@ final class ViewportTests: XCTestCase {
         XCTAssertFalse(window.contains(point))
     }
 }
+
+/// A centred picture is the one case where a mouse report's cell is not already relative to the
+/// placement: the terminal counts from the pane's corner, the picture starts a few cells in. Both the
+/// cell path (SGR cells) and the pixel path (SGR-Pixels) have to subtract that origin, or every click
+/// lands a few cells up and to the left of where the reader pointed.
+final class ViewportOriginTests: XCTestCase {
+    private func viewport(originCol: Int = 1, originRow: Int = 1,
+                          originPixelX: Int = 0, originPixelY: Int = 0) -> Viewport {
+        Viewport(pixelWidth: 100, pixelHeight: 50, cols: 10, rows: 5,
+                 sourceRect: CGRect(x: 0, y: 0, width: 1000, height: 500),
+                 originCol: originCol, originRow: originRow,
+                 originPixelX: originPixelX, originPixelY: originPixelY)
+    }
+
+    func testTheFirstCellOfThePictureIsTheSourceCorner() {
+        // No origin: unchanged behaviour, one half-cell in.
+        let plain = viewport()
+        XCTAssertEqual(plain.point(forCell: 1, 1).x, 50)
+        XCTAssertEqual(plain.point(forCell: 1, 1).y, 50)
+    }
+
+    func testCentringIsSubtractedFromTheCell() {
+        let centred = viewport(originCol: 4, originRow: 3)
+        let point = centred.point(forCell: 4, 3)
+        XCTAssertEqual(point.x, 50, "cell 4 is the picture's first column, not its fourth")
+        XCTAssertEqual(point.y, 50)
+        XCTAssertEqual(centred.point(forCell: 13, 7).x, 950, "the block's last column is the right edge")
+    }
+
+    func testOnlyThePlacementIsInsideThePicture() {
+        let centred = viewport(originCol: 4, originRow: 3)
+        XCTAssertTrue(centred.contains(cell: 4, 3))
+        XCTAssertTrue(centred.contains(cell: 13, 7))
+        XCTAssertFalse(centred.contains(cell: 3, 3), "the margin is not the remote desktop")
+        XCTAssertFalse(centred.contains(cell: 14, 7))
+        XCTAssertFalse(centred.contains(cell: 4, 8))
+    }
+
+    func testPixelsUseThePixelOrigin() {
+        let centred = viewport(originCol: 4, originRow: 3, originPixelX: 51, originPixelY: 66)
+        XCTAssertEqual(centred.point(forPixel: 51, 66).x, 0)
+        XCTAssertEqual(centred.point(forPixel: 151, 116).x, 1000)
+        XCTAssertTrue(centred.contains(pixel: 51, 66))
+        XCTAssertFalse(centred.contains(pixel: 50, 66))
+    }
+
+    func testAZeroViewportStillContainsNothing() {
+        // The wall's rule: no picture, no forwarded clicks. Centring must not open that door.
+        let empty = Viewport(pixelWidth: 0, pixelHeight: 0, cols: 0, rows: 0, sourceRect: .zero,
+                             originCol: 5, originRow: 5)
+        XCTAssertFalse(empty.contains(cell: 5, 5))
+        XCTAssertFalse(empty.contains(pixel: 0, 0))
+    }
+}
