@@ -12,12 +12,13 @@
 #   make dev            run the desktop with the TUI layer (status line + panels)
 #   make dev-selftest   the same layer over the calibration pattern, no screen access needed
 #   make dev-mock       the same layer over a desktop drawn in process: no permission, runs forever
+#   make wall           the landing screen (same binary; `install.sh` also links a `wall` command)
 
 CONFIG  ?= --pane 137x44 --cell 17x33 --source 1920x1200
 BENCH_ARGS ?=
 KRD     := .build/release/krd
 
-.PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
+.PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock wall bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
 
 all: build
 
@@ -49,6 +50,9 @@ dev-mock: build
 
 mock: build
 	$(KRD) --mock $(MOCK_ARGS)
+
+wall: build
+	$(KRD) --wall $(BENCH_ARGS)
 
 bench:
 	python3 bench/bench.py $(BENCH_ARGS)

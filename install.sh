@@ -155,6 +155,12 @@ else
     say "==> installed $installed ($VERSION)"
 fi
 
+# `wall` is the landing screen under its everyday name (krd --wall). A symlink, not a wrapper
+# script: the binary reads argv[0], so `wall --symbols ascii` reaches the same parser and a new
+# flag can never drift out of step here.
+ln -sf krd "$PREFIX/wall"
+say "==> linked $PREFIX/wall -> krd"
+
 case ":$PATH:" in
     *":$PREFIX:"*) ;;
     *) say "note: $PREFIX is not in PATH; add it or call $installed directly" ;;
@@ -167,6 +173,7 @@ Next:
        $installed --list
   2. mirror this Mac:            $installed --fps 20
      mirror it over SSH:         ssh -t <host> krd --fps 20      (exit with Ctrl-\\)
+     see what is on screen:      $PREFIX/wall                   (exit with Ctrl-\\)
   3. the terminal must speak the kitty graphics protocol: rex, Ghostty, kitty, WezTerm
      (Terminal.app does not)
 

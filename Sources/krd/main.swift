@@ -181,8 +181,16 @@ func parseSymbolsSpec(_ spec: String) -> WallSymbols {
     return symbols
 }
 
+/// Does this argv[0] mean the landing screen? `install.sh` links `wall` next to `krd`, so the
+/// everyday spelling is one word (`wall`, `wall --symbols ascii`) and it reaches this same parser:
+/// the basename is the whole rule, and no wrapper script has to forward flags by hand.
+func invokedAsWall(_ argv0: String) -> Bool {
+    (argv0 as NSString).lastPathComponent == "wall"
+}
+
 func parseArguments() -> Options {
     var options = Options()
+    if invokedAsWall(CommandLine.arguments.first ?? "") { options.wall = true }
     let args = Array(CommandLine.arguments.dropFirst())
     var i = 0
     while i < args.count {
