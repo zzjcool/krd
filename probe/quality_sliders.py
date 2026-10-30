@@ -45,11 +45,44 @@ LABEL = {100: 'rgb + zlib (lossless)', 80: 'rgb 5-6-5 + zlib', 60: 'grey 8-bit p
 # ---------------------------------------------------------------- encoding
 
 def resample(rows, w, h, factor):
+    """Nearest neighbour by whole pixels: every channel of every factor-th pixel, not one channel
+    of it. `row[0::3*factor]` takes the red channel only and hands the encoder 1/3 of a row, which
+    it happily packs into a PNG whose header claims the full width -- a corrupt frame that a
+    terminal renders as noise, and that a byte count will not notice.
+    """
     if factor == 1:
         return rows, w, h
     tw, th = w // factor, h // factor
-    out = [row[0::3 * factor][:tw * 3] for row in rows[0::factor]]
+    out = []
+    for row in rows[::factor][:th]:        # ceil() would hand the encoder one row too many
+        buf = bytearray(tw * 3)
+        for c in range(3):
+            buf[c::3] = row[c::3 * factor][:tw]
+        out.append(bytes(buf))
     return out, tw, th
+
+
+def verify(payload, kind, w, h):
+    """Every payload must decode to exactly the pixels the header declares."""
+    if kind == 24:
+        raw = zlib.decompress(payload)
+        assert len(raw) == w * h * 3, f'rgb payload {len(raw)} != {w * h * 3}'
+        return
+    import struct as st
+    assert payload[:8] == b'\x89PNG\r\n\x1a\n', 'not a png'
+    hw, hh = st.unpack('>II', payload[16:24])
+    depth, colour = payload[24], payload[25]
+    assert (hw, hh) == (w, h), f'header {hw}x{hh} != {w}x{h}'
+    i, idat = 8, b''
+    while i < len(payload):
+        ln = st.unpack('>I', payload[i:i+4])[0]
+        if payload[i+4:i+8] == b'IDAT':
+            idat += payload[i+8:i+8+ln]
+        i += 12 + ln
+    raw = zlib.decompress(idat)
+    bits = 8 if colour == 0 else depth            # palette: the bit depth is the index width
+    stride = 1 + (w * bits + 7) // 8
+    assert len(raw) == h * stride, f'png payload {len(raw)} != {h * stride} ({stride}/row)' 
 
 
 def encode(rows, w, h, quality):
@@ -110,6 +143,40 @@ def clip_size(path):
         return (w, h) if w > 0 and h > 0 else (16, 9)
     except Exception:
         return (16, 9)
+
+
+def still(clip, w, h, at=3.0):
+    cmd = ['ffmpeg', '-v', 'error', '-ss', str(at), '-i', clip, '-frames:v', '1',
+           '-vf', f'scale={w}:{h}:flags=bilinear', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
+    buf = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout
+    if len(buf) < w * h * 3:
+        raise SystemExit(f'{clip}: no frame at {at}s')
+    buf = buf[:w * h * 3]
+    return [buf[i * w * 3:(i + 1) * w * 3] for i in range(h)]
+
+
+def table(clip, src_w, src_h):
+    """Every combination, measured on a real frame, with each payload checked against its header."""
+    rows = still(clip, src_w, src_h)
+    base_payload, base_kind, _ = encode(rows, src_w, src_h, 100)
+    verify(base_payload, base_kind, src_w, src_h)
+    base = len(base_payload)
+    print(f'{os.path.basename(clip)} at {src_w}x{src_h}; 100 / 1.0 / 30 fps = '
+          f'{human(base)}/frame, {human(base * 30)}/s\n')
+    for factor in DOWNSCALE:
+        r2, w2, h2 = resample(rows, src_w, src_h, factor)
+        cells = []
+        for quality in QUALITY:
+            payload, kind, _ = encode(r2, w2, h2, quality)
+            verify(payload, kind, w2, h2)
+            cells.append(f'{quality:3d}:{human(len(payload)):>8s} {base / len(payload):6.2f}x')
+        print(f'  --scale {("%.2f" % (1 / factor)).rstrip("0").rstrip("."):>4s} '
+              f'({w2}x{h2})  ' + '   '.join(cells))
+    print('\n  --fps 30/15/10/5/2 divide the same frame: 1.00x 2.00x 3.00x 6.00x 15.00x')
+    r2, w2, h2 = resample(rows, src_w, src_h, 2)
+    combined = len(encode(r2, w2, h2, 60)[0])
+    print(f'  combined 60 / 0.5 / 15  = {base / combined * 2:5.2f}x fewer bytes '
+          f'({human(combined)}/frame at {human(combined * 15)}/s)')
 
 
 def source(clip, w, h, fps=30):
@@ -187,13 +254,14 @@ class Screen:
 
 def main():
     argv = sys.argv[1:]
-    flags = {'--cells', '--start'}
+    flags = {'--cells', '--start', '--once'}
     positional = [a for i, a in enumerate(argv)
                   if not a.startswith('-') and not (i and argv[i - 1] in flags)]
     clip = os.path.abspath(positional[0]) if positional else os.path.abspath(DEFAULT_CLIP)
     if not os.path.exists(clip):
         raise SystemExit(f'{clip}: no such file')
     cells = argv[argv.index('--cells') + 1] if '--cells' in argv else None
+    once = '--once' in argv
     start = argv[argv.index('--start') + 1] if '--start' in argv else '60,2,15'
     try:
         start_quality, start_space, start_fps = (float(v) for v in start.split(','))
@@ -216,8 +284,9 @@ def main():
     src_w = max(64, int(box_w * cell_w)) // 2 * 2
     src_h = max(64, int(src_w * clip_h / clip_w)) // 2 * 2
 
-    sys.stderr.write(f'clip {clip_w}x{clip_h} -> box {box_w}x{box_h} cells '
-                     f'({src_w}x{src_h} px source), pane {cols}x{rows}\n')
+    if once:
+        table(clip, 768, 496)
+        return
 
     screen = Screen(cols, rows)
     bars = [Bar('colour', '--quality', QUALITY, lambda v: f'{v:>3d}   {LABEL[v]}'),
@@ -239,7 +308,8 @@ def main():
     tty.setraw(fd)
     out.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')      # mouse press, drag, SGR, no cursor
     out.write('\033[2J\033[H')
-    screen.at(1, 1, f'quality sliders — {os.path.basename(clip)} — video loops while you drag')
+    screen.at(1, 1, f'quality sliders — {os.path.basename(clip)} {clip_w}x{clip_h} in '
+                    f'{box_w}x{box_h} cells, {src_w}x{src_h} px source — drag the bars')
     screen.at(2, 1, '  ↑↓ pick · ←→ step · 0-9 jump · click or drag a bar · space pause · q quit')
     out.flush()
 
@@ -255,6 +325,7 @@ def main():
     last_send = 0.0
     pending = b''
     quit_now = False
+    checked = set()
 
     try:
         while True:
@@ -327,8 +398,19 @@ def main():
                 # a change asked for a redraw; otherwise send at most `fps` per second, and never
                 # catch up in a burst (a backlog would make the fps bar a lie)
                 if now - last_send >= 1.0 / bars[2].value or due <= 0:
-                    rows, tw, th = resample(rows, src_w, src_h, bars[1].value)
+                    factor = bars[1].value
+                    rows, tw, th = resample(rows, src_w, src_h, factor)
                     payload, kind, dims = encode(rows, tw, th, bars[0].value)
+                    if (bars[0].value, factor) not in checked:
+                        try:
+                            verify(payload, kind, tw, th)
+                        except AssertionError as e:
+                            out.write('\033[?2026l\033_Ga=d,d=A,q=2\033\\'
+                                      '\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\r\n')
+                            out.flush()
+                            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+                            raise SystemExit(f'quality {bars[0].value} at scale 1/{factor}: {e}')
+                        checked.add((bars[0].value, factor))
                     out.write('\033[3;2H')
                     wrote = time.time()
                     transmit(kind, payload, box_w, box_h, dims)
