@@ -13,12 +13,22 @@
 #   make dev-selftest   the same layer over the calibration pattern, no screen access needed
 #   make dev-mock       the same layer over a desktop drawn in process: no permission, runs forever
 #   make wall           the landing screen (same binary; `install.sh` also links a `wall` command)
+#
+# The agent scaffold (agent/README.md). `make agent-doctor` is the first command of any unattended
+# run: it measures the VM, the driver, Accessibility and the capture path instead of assuming them.
+#
+#   make agent-doctor   every capability of the VM target, measured
+#   make agent-fix      rebuild the driver on the target after editing agent/driver/*.swift
+#   make agent-check    the scaffold's own tests (no permissions, no network)
+#   make agent-render   decode krd's own escape stream back into the picture it drew
+#   make agent-scenario the end-to-end smoke test against the VM
 
 CONFIG  ?= --pane 137x44 --cell 17x33 --source 1920x1200
 BENCH_ARGS ?=
 KRD     := .build/release/krd
 
-.PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock wall bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
+.PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock wall bench bench-quick bench-encode bench-wire bench-replay bench-ab clean \
+	agent-doctor agent-fix agent-check agent-render agent-scenario agent-see
 
 all: build
 
@@ -74,6 +84,28 @@ bench-replay: build
 
 bench-ab:
 	./bench/ab.sh $(if $(REF),--ref $(REF)) --reps $(or $(REPS),5) --rounds $(or $(ROUNDS),20)
+
+# --- agent scaffold -------------------------------------------------------
+AGENT := agent/bin/kagent
+
+agent-doctor:
+	$(AGENT) doctor
+
+agent-fix:
+	$(AGENT) doctor --fix
+
+agent-check:
+	$(AGENT) selftest
+
+agent-render: build
+	$(AGENT) render --pane 80x24 --cell 17x33 --seconds 6 --strict-fit -- \
+	  $(KRD) --selftest
+
+agent-scenario:
+	$(AGENT) run agent/scenarios/screen-changes-and-restores.json
+
+agent-see:
+	$(AGENT) see --marks --grid 200
 
 clean:
 	swift package clean

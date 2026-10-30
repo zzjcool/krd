@@ -1,0 +1,213 @@
+# kagent — the scaffold an agent uses to develop krd
+
+krd is a terminal application whose bugs live in what a *terminal* does with a picture, on a machine
+whose screen is usually locked. Unit tests pin the bytes; they cannot answer "does the picture fill
+its box". This directory is what closes that gap: a small, boring, machine-addressable set of eyes,
+hands and assertions, so an unattended run can see, act, and prove.
+
+```
+agent/
+  bin/kagent              the CLI — every verb is documented by `kagent <verb> -h`
+  lib/kagent/             the parts (target, perceive, act, predicates, scenarios, render)
+  lib/vt.py               kitty-graphics escape stream -> pixels (no terminal, no screen)
+  lib/png.py              a stdlib PNG writer
+  driver/                 one Swift binary built on the target: shot, input, windows, probe
+  checks/                 reproduction scripts for `kagent prove`
+  scenarios/              end-to-end tests as JSON
+  tests/                  the decoder's own tests
+```
+
+Nothing here is part of the product. It is build tooling that happens to need a Mac to run.
+
+## The two machines
+
+| target | what it is | use it for |
+|---|---|---|
+| `vm` (default) | the tart guest `krd-vm` | everything visual and everything that clicks. Its screen is never locked, its TCC grants are already in place, and an agent cannot disturb the person using this Mac. |
+| `host` | this Mac | building, `swift test`, and `krd ax` reads. **Not** `see` (a locked screen returns the lock screen) and never `click` (it would land in whatever the user left open). |
+
+```bash
+kagent --target host doctor        # the host's own capabilities
+kagent doctor                      # the VM's
+```
+
+## The five capabilities
+
+### 1. An eye
+
+```bash
+kagent see                       # JPEG + the numbers to map a point in it back to the screen
+kagent see --marks               # the same, with numbered boxes on everything clickable
+kagent see --marks --grid 200    # ...and a labelled grid in screen points
+kagent see --window Safari       # one window (an id from `kagent windows`, or a substring)
+kagent see --as before           # name the frame so `same:before` can compare later
+```
+
+`see` prints a coordinate contract and nothing else is needed:
+
+```
+point = (image_x * 1.6000 + 0, image_y * 1.6000 + 0)
+```
+
+That is `scale` and `bounds.origin`. If doing the arithmetic is a risk — it is — pass image
+coordinates straight through instead: `kagent click --image 812 340`.
+
+### 2. Text
+
+```bash
+kagent text                          # the focused app's tree, one line per node
+kagent text --app Finder -i          # only things that can be acted on
+kagent text --menubar                # ...plus the menu bar (where "Save As" lives)
+kagent press @e12                    # AXPress: no mouse, works on an occluded window
+kagent set @e14 --text "hello"       # write AXValue, then read it back
+```
+
+A text screen is a few hundred tokens where a frame is ~100 KB, and unlike pixels it can be asserted
+on. Use it first; use `see` when the question is about the picture.
+
+### 3. Hands
+
+```bash
+kagent click 812 340                 # a real click, posted as a CGEvent
+kagent click --mark 4                # the element numbered 4 by `see --marks`
+kagent click --mark 4 --point        # ...by its centre instead of AXPress
+kagent drag 100 100 900 700          # press, glide in 24 steps, release
+kagent scroll --dy 5                 # at the pointer, or `scroll 800 400 --dy 5`
+kagent type "hello"                  # unicode events: works for CJK and emoji
+kagent key cmd+shift+a
+kagent app focus Safari
+```
+
+`click --mark` presses through Accessibility and **falls back to the centre point** when the node
+refuses (`AXTextField` does not implement `AXPress`). A refusal is an answer, not a failure.
+
+### 4. Assertions
+
+```bash
+kagent wait 'element:button:Save' --timeout 5
+kagent wait 'window:Settings'
+kagent wait 'pixel:812,340=#ff8800'
+kagent verify 'element:field:Search' 'window:Safari'
+kagent wait 'diff:before'            # the screen no longer matches the frame named `before`
+kagent wait 'same:before'            # ...or matches it again, pixel for pixel
+```
+
+Every predicate answers three ways, and the exit code carries the difference:
+
+| exit | meaning |
+|---|---|
+| 0 | satisfied |
+| 1 | not satisfied |
+| 2 | usage |
+| 3 | the system refused (Screen Recording / Accessibility) |
+| 4 | the environment is missing (no VM, no build) |
+| 5 | **unknown** — could not look |
+
+"Could not look" must never be reported as "is not there". That rule is the reason for exit 5.
+
+Predicate strings: `element:role:text`, `noelement:…`, `window:text`, `nowindow:…`,
+`pixel:x,y=#rrggbb`, `same:NAME`, `diff:NAME`, `shell:cmd`, `file:path`, `app:name`.
+A bare word is `element:*:word`.
+
+### 5. Pixels without a terminal
+
+`krd` writes kitty graphics escapes; `agent/lib/vt.py` decodes them back into the picture a terminal
+would draw. No screen, no permission, no terminal — which is how a rendering claim gets verified on a
+locked machine, and in CI.
+
+```bash
+kagent render --pane 146x46 --cell 17x33 --strict-fit -- .build/release/krd --selftest
+kagent render --target vm --pane 146x46 --cell 17x33 -- '~/bin/krd' --wall
+kagent vt render /tmp/stream.vt --png /tmp/frame      # a stream captured elsewhere
+kagent vt runs /tmp/pane.vt                          # placeholder cell rects, from a text capture
+```
+
+`render` runs the command on a pty sized exactly as asked, answers the terminal probes krd sends
+(`U=1` placement, DSR, cell size) the way Rex does — otherwise krd measures a different code path —
+and reports, per picture:
+
+```
+cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
+```
+
+`--strict-fit` fails when `native` is not exactly `cells x cell`. That inequality is the seam bug
+this repo paid for twice: a 1:1 terminal leaves slivers between tiles whose pixels differ from their
+cell box.
+
+## Scenarios
+
+A scenario is JSON, because the two people who read it are a model and a reviewer.
+
+```json
+{
+  "name": "the Apple menu changes the screen, Escape restores it",
+  "steps": [
+    {"do": "app focus Finder"},
+    {"sleep": 0.8},
+    {"do": "see --rect 0,30,1920,1170 --as closed"},
+    {"do": "click 12 10"},
+    {"expect": "diff:closed", "timeout": 5},
+    {"do": "key escape"},
+    {"expect": "same:closed", "timeout": 5}
+  ]
+}
+```
+
+```bash
+kagent run agent/scenarios/screen-changes-and-restores.json
+```
+
+Each step is either a command (the same strings the CLI takes, so the two cannot drift) or an
+expectation. Steps fail fast; the run writes `report.json`, `report.md`, every frame and the
+transcript into `artifacts/<scenario>-<stamp>/`. A scenario that leaves a directory like that behind
+is a bug report.
+
+## The loop: hunting, fixing, proving
+
+```bash
+kagent doctor                       # 1. is anything broken *before* I start?
+kagent see --marks                  # 2. look
+kagent text                         #    ...and read
+# 3. write the reproduction as a script that fails, in agent/checks/
+kagent prove --check agent/checks/the-bug.sh --baseline HEAD
+# 4. fix it
+# 5. prove again: before fails, after passes
+make test && kagent selftest && kagent run agent/scenarios/<the nearest one>.json
+```
+
+`prove` builds the baseline in a throwaway git worktree and runs your check against **both**
+binaries. The verdict says what actually happened:
+
+| verdict | meaning |
+|---|---|
+| `fixed` | fails before, passes after |
+| `not-a-bug` | passed before: the check does not reproduce anything |
+| `not-fixed` | still fails |
+| `regressed` | passed before, fails now |
+
+Evidence lands in `artifacts/<name>/{before.txt,after.txt,state.json}`. A patch is not "done"
+because the check it was written against passes — it is done when the *baseline* arm fails.
+
+## What this scaffold cannot do (say so, do not work around it)
+
+- **Chrome / Electron web content is not in the AX tree.** `AXEnhancedUserInterface` and
+  `AXManualAccessibility` cannot be set on this OS. For those windows, use pixels, or CDP.
+- **A slept display wedges ScreenCaptureKit.** The capture call never returns, the process becomes
+  unkillable, and every later `krd` hangs at its last log line. `kagent doctor` reports a wedged
+  process; the fix is `pkill -9 -x krd` and `caffeinate -u -t 10` before starting again.
+- **Pixels and Accessibility are not one atomic snapshot.** They are collected at different times.
+  After an unverified action, re-read; do not replay the action to resolve a disagreement.
+- **One pointer, one focus.** A desktop is a single-owner resource: two agents clicking at once
+  produce a result neither can explain. One scenario at a time per target.
+- **The host's screen is locked.** `see` on `host` returns the lock screen. That is not a bug in the
+  scaffold; it is the reason the VM exists.
+
+## Artifacts and hygiene
+
+`artifacts/` is gitignored and is the only place a run writes. Frames are JPEG (or PNG with
+`--format png`), transcripts are JSONL, and nothing embeds image bytes in a log. `kagent trace`
+prints the tail. Delete the directory freely: nothing depends on it surviving.
+
+The driver is built on the target once per source revision (`~/.kagent/driver.sha` tracks it). After
+editing `agent/driver/*.swift`, run `kagent doctor --fix` — a stale driver that silently lacks a
+verb is the failure mode this cache exists to make impossible to hit unnoticed.
