@@ -16,6 +16,7 @@ English | [简体中文](design-overview.zh-CN.md)
 │                                                        │   │
 └────────────────────────────────────────────────────────┘   ▼
 🖥 Built-in — 1512×982 · main · 1/3                          ╵
+────────────────────────────────────────────────────────    
 ▣ recent    1–3 / 7                                  ⤢ 3   ╷
 ┌──────────────┬──────────────┬──────────────┐             ▲
 │    Safari    │    Xcode     │   Terminal   │             │
@@ -117,12 +118,19 @@ is 20+ cells tall, and the thumb doubles as "where am I in this list".
 
 ## 6.5 Layout (the row budget)
 
-Top to bottom: header 1 row → stage (`stageH + 1` caption) → card band header 1 row → cards
-(`cardH + 1` caption) → one blank row → footer 1 row.
+Top to bottom: header 1 row → stage (`stageH + 1` caption) → **divider 1 row** → card band header 1
+row → cards (`cardH + 1` caption) → one blank row → footer 1 row.
+
+The divider came out of review: without it the stage caption, the band header and the tops of the
+cards arrive as three dense rows in a row ("too crowded"). One dim rule is cheaper than a blank row -
+it says where a section ends, which a blank row does not. It is also the first thing dropped: below
+20 rows there is no divider (`dividerRow` is empty) because in a pane that short a row of rule is
+worth less than a row of picture.
 
 - Content width `content = cols - 2` (bar plus padding); `winW = floor((content - (per-1)) / per)` -
   137 columns / 3 → 44 cells, and the card's height follows from its width at a 1.62 aspect (→ 14 rows).
-- The stage takes the remaining rows: `mainH = rows - 4 - winRows - 1 - 1`.
+- The stage takes the remaining rows: `mainH = rows - (5 or 6) - winRows - 1` (6 when there is a
+  divider). At 137x44 that is **stage 23 + cards 14** - one row of picture less than before the rule.
 - Whole-cell placement only; never the last cell of the last row (autowrap pushes the whole picture up).
 - Every truncation and pad goes through `DisplayWidth` (CJK and emoji are wide). `⤢ ▣ ▲ ▼` are
   East-Asian-Ambiguous, so `--symbols ascii` (`> w ^ v < . '`) exists and both modes must lay out the same
@@ -201,9 +209,12 @@ where "each one is legible" and "the cost is bounded" are both true.
    which is safe.
 
    **But today's `chromeClick` swallows clicks that hit no control** (`.outside` → `break`,
-   `main.swift:1754-1755); the bar has to return real actions instead of inheriting that default. Note also that a
-   wheel report over chrome takes the same branch (only `!motion` is checked), so the bar must ignore wheel
-   explicitly.
+   `main.swift:1754-1755); the bar has to return real actions instead of inheriting that default. A wheel report
+   over chrome takes the same branch (only `!motion` is checked), so the wall interprets it itself:
+   **one notch = one display or one card** (`WallLayout.wheelAction(row:col:direction:)`), because a drag is a
+   continuous gesture and a page per notch makes a trackpad flick jump from the first window to the last. The bar's
+   `▲`/`▼` stay "one click, one page". A shelf with nothing to scroll returns `nil`, so the notch is swallowed by the
+   wall instead of moving something else.
 6. **`Desk`**: `wall / focus` plus the transition; `focus` uses today's `restartCapture`.
 
 **The biggest seam is placement**: nothing today can put an image at an arbitrary cell rect. `TileGrid.rect`

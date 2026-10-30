@@ -2050,16 +2050,17 @@ final class Desk {
     /// rect", and the wall has no picture at all).
     private func chromeClick(row: Int, col: Int, isWheel: Bool) {
         if wallMode {
-            // A wheel report is not a click, and nothing under the wall scrolls: the bar is
-            // clicked. Ignoring it here is what keeps a two-finger scroll from entering a card.
-            // The guard stays on the calling thread because it touches nothing.
-            guard !isWheel else { return }
+            // A wheel report is not a click: it scrolls the shelf it is over instead of entering
+            // the card under the cursor (a two-finger scroll used to enter a window by accident).
             // This closure runs on the *reader* thread (`InputReader.onChromeClick`), while the
             // wall's 1 s tick, `handleResize()` and `shutdown()` all own the desk on the main
             // queue. Mutating `wallState` and repainting from here would race that tick on the
             // canvas's previous-cell grid and on the shelf offsets, so the wall branch only hops:
             // after this line everything the wall owns is touched by exactly one thread.
-            DispatchQueue.main.async { [weak self] in self?.wallClick(row: row, col: col) }
+            let wheel = isWheel ? 1 : 0
+            DispatchQueue.main.async { [weak self] in
+                self?.wallClick(row: row, col: col, wheel: wheel)
+            }
             return
         }
         guard chromeEnabled, let geometry = chromeGeometry else { return }
@@ -2083,15 +2084,21 @@ final class Desk {
     /// The wall half of `chromeClick`, on the main queue — the same queue as the 1 s tick, so the
     /// model, the canvas and the offsets are never read and written from two threads (see the hop
     /// in `chromeClick` for the whole reason).
-    private func wallClick(row: Int, col: Int) {
+    /// A click on a wall cell, or — when `wheel` is non-zero — a wheel notch over it.
+    ///
+    /// The wheel only carries a direction here, not a distance: one notch is one display or one
+    /// card, because a page per notch makes a trackpad flick skip most of the shelf.
+    private func wallClick(row: Int, col: Int, wheel: Int = 0) {
         guard var state = wallState, let pane = wallPane else { return }
         let displays = wallModel.displays.count
         let windows = wallModel.windows.count
         let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                   displays: displays, windows: windows)
-        // nil = header, band header, blank row, the gap column, a dead end of the bar: those
-        // cells belong to the wall too, so the click ends here.
-        guard let action = layout.action(row: row, col: col) else { return }
+        // nil = header, the divider, the gap column, a dead end of the bar, a shelf with nothing to
+        // scroll: those cells belong to the wall too, so the gesture ends here.
+        let action = wheel == 0 ? layout.action(row: row, col: col)
+                                : layout.wheelAction(row: row, col: col, direction: wheel)
+        guard let action else { return }
         state.apply(action, displays: displays, windows: windows, per: layout.per)
         wallState = state
         switch action {

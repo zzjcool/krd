@@ -110,6 +110,8 @@ public struct WallLayout: Equatable {
     public let stage: CellRect
     /// Exactly one row, directly under `stage` (empty only in a pane too short to have one).
     public let stageCaption: CellRect
+    /// The one-row rule between the stage block and the card section (design §6.5).
+    public let dividerRow: CellRect
     /// The "recent" band header row, always present.
     public let bandRow: Int
     /// This page only: `min(per, windowCount - cardStart)` rects, none when there is no room.
@@ -207,8 +209,18 @@ public struct WallLayout: Equatable {
         // 44 / (1.62 * 2) = 13.6 -> 14 rows, which is the height the mockup was measured with.
         let idealCardH = max(minCardRows, Int((Double(winW) / (cardAspect * cellAspect)).rounded()))
 
-        // The five fixed rows: header, stage caption, band header, blank, footer.
-        let budget = max(0, rows - 5)
+        // The fixed rows: header, stage caption, (divider), band header, blank, footer.
+        //
+        // The divider is one dim rule between the stage block and the card section. Without it the
+        // caption, the band header and the tops of the cards arrive as three dense rows in a row -
+        // the review's words were "too crowded" - and a rule is cheaper than a blank row: it says
+        // where one section ends instead of just wasting the line.
+        //
+        // It is also the first thing dropped. In a pane this short a row of rule is worth less than
+        // a row of picture, and nothing below depends on it existing: `dividerRow` is empty and the
+        // painter draws nothing.
+        let wantsDivider = rows >= 20
+        let budget = max(0, rows - (wantsDivider ? 6 : 5))
         // Shrink order is cards first, then the stage, then drop the cards entirely (design §6.5).
         // -1 is the card caption row.
         var cardH = min(idealCardH, max(0, budget - minStageRows - 1))
@@ -256,6 +268,14 @@ public struct WallLayout: Equatable {
         let stageCaption = clip(col: 1, row: row, width: content, height: 1)
         row += 1
 
+        let dividerRow: CellRect
+        if wantsDivider {
+            dividerRow = clip(col: 1, row: row, width: content, height: 1)
+            row += 1
+        } else {
+            dividerRow = CellRect(col: 1, row: row, cols: 0, rows: 0)
+        }
+
         let bandRow = row
         row += 1
 
@@ -294,6 +314,7 @@ public struct WallLayout: Equatable {
             headerRow: headerRow,
             stage: stage,
             stageCaption: stageCaption,
+            dividerRow: dividerRow,
             bandRow: bandRow,
             cards: cards,
             cardCaptions: cardCaptions,
@@ -350,6 +371,40 @@ public struct WallLayout: Equatable {
             }
         }
         if row == footerRow { return .back }
+        return nil
+    }
+
+    /// A wheel notch over a cell: one display or one card, decided by which band the row is in.
+    ///
+    /// One at a time, not a page. The bar's `▲`/`▼` are a click and therefore a page (design §5),
+    /// while a wheel is a continuous gesture and a page per notch overshoots: three cards per notch
+    /// make a trackpad flick jump from the first window to the last.
+    ///
+    /// `nil` for a shelf with nothing to scroll - including the bar's own segments, which is why
+    /// the column is taken: the bar's rows are shared with the band it points at, so the column is
+    /// what tells "I aimed at the bar" from "I aimed at the cards".
+    public func wheelAction(row: Int, col: Int, direction: Int) -> WallAction? {
+        guard direction != 0 else { return nil }
+        let step = direction > 0 ? 1 : -1
+        let canScrollStage = bar.stage.count > bar.stage.visible
+        let canScrollCards = bar.cards.count > bar.cards.visible
+        let onBar = col == barCol
+
+        if row >= stage.row, row <= stage.maxRow { return canScrollStage ? .stageStep(step) : nil }
+        if row == stageCaption.row { return canScrollStage ? .stageStep(step) : nil }
+        if onBar, !bar.stage.rect.isEmpty, row == bar.stage.rect.row || row == bar.stage.rect.maxRow {
+            return canScrollStage ? .stageStep(step) : nil
+        }
+        if onBar, !bar.cards.rect.isEmpty, row >= bar.cards.rect.row, row <= bar.cards.rect.maxRow {
+            return canScrollCards ? .cardStep(step) : nil
+        }
+        if row == bandRow { return canScrollCards ? .cardStep(step) : nil }
+        if let first = cards.first, row >= first.row, row < first.row + first.rows {
+            return canScrollCards ? .cardStep(step) : nil
+        }
+        if let caption = cardCaptions.first, row == caption.row {
+            return canScrollCards ? .cardStep(step) : nil
+        }
         return nil
     }
 

@@ -375,6 +375,7 @@ final class WallCanvas {
         drawHeader(&grid, model: model, layout: layout)
         drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints)
         drawStageCaption(&grid, model: model, layout: layout)
+        drawDivider(&grid, layout: layout)
         drawBand(&grid, model: model, layout: layout)
         drawCards(&grid, model: model, layout: layout, paints: paints)
         drawCardCaptions(&grid, model: model, layout: layout)
@@ -464,6 +465,18 @@ final class WallCanvas {
     }
 
     /// `▣ recent    1–3 / 7                                          ⤢ 3`
+    /// `────────────...` — one dim rule between the stage block and the cards.
+    ///
+    /// Review: the stage caption, the band header and the tops of the cards arrived as three dense
+    /// rows with nothing between them. A rule costs one row and says where one section ends; a
+    /// blank row costs the same and says nothing.
+    private func drawDivider(_ grid: inout Grid, layout: WallLayout) {
+        let rect = layout.dividerRow
+        guard !rect.isEmpty else { return }
+        grid.text(String(repeating: symbols.boxH, count: rect.cols), row: rect.row, col: rect.col,
+                  .dim, limit: rect.cols)
+    }
+
     private func drawBand(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
         let content = min(layout.contentCols, grid.cols)
         let budget = drawTail(&grid, row: layout.bandRow, content: content,
@@ -567,7 +580,7 @@ final class WallCanvas {
         let lead: String
         switch focus {
         case nil:
-            lead = "\(symbols.bullet) click a card\(symbols.dot)scroll with the right bar"
+            lead = "\(symbols.bullet) click a card\(symbols.dot)wheel or the right bar scrolls"
         case .display(let i):
             let name = model.displays.indices.contains(i) ? model.displays[i].name : "no display"
             lead = "\(symbols.back) \(symbols.display) back\(symbols.dot)picked \(name)"

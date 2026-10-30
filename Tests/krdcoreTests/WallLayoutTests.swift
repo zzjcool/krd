@@ -92,13 +92,13 @@ final class WallLayoutTests: XCTestCase {
     /// if any of these disagree, the formula is wrong, not the design.
     func testPinnedGeometryMatchesTheDesignTable() {
         let pinned: [(cols: Int, rows: Int, per: Int, winW: Int, cardH: Int, stageH: Int)] = [
-            (137, 44, 3, 44, 14, 24),
-            (137, 44, 2, 67, 21, 17),
-            (137, 44, 4, 33, 10, 28),
-            (100, 36, 3, 32, 10, 20),
-            (60, 24, 2, 28, 9, 9),
-            (60, 24, 3, 18, 6, 12),
-            (60, 24, 4, 13, 4, 14),
+            (137, 44, 3, 44, 14, 23),      // 24 before the divider row existed
+            (137, 44, 2, 67, 21, 16),
+            (137, 44, 4, 33, 10, 27),
+            (100, 36, 3, 32, 10, 19),
+            (60, 24, 2, 28, 9, 8),
+            (60, 24, 3, 18, 6, 11),
+            (60, 24, 4, 13, 4, 13),
         ]
         for p in pinned {
             let l = layout(p.cols, p.rows, windows: 14, per: p.per)
@@ -107,9 +107,11 @@ final class WallLayoutTests: XCTestCase {
             XCTAssertEqual(l.cards.first?.cols ?? -1, p.winW, "\(label): card width")
             XCTAssertEqual(l.cards.first?.rows ?? -1, p.cardH, "\(label): card height")
             XCTAssertEqual(l.stage.rows, p.stageH, "\(label): stage height")
-            // The budget is fully spent: header + stage + caption + band + cards + captions +
-            // blank + footer.
-            XCTAssertEqual(l.stage.rows + p.cardH + 6, p.rows, "\(label): the row budget is not spent")
+            // The budget is fully spent: header + stage + caption + divider + band + cards +
+            // captions + footer. The divider only exists in panes tall enough for it (rows >= 20).
+            let divider = l.dividerRow.isEmpty ? 0 : 1
+            XCTAssertEqual(l.stage.rows + p.cardH + 6 + divider, p.rows,
+                           "\(label): the row budget is not spent")
         }
     }
 
@@ -139,15 +141,19 @@ final class WallLayoutTests: XCTestCase {
                 let cardH = l.cards[0].rows
                 XCTAssertEqual(l.headerRow, 1, "\(label): header")
                 XCTAssertEqual(l.stage.row, 2, "\(label): stage top")
+                let divider = l.dividerRow.isEmpty ? 0 : 1
                 XCTAssertEqual(l.stageCaption.row, 2 + stageH, "\(label): stage caption")
-                XCTAssertEqual(l.bandRow, 3 + stageH, "\(label): band header")
-                XCTAssertEqual(l.cards[0].row, 4 + stageH, "\(label): cards")
-                XCTAssertEqual(l.cardCaptions[0].row, 4 + stageH + cardH, "\(label): card captions")
-                XCTAssertEqual(l.footerRow, 6 + stageH + cardH, "\(label): footer")
+                XCTAssertEqual(l.dividerRow.row, 3 + stageH, "\(label): divider")
+                XCTAssertEqual(l.bandRow, 3 + stageH + divider, "\(label): band header")
+                XCTAssertEqual(l.cards[0].row, 4 + stageH + divider, "\(label): cards")
+                XCTAssertEqual(l.cardCaptions[0].row, 4 + stageH + divider + cardH,
+                               "\(label): card captions")
+                XCTAssertEqual(l.footerRow, 6 + stageH + cardH + divider, "\(label): footer")
                 XCTAssertEqual(l.footerRow, pane.rows, "\(label): footer == last row")
                 XCTAssertEqual(l.bar.stage.rect, CellRect(col: pane.cols, row: 2, cols: 1, rows: stageH),
                                "\(label): the stage segment covers the stage")
-                XCTAssertEqual(l.bar.cards.rect, CellRect(col: pane.cols, row: 4 + stageH, cols: 1, rows: cardH),
+                XCTAssertEqual(l.bar.cards.rect,
+                               CellRect(col: pane.cols, row: 4 + stageH + divider, cols: 1, rows: cardH),
                                "\(label): the card segment covers the cards")
                 XCTAssertEqual(l.cards.map(\.col),
                                (0..<l.cards.count).map { 1 + $0 * (l.cards[0].cols + 1) },
@@ -187,8 +193,11 @@ final class WallLayoutTests: XCTestCase {
                         }
                         XCTAssertEqual(l.windowCount, windows)
                         XCTAssertEqual(l.displayCount, displays)
-                        XCTAssertEqual(l.stage.rows + (l.cards.isEmpty ? 5 : (l.cards[0].rows + 6)), pane.rows,
-                                       "\(label): the budget is spent exactly")
+                        // +1 when the divider row exists: it is one of the fixed rows too, and a
+                        // pane that leaves a row unused is a layout bug, not breathing room.
+                        let divider = l.dividerRow.isEmpty ? 0 : 1
+                        XCTAssertEqual(l.stage.rows + (l.cards.isEmpty ? 5 : (l.cards[0].rows + 6)) + divider,
+                                       pane.rows, "\(label): the budget is spent exactly")
                     }
                 }
             }
@@ -503,7 +512,7 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertEqual(empty.stageStart, 0)
         XCTAssertEqual(empty.cardStart, 0)
         XCTAssertEqual(empty.cards.count, 0)
-        XCTAssertEqual(empty.stage.rows, 39, "no windows: the stage takes the whole budget")
+        XCTAssertEqual(empty.stage.rows, 38, "no windows: the stage takes the whole budget")
         XCTAssertEqual(empty.bar.cards.rect.rows, 0)
     }
 
@@ -623,7 +632,71 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertEqual(zero.per, 1)
         XCTAssertEqual(zero.windowCount, 0)
         XCTAssertEqual(zero.cards.count, 0)
-        XCTAssertEqual(zero.stage.rows, 19)
+        XCTAssertEqual(zero.stage.rows, 18)      // one row of the budget is the divider
         XCTAssertEqual(zero.footerRow, 24)
+    }
+}
+
+/// The wheel is the second way into the shelves, so it gets its own rule: one notch is one item,
+/// the band decides which shelf, and an empty shelf swallows nothing.
+final class WallWheelTests: XCTestCase {
+    private func layout(displays: Int = 3, windows: Int = 9, cardStart: Int = 0) -> WallLayout {
+        WallLayout.make(paneCols: 137, paneRows: 44, displayCount: displays, windowCount: windows,
+                        per: 3, stageStart: 0, cardStart: cardStart)
+    }
+
+    func testAWheelOverTheStageMovesTheDisplayByOne() {
+        let layout = self.layout()
+        XCTAssertEqual(layout.wheelAction(row: layout.stage.row + 1, col: 5, direction: 1), .stageStep(1))
+        XCTAssertEqual(layout.wheelAction(row: layout.stage.maxRow, col: 5, direction: -1), .stageStep(-1))
+        // The caption belongs to the stage: aiming at the label and scrolling is natural.
+        XCTAssertEqual(layout.wheelAction(row: layout.stageCaption.row, col: 5, direction: 1), .stageStep(1))
+    }
+
+    func testAWheelOverTheCardsMovesTheShelfByOneNotByAPage() {
+        let layout = self.layout()
+        let first = layout.cards[0]
+        XCTAssertEqual(layout.wheelAction(row: first.row, col: 5, direction: 1), .cardStep(1))
+        XCTAssertEqual(layout.wheelAction(row: first.row + first.rows - 1, col: 5, direction: -1),
+                       .cardStep(-1))
+        XCTAssertEqual(layout.wheelAction(row: layout.cardCaptions[0].row, col: 5, direction: 1),
+                       .cardStep(1))
+        XCTAssertEqual(layout.wheelAction(row: layout.bandRow, col: 5, direction: 1), .cardStep(1))
+    }
+
+    func testAWheelOnTheBarFollowsTheSegmentUnderTheCursor() {
+        let layout = self.layout()
+        XCTAssertEqual(layout.wheelAction(row: layout.bar.stage.rect.row + 2, col: layout.barCol, direction: 1),
+                       .stageStep(1))
+        XCTAssertEqual(layout.wheelAction(row: layout.bar.cards.rect.row + 2, col: layout.barCol, direction: 1),
+                       .cardStep(1))
+    }
+
+    func testAShelfWithNothingToScrollDoesNotEatTheWheel() {
+        // One display, one page of windows: neither segment is scrollable, so no band is claimed.
+        let layout = WallLayout.make(paneCols: 137, paneRows: 44, displayCount: 1, windowCount: 2,
+                                     per: 3, stageStart: 0, cardStart: 0)
+        XCTAssertNil(layout.wheelAction(row: layout.bar.stage.rect.row + 1, col: layout.barCol, direction: 1))
+        XCTAssertNil(layout.wheelAction(row: layout.bar.cards.rect.row + 1, col: layout.barCol, direction: 1))
+        // ...and the cards themselves agree: two windows fit in three slots, so a notch is a
+        // no-op rather than a step that `apply` would have to clamp.
+        XCTAssertNil(layout.wheelAction(row: layout.cards[0].row, col: 5, direction: 1))
+    }
+
+    func testTheHeaderAndFooterAreNotScrollable() {
+        let layout = self.layout()
+        XCTAssertNil(layout.wheelAction(row: 0, col: 5, direction: 1))
+        XCTAssertNil(layout.wheelAction(row: layout.footerRow, col: 5, direction: 1))
+        XCTAssertNil(layout.wheelAction(row: layout.stage.row, col: 5, direction: 0))
+    }
+
+    /// The divider is one dim rule and nothing else: it must not become a hit target, or a click on
+    /// what looks like a separator would enter whatever happened to be behind it.
+    func testTheDividerIsNotAHitTarget() {
+        let layout = self.layout()
+        XCTAssertFalse(layout.dividerRow.isEmpty)
+        XCTAssertEqual(layout.dividerRow.rows, 1)
+        XCTAssertNil(layout.action(row: layout.dividerRow.row, col: 1))
+        XCTAssertNil(layout.wheelAction(row: layout.dividerRow.row, col: 5, direction: 1))
     }
 }
