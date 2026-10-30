@@ -34,6 +34,23 @@ swift build -c release                  # macOS 14+, Xcode command line tools, S
 Use a terminal that implements the kitty graphics protocol — the calibration switches below cannot
 tell you anything in one that does not (Apple Terminal.app).
 
+## The development loop: Rex and tart
+
+Everything visual in this repo was found by running krd in a real terminal and reading what came
+back, so that loop is written down as a project skill instead of being rediscovered each time:
+
+```
+.agents/skills/krd-dev/SKILL.md          # the loop, the pitfalls, the A/B protocol
+.agents/skills/krd-dev/scripts/deploy-vm.sh    # build → codesign → install into the tart VM
+.agents/skills/krd-dev/scripts/wall-runs.py    # read a frame's picture rectangles out of a capture
+```
+
+Short version: run the build in a **Rex** pane (`rex send` / `rex capture --format=vt`), read the
+pictures' cell rectangles from the placeholder run (`U+10EEEE` survives a text capture — the pictures
+do not), read krd's own numbers from `--demo`'s footer or `--debug --log`, and deploy to the tart VM
+with the script (its Screen Recording grant lets it capture a real desktop). Never screenshot a
+user's desktop; a locked screen makes it impossible anyway, which is why the numbers are in the text.
+
 ## What your change must pass
 
 There is no XCTest target; the checks are protocol-level and visual, and they are reproducible:
