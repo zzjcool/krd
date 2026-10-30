@@ -514,3 +514,29 @@ lines: `krd: capturing …` when the target is chosen, `krd: capture restarted (
 mirroring is gone, the log says which one it followed instead. If neither line appears, the capture
 never started (`krd ax doctor` is the wrong tool here — check `--debug` for `no displays
 available`).
+
+### 47. The picture freezes after a while; the log says `capture stopped`
+
+**Cause.** ScreenCaptureKit handed back `-3805 Failed during stream due to application connection
+being interrupted` — the window server dropped the stream under krd (a VM console that goes away, a
+display sleep, a screen-recording permission change). Every counter keeps moving and `bad` stays 0,
+so nothing looks wrong except the frozen picture: a 30-minute soak found it frozen for 19 of its 30
+minutes (issue #44).
+**Fix.** Since #44 krd notices and restarts the stream itself, up to five times with 1-2-4-8-8 s
+backoff, and every attempt is a log line:
+
+```
+krd: capture stopped (SCStream 3805: Failed during stream due to application connection being
+     interrupted); restarting in 1s (attempt 1/5)
+```
+
+If it says `gave up after 5 restarts`, the window server connection is gone for good: restart krd
+(and for a VM, check the console is actually up). `probe/soak.py` is how you watch this over 30
+minutes — it fails the run when `callbacks` stops advancing for a minute, which is what a frozen
+stream looks like from outside, and it writes a stack sample (`<work>/sample.txt`) the first time
+that happens.
+
+If the picture freezes with **no** `capture stopped` line at all, you are seeing the quiet variant
+(no error callback, frames just stop). krd's frame watchdog restarts the stream after 15 s of
+silence — `KRD_STREAM_WATCHDOG=<seconds>` changes that, `0` turns it off — and the state of that
+investigation is in [TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on).

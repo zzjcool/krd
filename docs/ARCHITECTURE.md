@@ -110,6 +110,22 @@ to end on the VM: resolution change -> one restart line 0.70 s later. Every trig
 only *notes* the event; a 500 ms trailing debounce (`Debounce`) collapses the burst -- `NSApp.run()`
 fires 3 notifications for one lid close, and the poll can see a change twice while it settles.
 
+### Stream liveness
+
+`SCStream` can stop without anyone asking: `didStopWithError` with `-3805` ("application connection
+being interrupted") after a few restarts, or — worse — no callback at all, frames just stop. Both
+were found by the 30-minute soak ([TESTING §11](TESTING.md#11-soak-thirty-minutes-with-every-feature-on)).
+
+- `didStopWithError` restarts the stream, at most five times with 1-2-4-8-8 s backoff, one log line
+  per attempt.
+- A watchdog (`KRD_STREAM_WATCHDOG`, 15 s, `0` off) restarts when no frame callback arrives.
+  A still screen is not silence: SCK sends `.idle` frames at the refresh rate, so 15 s of nothing is
+  the stream, not the content.
+- `Capturer.stop()` gives up after 2 s. `stopCapture()` on an already-dead stream never calls back on
+  macOS 26, and `restartCapture` awaits it before clearing "a restart is in flight", so a single hung
+  stop would wedge every later restart. The retry budget is earned back by *frames arriving*, not by
+  a restart returning without throwing.
+
 Which display is chosen is a pure function (`DisplayPick.choose`, covered by `DisplayPickTests`):
 `--display <i>` wins while that index exists; otherwise the display the session is already on wins
 (the pointer wandering onto another screen is *not* a reason to move); only if it is gone does the

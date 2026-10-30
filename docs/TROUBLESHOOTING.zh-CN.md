@@ -440,3 +440,24 @@ ssh 会话里的进程收不到那个回调）。
 `krd: capturing …`，以及重建采集流时的 `krd: capture restarted (N display(s), was M): …`（下面还有
 新的 `source … -> … px`）。如果你镜像的那块屏没了，日志会说明改用哪块。两行都没有，说明采集压根没
 起来（这跟 `krd ax doctor` 无关，去看 `--debug` 里的 `no displays available`）。
+
+### 47. 画面跑着跑着就冻住了，日志里有一行 `capture stopped`
+
+**根因。** ScreenCaptureKit 返回了 `-3805 Failed during stream due to application connection being
+interrupted`——窗口服务器把 krd 底下的采集流断掉了（虚拟机控制台断开、显示器休眠、屏幕录制权限变更都
+会这样）。此时所有计数器都还在动、`bad` 一直是 0，除了画面不动之外一切正常：30 分钟浸泡测试里它冻了
+19 分钟（issue #44）。
+**对策。** 从 #44 起 krd 会自己发现并重启采集流，最多五次，退避 1-2-4-8-8 秒，每次尝试都写一行日志：
+
+```
+krd: capture stopped (SCStream 3805: Failed during stream due to application connection being
+     interrupted); restarting in 1s (attempt 1/5)
+```
+
+如果写的是 `gave up after 5 restarts`，说明和窗口服务器的连接彻底断了：重启 krd（虚拟机的话先确认控制台
+还活着）。`probe/soak.py` 就是用来盯这件事的——`callbacks` 超过一分钟不前进时它会把这次运行判失败，
+那正是采集流冻住时从外面看到的样子；第一次出现时它还会抓一份栈采样（`<work>/sample.txt`）。
+
+如果画面冻住但日志里**完全没有** `capture stopped`，那是另一种安静的死法（没有错误回调，帧就那么停了）。
+krd 的帧看门狗在静默 15 秒后会重启采集流（`KRD_STREAM_WATCHDOG=<秒>` 可改，`0` 关闭），这件事的进展
+记在 [TESTING §11](TESTING.zh-CN.md#11-浸泡测试全功能开-30-分钟)。

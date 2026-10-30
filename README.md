@@ -129,7 +129,7 @@ text, with a log line — see TROUBLESHOOTING §19 |
 | [ENCODING](docs/ENCODING.md) | where the bytes and milliseconds go, and the benchmark behind it |
 | [BENCHMARK](docs/BENCHMARK.md) | the benchmark layers, the budgets, and what "fast" has to mean here |
 | [research: photo bandwidth](docs/research-photo-bandwidth.md) | why colour-heavy motion costs 13.58 MB/frame and what each fix is worth, with the probe that measures it |
-| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 46 symptoms with root causes |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 47 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
 ## Contributing
