@@ -27,8 +27,14 @@ struct Options {
     /// One-shot terminal-to-target paste from a file, for terminals that cannot answer an OSC 52
     /// read (the explicit, testable half of that direction).
     var clipboardPaste: String? = nil
-    /// Do not paint the pointer into the mirrored picture (see Capturer.showsCursor).
-    var noCursor = false
+    /// Paint the pointer into the mirrored picture (see `Capturer.showsCursor`).
+    ///
+    /// Hidden by default: the pane already follows the local pointer, so a second pointer drawn
+    /// into the picture is redundant, and every mouse move would otherwise dirty the tiles under
+    /// it — a moving mouse used to be a per-frame resend. `--cursor` brings it back for the cases
+    /// where the target pointer is *not* the local one (`--window` on an idle app, a recording, or
+    /// a screen someone else is driving).
+    var drawsCursor = false
     var selftest = false
     var bench = false
     var logPath: String? = nil
@@ -85,8 +91,9 @@ func usage() -> String {
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
                           (for terminals that cannot answer an OSC 52 read)
-      --no-cursor         do not draw the pointer into the picture (also stops a moving
-                          mouse from dirtying tiles every frame)
+      --cursor            draw the pointer into the picture (default: hidden — the pane already
+                          follows the local pointer, and a drawn one dirties tiles as the mouse
+                          moves; --no-cursor is still accepted and means the same as the default)
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
       --list              list displays and windows, then exit
@@ -185,7 +192,8 @@ func parseArguments() -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
-        case "--no-cursor": options.noCursor = true
+        case "--cursor": options.drawsCursor = true
+        case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
         case "--bench": options.bench = true
         case "--json": options.benchJSON = true
@@ -345,7 +353,7 @@ final class Desk {
         self.options = options
         if let format = options.pixelFormat { writer.format = format }
         capturer.format = writer.format
-        capturer.showsCursor = !options.noCursor
+        capturer.showsCursor = options.drawsCursor
         writer.resize(tiles: 0)
     }
 
