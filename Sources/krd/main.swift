@@ -1313,12 +1313,13 @@ final class Desk {
             return PanelSource(kind: .window(window.windowID),
                                aspect: Double(width) / Double(height))
         }
-        // How many device pixels a picture is captured at is *quality*, not geometry: with
-        // placeholders the terminal fits the image into the cells, so one reported pixel per cell is
-        // already sharp when the terminal upscales, and asking for the full device resolution of a
-        // big pane is what made a terminal refuse the image and leave the mask showing. The
-        // pixel-sized path has no fitting, so it needs the real ratio.
-        let scale = wallPlaceholders ? (options.dpr ?? 1) : pane.dpr
+        // One rule for both transports: capture at `pane.dpr` device pixels per *reported* cell, i.e.
+        // at the pane's real resolution when the terminal answered in points (`dpr` 2) and 1:1 when it
+        // answered in device pixels. With placeholders that number is quality - the terminal fits the
+        // image into the cells either way, but a 1x capture on a 2x pane is a screenshot upscaled by
+        // the terminal, which reads as soft - and on the pixel-sized path it *is* the geometry, so it
+        // has to be the same number. `--dpr` overrides both.
+        let scale = options.dpr ?? pane.dpr
         let cell = pane.pictureCell(scale: scale)
         return WallPanels.plan(layout: layout, cellW: cell.w, cellH: cell.h,
                                stageSource: stage, cardSources: cards)
@@ -1348,7 +1349,7 @@ final class Desk {
             // One line that answers "why does the picture not fill its box" without a screenshot:
             // the pane, the cell it was measured at, the quality factor, the stage's cells and
             // pixels, and which transport the pictures went out on.
-            let scale = wallPlaceholders ? (options.dpr ?? 1) : pane.dpr
+            let scale = options.dpr ?? pane.dpr
             let cell = "cell \(Self.trim(pane.cellW))x\(Self.trim(pane.cellH))"
             let stage = panels.first { $0.slot == 0 }.map {
                 "pic \($0.rect.cols)x\($0.rect.rows)c \($0.fit.contentWidth)x\($0.fit.contentHeight)px"
