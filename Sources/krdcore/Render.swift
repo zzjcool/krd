@@ -269,10 +269,47 @@ public final class ScreenWriter {
     /// not an option (Herdr and rex treat `a=d,i=<id>` as "drop the whole image set" -> black
     /// screen) and alternating ids are not an option either (two images then own the same cells
     /// and the stale one shows through), so a tile simply overwrites its own placement.
+    /// `level <= 0` means "zlib did not pay for this tile last frame" (issue #53). The pixels are
+    /// then sent raw — unless they have changed into something zlib *can* win on, which is decided
+    /// by a predictor that costs ~10 µs against the ~800 µs zlib would spend on the tile. Learning
+    /// this by compressing and hoping (a probe) would send up to a frame of uncompressed text after
+    /// every photo, which is megabytes on the wire.
     public static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int) -> CompressedTile? {
+        guard !pixels.isEmpty else { return nil }
+        let level = level > 0 ? level : (looksCompressible(pixels, rect: rect) ? 1 : 0)
+        if level == 0 {
+            return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
+        }
         guard let payload = zlibCompress(pixels, level: level), !payload.isEmpty else { return nil }
-        let ratio = pixels.isEmpty ? 0 : Double(payload.count) / Double(pixels.count)
+        let ratio = Double(payload.count) / Double(pixels.count)
+        if payload.count >= pixels.count {
+            return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
+        }
         return CompressedTile(index: index, rect: rect, payload: payload, ratio: ratio)
+    }
+
+    /// Would zlib find anything here? One pass, comparing every byte with the same channel of the
+    /// pixel above (or to its left, on the first row): zlib cannot win on content that changes every
+    /// pixel (hash noise, a video frame), and wins hugely on content where neighbouring pixels are
+    /// close — flat UI, text, and gradients, where the delta is 1 per pixel and the ratio is still
+    /// 45×. Measured fractions: hash noise ~3 %, text ~90 %, gradient 100 %.
+    static func looksCompressible(_ pixels: [UInt8], rect: TileRect) -> Bool {
+        let w = rect.w, h = rect.h
+        guard w > 1, h > 0, pixels.count >= w * h else { return true }
+        let bpp = max(1, pixels.count / (w * h))
+        let rowBytes = w * bpp
+        var smooth = 0, compared = 0
+        for y in 0..<h {
+            let row = y * rowBytes
+            for i in row..<(row + rowBytes) {
+                let reference = y > 0 ? i - rowBytes : (i - bpp >= row ? i - bpp : -1)
+                guard reference >= 0 else { continue }
+                compared += 1
+                if abs(Int(pixels[i]) - Int(pixels[reference])) <= 4 { smooth += 1 }
+            }
+        }
+        guard compared > 0 else { return true }
+        return Double(smooth) / Double(compared) > 0.5
     }
 
     /// Turn an already compressed tile into escapes. Single-threaded: the order of the tiles
@@ -304,7 +341,8 @@ public final class ScreenWriter {
         append("\u{1B}[\(r.row);\(r.col)H")
         var i = 0
         var first = true
-        let control = "Gf=\(format.protocolChannels),s=\(r.w),v=\(r.h),a=t,o=z,q=\(quiet),i=\(iid)"
+        let compression = tile.isCompressed ? ",o=z" : ""      // absent = raw bytes (issue #53)
+        let control = "Gf=\(format.protocolChannels),s=\(r.w),v=\(r.h),a=t\(compression),q=\(quiet),i=\(iid)"
         while i < chars.count {
             let end = min(i + 4096, chars.count)
             let more = end == chars.count ? 0 : 1
