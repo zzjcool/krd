@@ -155,6 +155,26 @@ immediately. Huffman-only also broke the ladder's ordering: with every symbol co
 `compress(level:quantise:)` overload, which hard-coded 5-6-5 and dropped the rung; it now passes the
 `Plan` through.
 
+### `--quality auto`: spend colour, then frames, and resolution last
+
+A user who does not want to think about any of this asks for `auto`, and the ladder is walked by the
+same kind of governor that already handles resolution (#64), from the same signal — whether a frame
+was written before the next one was ready:
+
+    quality 80 -> 70 -> 50, then fps 20 -> 15 -> 10, then (and only then) --scale auto takes pixels
+
+The order is the argument. Colour loss is mild on text and photographs, frame loss is noticeable but
+honest, and resolution loss is what makes text unreadable. So bits go first, and the scale governor is
+not allowed to act until `QualityGovernor.handOver` — which is only true at the bottom rung.
+
+Both thresholds are asymmetric, for the reason #64's are: a downgrade needs a *majority* of late frames
+over 3 s, an upgrade needs near-silence over 10 s, and an upgrade that is undone within 20 s multiplies
+the next quiet window by 3. A link that cannot hold a rung therefore settles instead of oscillating.
+
+The frame-rate step is enforced in the frame loop rather than in ScreenCaptureKit: the capture keeps
+delivering at `--fps`, and the frames the loop declines cost no zlib, no bytes and no dirty-region
+pass. The panel's `fps` target follows the rung, so the plumbing stays visible.
+
 The stats panel's `encoder` row names the rung (`q80 5-6-5`), and the `wire` row counts what the last
 frame actually did (`quantised 41 raw 3`) — counted per frame, not guessed from the grid, because a
 picture that looks soft because a number is wrong is the hardest kind of bug to see from outside.

@@ -61,6 +61,7 @@ krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --quality 70            # how much colour the picture may lose: 100 = lossless, 80 (default) =
                             # 5-6-5 on incompressible tiles, 70 = 5-5-5, 50 = 4-4-4 everywhere
+krd --quality auto          # let krd spend colour first (80->70->50), then frame rate, then scale
 krd --no-quantise           # same as --quality 100
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
