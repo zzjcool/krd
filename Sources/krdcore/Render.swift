@@ -43,6 +43,17 @@ public final class ScreenWriter {
     }()
     private var batchOpen = false
     private var out = [UInt8]()
+    /// A `clear()` that arrived while the frame's block was open (see `clear`): the delete may not
+    /// be written yet, so `endFrame` sends it as a commit of its own.
+    private var pendingClear = false
+    /// The screen lost placements since the last commit, so the frame about to start has to repaint
+    /// **every** tile: the dirty pass only re-sends the ones that changed, and after a delete-all
+    /// the rest of the pane would stay blank. Armed by the deferred clear above, see `clear`.
+    private var needsFullRepaint = false
+    /// `a=d,d=a` + `ESC[2J`: the pair docs/PROTOCOL.md §4 licenses at a resize/clear (and at
+    /// teardown, through `clear`). Written from two places -- `clear` itself and the deferred commit
+    /// in `endFrame` -- so the pair is written down once.
+    private static let clearBytes = Array("\u{1B}_Ga=d,d=a\u{1B}\\\u{1B}[2J".utf8)
     /// Chrome text arrives on the main queue while tiles are assembled on the capture queue.
     /// One lock around "append + flush" means a text write can never land inside a base64
     /// payload, and the picture never waits for a UI tick (it is one uncontended lock).
@@ -201,6 +212,13 @@ public final class ScreenWriter {
         // Terminate any half-written APC *first*, then retire the screen. The keyboard push goes
         // with it: a pop after the alternate screen is gone is still our business, not the shell's.
         write("\u{1B}\\\u{1B}[?2026l")
+        // Those bytes went out *after* whatever a frame had buffered, so the block is closed on the
+        // wire even if one was in flight. It must not still look open here: `clear` would defer the
+        // teardown delete to an `endFrame` that is never coming, and the pane would keep the
+        // pictures it has to lose.
+        writeLock.lock()
+        batchOpen = false
+        writeLock.unlock()
         clear()
         write("\u{1B}[?1003l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)
@@ -215,11 +233,26 @@ public final class ScreenWriter {
     public var reapInterval = Int(ProcessInfo.processInfo.environment["KRD_REAP"] ?? "0") ?? 0
     private var sinceReap = 0
 
+    /// True when the screen lost placements since the last commit, so the frame about to start has
+    /// to repaint all of them (see `clear`). False on every normal frame.
+    public var repaintNeeded: Bool {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        return needsFullRepaint
+    }
+
     /// Returns true when the caller must repaint everything.
     public func reapIfNeeded() -> Bool {
         guard reapInterval > 0 else { return false }   // 0 disables it; must not mean "always"
         sinceReap += 1
         guard sinceReap >= reapInterval else { return false }
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        // The same rule as in `clear`: while the block is open, `out` is that frame's batch buffer,
+        // so the delete would be committed *with* the frame instead of before it (§4). The one
+        // caller runs before `beginFrame`, but that is the caller's promise; this makes it the
+        // writer's, so no future caller can reach the delete mid-frame.
+        guard !batchOpen else { return false }
         sinceReap = 0
         append("\u{1B}_Ga=d,d=a\u{1B}\\")   // no flush: goes out with the repaint below
         return true
@@ -231,10 +264,37 @@ public final class ScreenWriter {
         write("\u{1B}[?25l")
     }
 
+    /// Drop every placement and erase the grid (docs/PROTOCOL.md §4).
+    ///
+    /// `out` doubles as the frame's batch buffer, so this may not append while the frame's block is
+    /// open: the delete used to land **inside** it (issue #132), in the same commit as the tiles
+    /// already emitted -- they were applied and deleted at once, `2J` erased the grid, and the next
+    /// frame re-sends only *dirty* tiles, so the pane kept a hole. A clear that arrives mid-frame is
+    /// therefore queued, and `endFrame` sends it right after the frame's commit, as a commit of its
+    /// own. Either way the screen has lost placements, so the next frame has to repaint everything
+    /// (`repaintNeeded`) rather than trust the caller to do it.
+    ///
+    /// Only the default block-per-frame mode is covered here: with `KRD_SYNC=tile` there is no
+    /// frame-level block to stay out of, and the per-tile ones are the emit path's own business
+    /// (issue #107 owns the unlocked appends up there).
     public func clear() {
-        append("\u{1B}_Ga=d,d=a\u{1B}\\")   // drop every image this terminal holds
-        append("\u{1B}[2J")
-        flush()
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard !batchOpen else {
+            // Deferred, not dropped: every caller clears once per event (`handleResize`,
+            // `reconcileCaptureTarget`, `endSession`) and relies on it, so "somebody else will
+            // clear again" is not true of any of them -- and `clear()` returns nothing, so unlike
+            // `writeControl` it cannot report back that its write was skipped.
+            pendingClear = true
+            return
+        }
+        pendingClear = false               // this delete supersedes one that was queued
+        // Not only the deferred path: this delete wiped the pane, and the caller's own repaint can
+        // be one frame too early for it (its `previousFrame` reset can land before the next dirty
+        // pass). Asking unconditionally is what makes the hole impossible, not the caller's care.
+        needsFullRepaint = true
+        out.append(contentsOf: Self.clearBytes)
+        flushLocked()
     }
 
     // MARK: batching
@@ -250,6 +310,12 @@ public final class ScreenWriter {
         lastFrameQuantised = 0
         lastFrameRaw = 0
         frameWireBytes = 0
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        // The frame that begins here is the one that answers an armed repaint request (`clear`).
+        // Disarming on the *write* side, not when `handleFrame` reads it, keeps the flag from
+        // outliving the frame it belongs to.
+        needsFullRepaint = false
         if syncMode == .frame && !batchOpen {
             append("\u{1B}[?2026h")
             batchOpen = true
@@ -258,13 +324,25 @@ public final class ScreenWriter {
 
     /// Close the frame's synchronized block and push the bytes out.
     public func endFrame() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
         if batchOpen {
             append("\u{1B}[?2026l")
             batchOpen = false
         }
         let t0 = benchNowMs()
-        flush()
+        flushLocked()
         lastWriteMs = benchNowMs() - t0
+        // A clear that landed mid-frame goes out here, as a commit of its own: the block above is
+        // closed and its bytes are out, so the delete sits inside nothing (see `clear`). The frame
+        // it interrupted was built from the *old* grid, and the pane now holds no placements at
+        // all, so the next one has to repaint everything rather than only the dirty tiles.
+        if pendingClear {
+            pendingClear = false
+            needsFullRepaint = true
+            out.append(contentsOf: Self.clearBytes)
+            flushLocked()
+        }
         recordWrite(lastWriteMs)
         lastWireBytes = frameWireBytes
     }
@@ -721,8 +799,10 @@ public final class ScreenWriter {
     // MARK: plumbing
 
     public func write(_ text: String) {
+        writeLock.lock()
+        defer { writeLock.unlock() }
         append(text)
-        flush()
+        flushLocked()
     }
 
     private func append(_ text: String) {

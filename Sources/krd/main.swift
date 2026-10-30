@@ -2677,8 +2677,13 @@ final class Desk {
             recorder.record(pixels, width: width, height: height, bpp: grid.bpp)
         }
 
+        // `repaintNeeded`: a clear that landed between `beginFrame` and `endFrame` was committed
+        // after the frame it interrupted (see `ScreenWriter.clear`), so the pane has had no
+        // placements since that commit. The dirty pass would re-send only the tiles that changed and
+        // leave the rest of the picture blank.
         let dirty: [Int]
-        if options.fullFrame || previousFrame.count != pixels.count || writer.reapIfNeeded() {
+        if options.fullFrame || previousFrame.count != pixels.count || writer.reapIfNeeded()
+            || writer.repaintNeeded {
             dirty = Array(0..<grid.count)
         } else {
             dirty = TileGrid.dirty(previous: previousFrame, current: pixels, grid: grid)
