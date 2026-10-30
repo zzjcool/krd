@@ -19,8 +19,16 @@ struct Options {
     /// Capture at a fraction of the pane's pixels (`--scale 0.5`): a quarter of the bytes for half
     /// the resolution in each direction, upscaled by the terminal into the same cell box. It changes
     /// the *output* size only -- the crop (`sourceRect`) and the input mapping stay as they are.
+    ///
+    /// The default is **adaptive** (issue #73): `auto` starts at 1 and only steps down when the write
+    /// side cannot keep up, so a fast link never sees a different picture, while a slow one trades
+    /// sharpness for motion instead of freezing -- the failure a user can neither explain nor fix by
+    /// themselves. `--scale 1` is the escape hatch that pins it.
     var scale = 1.0
-    var scaleAuto = false
+    var scaleAuto = true
+    /// `--scale <fraction>` was given: the value is the user's, not `auto`'s (and `--selftest` refuses
+    /// it, because its sha256 is a byte contract).
+    var scalePinned = false
     var scaleError: String? = nil
     var noInput = false
     var noQuantise = false
@@ -134,9 +142,11 @@ func usage() -> String {
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x20)
       --log <path>        write diagnostics to a file instead of over the picture
-      --scale <f|auto>    capture f (0 < f <= 1) of the pane's pixels per side and let the terminal
-                          upscale: 0.5 is a quarter of the bytes and visibly softer text (issue #60);
-                          'auto' starts at 1 and steps down while the pipe is behind (issue #64)
+      --scale <f|auto>    how many pixels to capture per side, terminal upscales (issue #60).
+                          auto (default) starts at 1 and steps down only while the pipe is behind,
+                          so a fast link never changes and a slow one stays smooth instead of
+                          freezing; 1 pins it, 0.5 is a quarter of the bytes and visibly softer
+                          (--bench, --record, --replay, --selftest always capture at 1)
       --full-frame        disable tiling, always resend the whole frame
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
@@ -197,6 +207,22 @@ func usage() -> String {
 
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
     """
+}
+
+/// Why a reproducible path ignores `--scale auto`, in one line -- or nil when the scale may adapt.
+///
+/// `auto` reacts to the write side; `--bench` and `--selftest` have no pipe to measure, and a
+/// recording or replay whose frame size changes mid-file would be a trap: every frame is valid on its
+/// own, nothing in the file marks the change, and `--replay` would feed frames that disagree with the
+/// header it read at the start. A fixed `--scale 0.5` is still allowed there -- it is constant.
+func adaptiveScaleRefusal(bench: Bool, selftest: Bool, recording: Bool, replay: Bool) -> String? {
+    if bench { return "--bench captures at scale 1 (adaptive scaling reacts to a live pipe)" }
+    if selftest { return "--selftest captures at scale 1 (its sha256 is a byte contract)" }
+    if recording {
+        return "--record captures at scale 1 (a frame size that changes mid-file has no marker)"
+    }
+    if replay { return "--replay captures at scale 1 (adaptive scaling reacts to a live pipe)" }
+    return nil
 }
 
 /// `--ime <spec>`, or a usage error: a typo must not silently pick a mode.
@@ -261,8 +287,11 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
             // silently meaning "1", because a typo here doubles the bytes on the wire.
             if (args[safe: i + 1] ?? "").lowercased() == "auto" {
                 options.scaleAuto = true
+                options.scalePinned = false
             } else if let value = Double(args[safe: i + 1] ?? ""), value.isFinite, value > 0, value <= 1 {
                 options.scale = value
+                options.scaleAuto = false
+                options.scalePinned = true
             } else {
                 options.scaleError = "--scale takes a fraction of the pane's pixels, "
                     + "0 < scale <= 1 (e.g. 0.5); got \(args[safe: i + 1] ?? "nothing")"
@@ -429,7 +458,9 @@ private let krdDisplayChanged: CGDisplayReconfigurationCallBack = { _, flags, us
 }
 
 final class Desk {
-    private let options: Options
+    /// Written once, in `run()` before anything starts: a reproducible path pins the scale
+    /// (issue #73). Nothing else mutates it, so the closure reads are not a race.
+    private var options: Options
     private let writer = ScreenWriter()
     private let capturer = Capturer()
     private var input: InputReader?
@@ -621,14 +652,24 @@ final class Desk {
         // The selftest is a byte contract about framing, not about resolution: it always captures
         // at the pane's own pixel size, so `--scale` next to it is a usage error rather than a
         // silent change of the sha256 people compare against.
-        if options.selftest && (options.scale != 1 || options.scaleAuto) {
+        if options.selftest && options.scalePinned {
             throw DeskError.message("--selftest always captures at scale 1; drop --scale")
         }
-        // `auto` is a reaction to a live write side: the synthetic paths have no pipe, so a scale
-        // that could move under them would make their numbers depend on the machine running them.
-        if options.scaleAuto && (options.bench || options.replay != nil) {
-            throw DeskError.message("--scale auto needs a live capture; --bench and --replay stay at scale 1")
+        // Adaptive scaling is the default, but these four paths must not have it: they either have no
+        // pipe to measure, or they write something a later run reads back. Pin them to 1 and say why,
+        // because a scale that moves under a recording leaves frames whose sizes differ with nothing
+        // in the file to mark it.
+        if options.scaleAuto,
+           let why = adaptiveScaleRefusal(bench: options.bench, selftest: options.selftest,
+                                          recording: options.record != nil, replay: options.replay != nil) {
+            options.scaleAuto = false
+            options.scale = 1
+            Log.write("krd: \(why)\n")
         }
+        // One place decides the starting scale, for every path below -- live, --mock, --bench.
+        // (It used to be set inside the live capture setup only, so `--mock --scale 0.5` quietly
+        // drew at 1.)
+        effectiveScale = options.scale
         // --selftest never touches ScreenCaptureKit: no TCC prompt, no window juggling.
         if let dir = options.replay, options.bench {
             try await runReplay(dir: dir, discard: true)
@@ -810,7 +851,6 @@ final class Desk {
         self.filter = filter
         self.geometry = geometry
         zoomScale = options.zoom > 1 ? options.zoom : 1
-        effectiveScale = options.scale
         configureSource(rect: sourceRect)
         self.shareable = content
         targetLabel = target.reason
@@ -2360,6 +2400,8 @@ final class Desk {
         m.target = targetLabel
         m.fpsTarget = options.fps
         m.fps = Double(framesHandled - chromeSampleFrames) / elapsed
+        m.scale = effectiveScale
+        m.scaleAuto = options.scaleAuto
         m.captureFps = Double(capturer.framesDelivered - chromeSampleDelivered) / elapsed
         chromeSampleFrames = framesHandled
         chromeSampleDelivered = capturer.framesDelivered

@@ -52,9 +52,11 @@ krd --window Safari          # mirror a single window (a backdrop window is refu
 krd --zoom 2                 # show half the screen at twice the density (crop on the capture side)
 krd --zoom 3 --zoom-at 200,300   # ...centred on a source point, in global screen points
 krd --zoom 2 --zoom-follow   # ...and pan when the pointer reaches the edge of the picture
+# the capture scale adapts by default: 1 while the link keeps up, 0.5/0.25 when it cannot,
+# so a slow link stays at 20 fps instead of freezing. --scale 1 pins it, --scale 0.5 fixes it.
+krd --scale 1                # never adapt: always the pane's own pixels
 krd --scale 0.5              # capture half the pixels per side and let the terminal upscale:
                              # 4x fewer bytes on colour-heavy content, visibly softer text
-krd --scale auto             # ...or let krd drop to 0.5/0.25 while the link cannot keep up
 krd --display 1 --fps 30
 krd --no-input               # watch only
 krd --no-quantise           # keep the encoder lossless (photos cost ~2.3x the bytes)

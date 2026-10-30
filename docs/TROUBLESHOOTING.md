@@ -653,3 +653,17 @@ a mirrored window could not be clicked at all. krd now posts mouse events throug
 the mirrored window is the one on top at the pointer (`--debug` says
 `-> global tap (the mirrored window is on top)`), and keeps the pid path for a window that is covered
 (issue #17).
+
+### 49. The picture got softer by itself, and sharper again a minute later
+
+That is the adaptive capture scale doing its job (issue #73). krd starts at full resolution and only
+steps the capture down (`1 → 0.5 → 0.25`) while the write side cannot keep up — the alternative on a
+slow link is a picture that stops moving. It steps back up when the link has room, and it gives up on
+an upgrade that does not hold (`... pipe has headroom; scale 0.5 -> 1` followed by a step back down
+means the link carried 0.5 but not 1).
+
+You can see it in `--dev` (the status line shows `0.5×` next to the fps when it is not 1) and in the
+log (`--debug`, or `--stats-json`'s per-second `scale`). To pin it, pass `--scale 1`; to fix another
+value, `--scale 0.5`. `--bench`, `--selftest`, `--record` and `--replay` always capture at 1 and say
+so once, because their output must not depend on the link — a recording whose frame size changes
+mid-file has no marker for it.

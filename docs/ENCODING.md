@@ -229,7 +229,8 @@ into the same cell box. Nothing else moves:
 
 The cost is resolution: at 0.5 a 13-point glyph is described by half as many pixels per side, so text
 gets visibly soft — the terminal's upscale is not a substitute for real pixels. It is a trade, not a
-free win, and the reason it defaults to 1.
+free win. The *default* is adaptive (below): 1 while the link keeps up, and it only steps down
+when the write side cannot keep up -- so what a user has to opt into is nothing.
 
 Measured (macOS 26.6 VM, pane 60×19 cells of 17×33 px, the still desktop; `--bench` for the pinned
 813-tile photo layout):
@@ -249,8 +250,17 @@ frame rate" policy is deliberately *not* here: the flag and the numbers come fir
 ## Capture scale: `--scale auto` (issue #64)
 
 `--scale auto` starts at 1 and moves down the ladder `1 → 0.5 → 0.25` while the **write side** cannot
-keep up, then back up when it can. The default is still `1`: nothing about anyone's picture changes
-unless they ask for this.
+keep up, then back up when it can. **It is the default** (issue #73): a user does not know the flag,
+and the two failures are not symmetric -- a softer picture is understandable, a frozen one is a bug
+report they cannot act on. A fast link never leaves 1, so nothing changes for the picture anyone
+already has; `--scale 1` pins it, `--scale 0.4` fixes any value.
+
+`--bench`, `--selftest`, `--record` and `--replay` pin it to 1 and say so once
+(`krd: --record captures at scale 1 (...)`). They either have no pipe to measure, or they produce
+something a later run reads back: a recording whose frame size changed mid-file has every frame valid
+on its own and **nothing in the file marks the change**, and `--replay` would then feed frames that
+disagree with the header it read at the start. A fixed `--scale 0.5` is still allowed there, because
+it is constant.
 
 **The signal is backpressure, not encoder time.** A frame is *late* when it took longer to come out
 than the interval it has to fit in (`write_ms > 1000/fps`, and `--stats-json` reports the ratio per
