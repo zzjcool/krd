@@ -298,6 +298,15 @@ frame, and it handed the pane back with the reason in the wall's footer. The usu
 **Fix.** Nothing to do in krd: the reason is on the footer. `Ctrl-\` inside a working mirror brings
 the wall back on the page it was left on - that is the way out of a window mirror.
 
+### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
+
+**Cause.** macOS grants Screen Recording per *responsible* application. When krd is started from a
+terminal, the grant belongs to that terminal (Terminal, WezTerm, iTerm, Ghostty) - not to krd, so
+"add krd" in System Settings does nothing. Without it `SCScreenshotManager` fails with `-3801`
+(`userDeclined`) for every panel, which the wall draws as a mask.
+**Fix.** System Settings → Privacy & Security → Screen Recording → enable the terminal you run krd
+in, then restart that terminal. `krd --list` prints windows once the grant is there.
+
 ### 23c. `-3805` on everything, once the wall has been used
 
 **Cause.** Only one live process of one executable may be a ScreenCaptureKit client: while an earlier
@@ -309,15 +318,6 @@ is and whatever it captures. This is also why a click `exec`s instead of spawnin
 §12 P3b).
 **Fix.** `pgrep -fl krd` and close the older one (or `pkill -f /path/to/krd` if its terminal is gone).
 One krd at a time per machine.
-
-### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
-
-**Cause.** macOS grants Screen Recording per *responsible* application. When krd is started from a
-terminal, the grant belongs to that terminal (Terminal, WezTerm, iTerm, Ghostty) - not to krd, so
-"add krd" in System Settings does nothing. Without it `SCScreenshotManager` fails with `-3801`
-(`userDeclined`) for every panel, which the wall draws as a mask.
-**Fix.** System Settings → Privacy & Security → Screen Recording → enable the terminal you run krd
-in, then restart that terminal. `krd --list` prints windows once the grant is there.
 
 ### 24. The stream dies silently
 
