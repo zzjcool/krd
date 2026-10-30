@@ -132,11 +132,11 @@ final class QuantiseTests: XCTestCase {
     }
 
     func testNoQuantiseKeepsEverythingLossless() {
-        var policy = LevelPolicy(tiles: 1, allowsQuantise: false)
+        var policy = LevelPolicy(tiles: 1, quality: QualityBudget(100))
         policy.observe(index: 0, ratio: 1.0002)
         policy.observe(index: 0, ratio: 1.0002)
         policy.observe(index: 0, ratio: 1.0002)
-        XCTAssertFalse(policy.plan(for: 0).quantise, "--no-quantise must stay lossless")
+        XCTAssertFalse(policy.plan(for: 0).quantise, "--quality 100 (was --no-quantise) must stay lossless")
         XCTAssertEqual(policy.plan(for: 0).level, 0, "but skipping zlib still applies")
     }
 }

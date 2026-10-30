@@ -31,7 +31,9 @@ struct Options {
     var scalePinned = false
     var scaleError: String? = nil
     var noInput = false
-    var noQuantise = false
+    /// How much colour the encoder may drop (`--quality`, 0...100, default 80 = adaptive 5-6-5).
+    /// `--no-quantise` is kept as an alias for 100 so old command lines keep meaning the same thing.
+    var quality = QualityBudget.default
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
     /// anything that is not plain ASCII.
@@ -151,7 +153,11 @@ func usage() -> String {
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
       --no-input          view only, do not inject events
-      --no-quantise       never drop colour precision (default: incompressible tiles go 5-6-5)
+      --quality <0-100>   how much colour the picture may lose: 100 keeps every pixel, 80 (the
+                          default) is 5-6-5 on tiles that proved incompressible, 70 is 5-5-5 and
+                          50 is 4-4-4 for everything. Bit depth is the axis; one step down is
+                          ~15-30% fewer bytes (docs/ENCODING.md)
+      --no-quantise       same as --quality 100
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
@@ -245,6 +251,17 @@ func parseClipboardSpec(_ spec: String) -> ClipboardPolicy {
     return policy
 }
 
+/// `--quality <0-100>`, or a usage error. Silent clamping would be the worst answer here: a user who
+/// types 150 means "as good as possible" and a user who types 5 means "as small as possible", and an
+/// assumption about which is a lie either way.
+func parseQualitySpec(_ spec: String?) -> QualityBudget {
+    guard let spec, let value = Int(spec), (0...100).contains(value) else {
+        FileHandle.standardError.write(Data("krd: --quality wants 0...100, got \"\(spec ?? "nothing")\"\n".utf8))
+        exit(2)
+    }
+    return QualityBudget(value)
+}
+
 /// `--symbols <spec>`, or a usage error: a typo must not silently pick a glyph table.
 func parseSymbolsSpec(_ spec: String) -> WallSymbols {
     guard let symbols = WallSymbols(spec: spec) else {
@@ -331,7 +348,10 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
-        case "--no-quantise": options.noQuantise = true
+        case "--no-quantise": options.quality = QualityBudget(100)
+        case "--quality":
+            options.quality = parseQualitySpec(args[safe: i + 1])
+            i += 1
         case "--cursor": options.drawsCursor = true
         case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
@@ -627,7 +647,7 @@ final class Desk {
 
     func run() async throws {
         // Before any branch: --bench, --selftest and the live path all go through this writer.
-        writer.quantiseEnabled = !options.noQuantise
+        writer.quality = options.quality
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
@@ -2285,8 +2305,7 @@ final class Desk {
                 let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
                 let plan = writer.plan(for: index)
                 base[i] = ScreenWriter.compress(index: index, rect: rect,
-                                                pixels: grid.extract(pixels, rect: rect),
-                                                level: plan.level, quantise: plan.quantise)
+                                                pixels: grid.extract(pixels, rect: rect), plan: plan)
             }
         }
         writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
@@ -2451,6 +2470,10 @@ final class Desk {
         chromeSampleDelivered = capturer.framesDelivered
         m.mbps = Double(dBytes) / 1_048_576.0 / elapsed
         m.kbPerFrame = writer.lastFrameBytes / 1024
+        m.quality = writer.quality.value
+        m.qualityLabel = writer.quality.label
+        m.quantisedTiles = writer.quantisedTiles
+        m.skippedTiles = writer.skippedTiles
         m.tilesPerSec = Int(Double(dTiles) / elapsed)
         m.dirty = lastDirtyCount
         m.tilesTotal = layout?.count ?? 0

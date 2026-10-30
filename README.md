@@ -59,7 +59,9 @@ krd --scale 0.5              # capture half the pixels per side and let the term
                              # 4x fewer bytes on colour-heavy content, visibly softer text
 krd --display 1 --fps 30
 krd --no-input               # watch only
-krd --no-quantise           # keep the encoder lossless (photos cost ~2.3x the bytes)
+krd --quality 70            # how much colour the picture may lose: 100 = lossless, 80 (default) =
+                            # 5-6-5 on incompressible tiles, 70 = 5-5-5, 50 = 4-4-4 everywhere
+krd --no-quantise           # same as --quality 100
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture

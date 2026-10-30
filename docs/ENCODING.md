@@ -106,6 +106,51 @@ trade is only worth taking because bytes, not CPU, are what limits a photo scree
 lossless path asks for ~95 MB/s against a local pty that tops out at 103.6 MB/s
 ([research-photo-bandwidth](research-photo-bandwidth.md) §0).
 
+### One number for colour: `--quality` (issue #52's ladder)
+
+5-6-5 was a single rung bolted onto the encoder. It is really one point on a continuous axis — **how
+many bits each pixel keeps** — and the useful values of that axis are all reachable without a new
+wire format:
+
+| `--quality` | bits/px | what a quantised tile looks like | photo wire | vs 100 |
+|---:|---:|---|---:|---:|
+| 100 | 24 | lossless (`--no-quantise`) | 521,797 B | 1.00× |
+| 90 | 18 | 6-6-6, 262k colours | 399,955 B | **1.30×** |
+| **80** | **16** | **5-6-5, 65k colours (the default)** | **408,935 B** | **1.28×** |
+| 70 | 15 | 5-5-5, 32k colours | 351,947 B | 1.48× |
+| 50 | 12 | 4-4-4, 4096 colours | 308,143 B | 1.69× |
+
+`krd --bench --json --rounds 4 --quality N`, `photo` case (hash noise, the worst case), wire bytes.
+
+The number is a **ceiling, not a target**: each tile still gets whatever encoder is cheapest for its
+content, and the ceiling says how far it may go. Three things follow from that.
+
+- **100 is the only lossless rung**, and it is what `--no-quantise` always meant; the old flag is
+  kept as an alias so existing command lines keep meaning the same thing.
+- **80 is byte-for-byte what krd did before this flag existed** (5-6-5 behind the two-frame guard), so
+  the default does not change any existing behaviour.
+- **70 and below quantise eagerly**, guard bypassed: at that point the user has asked for bytes, and
+  waiting two frames to save them is the wrong trade. 50 and below clamp here until the encoder
+  grows PNG payloads (grey 8 = 2.16×, 3-3-2 = 5.07× on a photograph: coarse quantisation creates the
+  repeats, so at 8 bits per pixel coarse colour beats fine greyscale — see `probe/gray_probe.py`).
+
+Note that 6-6-6 (quality 90) is both **higher fidelity and slightly cheaper** than 5-6-5 on noise:
+a uniform 64-symbol alphabet codes better than 5-6-5's mixed 32/64/32 one. It is a candidate default
+once the guard's numbers have been measured on real desktops.
+
+**Deflate, not huffman-only, after quantising.** The 5-6-5 path used to compress quantised tiles with
+`Z_HUFFMAN_ONLY`. That throws away the LZ matches — which are exactly what quantising creates.
+Measured on a 136×132 photo tile: 5-6-5 with deflate is 31,270 B against 37,905 B huffman-only
+(−17.5 %), and *faster* (0.70 ms against 1.1 ms), because the repetitive data finds long matches
+immediately. Huffman-only also broke the ladder's ordering: with every symbol coded independently,
+6-6-6 could come out cheaper than 5-6-5. `--bench` previously hid all of this by calling the old
+`compress(level:quantise:)` overload, which hard-coded 5-6-5 and dropped the rung; it now passes the
+`Plan` through.
+
+The stats panel's `encoder` row names the rung and the tile counts (`q80 5-6-5`), and the `wire` row
+says how many tiles are being quantised and how many are sent raw — a picture that looks soft because
+a number is wrong is the hardest kind of bug to see from outside.
+
 ## Why these levers and not others
 
 **zlib level per tile (issue #3).** One level for the whole frame is always wrong: text compresses

@@ -432,8 +432,7 @@ enum Bench {
                         DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
                             let pixels = layout.extract(px, rect: rects[i])
                             base[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
-                                                            pixels: pixels, level: plans[i].level,
-                                                            quantise: plans[i].quantise)
+                                                            pixels: pixels, plan: plans[i])
                         }
                     }
                     parallelMsRound = benchNowMs() - parallelStart
@@ -480,7 +479,7 @@ enum Bench {
                         let pixels = layout.extract(lastFrame, rect: rects[i])
                         let t1 = benchNowMs()
                         _ = ScreenWriter.compress(index: lastDirty[i], rect: rects[i],
-                                                  pixels: pixels, level: plans[i].level, quantise: plans[i].quantise)
+                                                  pixels: pixels, plan: plans[i])
                         let t2 = benchNowMs()
                         extract += t1 - t0; zlib += t2 - t1
                     }

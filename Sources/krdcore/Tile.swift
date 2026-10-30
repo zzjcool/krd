@@ -49,8 +49,12 @@ public struct LevelPolicy {
     /// Consecutive frames a tile's lossless attempt bought nothing. Two in a row before switching to
     /// quantisation: one noisy frame (a video cut, a scroll) is not a photo.
     private var streak: [Int]
-    /// `--no-quantise` sets this false: lossless only, at the cost of the photo case.
-    public let allowsQuantise: Bool
+    /// `--quality` says how far the encoder may go. Its ceiling is what decides whether quantising
+    /// is allowed at all (`--quality 100`, formerly `--no-quantise`, forbids it), which bit depth it
+    /// reduces to, and whether the two-frame guard still applies.
+    public let quality: QualityBudget
+    /// False for a lossless budget: the photo case costs ~2.3x the wire bytes without it (#59).
+    public var allowsQuantise: Bool { quality.isLossy }
     private let threshold: Double
     private let hysteresis: Double
     private let textLevel: Int
@@ -60,13 +64,14 @@ public struct LevelPolicy {
     /// tile sent raw reports exactly 1.0, so the state has to be stable at 1.0 as well as above it.
     public static let skipAt = 1.0
 
-    public init(tiles: Int, textLevel: Int = 9, photoLevel: Int = 1, allowsQuantise: Bool = true) {
+    public init(tiles: Int, textLevel: Int = 9, photoLevel: Int = 1,
+                quality: QualityBudget = .default) {
         ratio = [Double](repeating: -1, count: tiles)      // -1 = never seen
         level = [Int](repeating: 5, count: tiles)          // first frame: middle ground
         skipped = [Bool](repeating: false, count: tiles)
         quantised = [Bool](repeating: false, count: tiles)
         streak = [Int](repeating: 0, count: tiles)
-        self.allowsQuantise = allowsQuantise
+        self.quality = quality
         threshold = 0.10
         hysteresis = 0.03
         self.textLevel = textLevel
@@ -81,24 +86,40 @@ public struct LevelPolicy {
     /// How many tiles the encoder is currently sending raw (tests and diagnostics).
     public var skippedCount: Int { skipped.lazy.filter { $0 }.count }
 
-    /// How many tiles are being quantised to 5-6-5 (tests and diagnostics).
-    public var quantisedCount: Int { quantised.lazy.filter { $0 }.count }
+    /// How many tiles are being quantised right now (tests and diagnostics).
+    public var quantisedCount: Int {
+        guard allowsQuantise else { return 0 }
+        return quality.eager ? count : quantised.lazy.filter { $0 }.count
+    }
 
     /// What to do with one tile this frame: a zlib level (0 = do not compress) plus, when the
     /// content is incompressible, whether to drop the low bits first so that zlib has structure.
     public struct Plan: Equatable {
         public var level: Int
         public var quantise: Bool
-        public init(level: Int, quantise: Bool = false) {
+        /// Bit depth to reduce to when `quantise` is set; nil for a lossless budget.
+        public var bits: QualityBudget.Bits?
+        /// Apply it to every tile, not only to the ones that proved incompressible.
+        public var eager: Bool
+        public init(level: Int, quantise: Bool = false, bits: QualityBudget.Bits? = nil,
+                    eager: Bool = false) {
             self.level = level
             self.quantise = quantise
+            self.bits = bits
+            self.eager = eager
         }
     }
 
     public func plan(for index: Int) -> Plan {
         guard index < level.count else { return Plan(level: 5) }
+        // The guard (`quantised[index]`, two incompressible frames in a row) exists to protect areas
+        // that already compress well. From quality 70 down the user has asked for bytes, so it is
+        // bypassed instead of being waited out.
+        let quantise = allowsQuantise && (quality.eager || quantised[index])
         return Plan(level: skipped[index] ? 0 : level[index],
-                    quantise: quantised[index] && allowsQuantise)
+                    quantise: quantise,
+                    bits: quantise ? quality.bits : nil,
+                    eager: quantise && quality.eager)
     }
 
     /// `quantisedIn` is what `compress` actually did with the tile: a quantised tile's ratio says
