@@ -72,35 +72,56 @@ public enum PanelImage {
         return PanelFit(contentWidth: w, contentHeight: h, originX: x, originY: y, cellRect: cellRect)
     }
 
-    /// The colour the bars take: the picture's most common colour.
+    /// The colour the bars take: the picture's most common colour **among the pixels along its own
+    /// edges**.
     ///
-    /// Sampling a 16x16 grid instead of averaging the whole picture is the point - an average turns
-    /// a dark window with a white page into grey, which then reads as "not part of the picture".
-    /// Each sample is quantised to 5 bits per channel, the fullest bucket wins, and ties go to the
-    /// bucket nearest the mean colour (predictable and stable across frames).
-    public static func dominantColor(rgb: [UInt8], width: Int, height: Int) -> PanelColor {
+    /// Why the edges and not the whole picture: the bars sit immediately outside the picture, so a
+    /// colour taken from the edge is the only one that can blend into it. Sampling everything was
+    /// the first version and it looked like a bug — a desk with a big white window in the middle
+    /// made the two side bars pure white (254,254,254), because the white window outvoted the blue
+    /// wallpaper that the bars actually touch.
+    ///
+    /// Still a mode, not an average: an average of a blue wallpaper and a white window is grey,
+    /// which matches neither. Each sample is quantised to 5 bits per channel, the fullest bucket
+    /// wins, and ties go to the bucket nearest the mean colour so that the same picture always gets
+    /// the same bars.
+    public static func backdropColor(rgb: [UInt8], width: Int, height: Int) -> PanelColor {
         guard width > 0, height > 0, rgb.count >= width * height * 3 else { return .black }
-        let grid = 16
+        // How deep the edge band goes: thin enough to stay "the border", thick enough to survive a
+        // 1-pixel hairline or a scrollbar.
+        let band = max(1, min(8, min(width, height) / 32))
         var buckets: [UInt32: (count: Int, r: Int, g: Int, b: Int)] = [:]
         var sumR = 0, sumG = 0, sumB = 0, samples = 0
-        for gy in 0..<grid {
-            let y = min(height - 1, (gy * height + height / 2) / grid)
-            for gx in 0..<grid {
-                let x = min(width - 1, (gx * width + width / 2) / grid)
-                let o = (y * width + x) * 3
-                let r = Int(rgb[o]), g = Int(rgb[o + 1]), b = Int(rgb[o + 2])
-                sumR += r; sumG += g; sumB += b; samples += 1
-                let key = UInt32(r >> 3) << 10 | UInt32(g >> 3) << 5 | UInt32(b >> 3)
-                var bucket = buckets[key] ?? (0, 0, 0, 0)
-                bucket.count += 1
-                bucket.r += r; bucket.g += g; bucket.b += b
-                buckets[key] = bucket
+
+        func sample(_ x: Int, _ y: Int) {
+            let cx = max(0, min(width - 1, x)), cy = max(0, min(height - 1, y))
+            let o = (cy * width + cx) * 3
+            let r = Int(rgb[o]), g = Int(rgb[o + 1]), b = Int(rgb[o + 2])
+            sumR += r; sumG += g; sumB += b; samples += 1
+            let key = UInt32(r >> 3) << 10 | UInt32(g >> 3) << 5 | UInt32(b >> 3)
+            var bucket = buckets[key] ?? (0, 0, 0, 0)
+            bucket.count += 1
+            bucket.r += r; bucket.g += g; bucket.b += b
+            buckets[key] = bucket
+        }
+
+        // 32 points per edge, `band` rows deep: the corners are sampled twice, which is fine - they
+        // are corners, and weighting them a little is what keeps a rounded window looking right.
+        let steps = 32
+        for i in 0..<steps {
+            let x = i * width / steps
+            let y = i * height / steps
+            for depth in 0..<band {
+                sample(x, depth)                       // top
+                sample(x, height - 1 - depth)          // bottom
+                sample(depth, y)                       // left
+                sample(width - 1 - depth, y)           // right
             }
         }
+
         guard samples > 0, !buckets.isEmpty else { return .black }
         let mean = (Double(sumR) / Double(samples), Double(sumG) / Double(samples),
                     Double(sumB) / Double(samples))
-        // Sorted, so a tie is broken the same way on every frame of the same picture.
         var best: (count: Int, r: Int, g: Int, b: Int)?
         for key in buckets.keys.sorted() {
             let bucket = buckets[key]!

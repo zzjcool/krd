@@ -150,9 +150,14 @@ Why not cover: cover throws content away, and the display's own shape *is* infor
 the reader cannot tell which display they are looking at. Fitting costs only the bars, and once the bars carry the
 dominant colour they read as part of the picture.
 
-How to find the dominant colour: downsample to ~8×8, quantise each channel to 5 bits, histogram, take the fullest
-bucket; ties go to the one nearest the picture's mean. 64 samples, one pass per picture, cached until the picture
-changes.
+How to find the dominant colour: **only the outermost ring of the picture** — 32 points along each edge, going
+`min(8, min(w,h)/32)` pixels deep — quantised to 5 bits per channel, histogram, fullest bucket wins, ties go to the
+bucket nearest the ring's mean. 128 samples, once per picture.
+
+Why the ring and not the whole picture: the bars sit immediately outside the picture's edges, so only an edge colour
+can blend into them. The first version sampled everything, and a desk with a big white window in the middle turned both
+side bars pure white (254,254,254) — which looked like a bug, because what those bars actually touch is blue wallpaper.
+Still a mode, not an average: the average of blue wallpaper and a white window is grey, which matches neither.
 
 Why a window's aspect must not reshape its card: **the layout being fixed** is the whole value of this screen - if
 cards resized to their windows, the second click would miss.

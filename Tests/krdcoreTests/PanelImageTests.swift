@@ -45,40 +45,63 @@ final class PanelImageTests: XCTestCase {
         XCTAssertTrue(PanelImage.fit(aspect: 1.6, in: band, cellW: 0, cellH: 0).isEmpty)
     }
 
-    // MARK: dominant colour
+    // MARK: backdrop colour
 
-    func testTheMostCommonColourWins() {
-        // 8x8 of one colour and 8x8 of another: the fuller area decides, not the first sample.
-        var rgb = [UInt8]()
-        for y in 0..<16 {
-            for x in 0..<16 {
-                if x < 12 { rgb += [200, 30, 40] } else { rgb += [10, 200, 10] }
+    /// The case that made this the rule: a desk with a big bright window in the middle and a blue
+    /// wallpaper at the edges must give a blue backdrop, not white.
+    func testTheEdgesWinOverABrightMiddle() {
+        let w = 64, h = 40
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        for y in 0..<h {
+            for x in 0..<w {
+                let o = (y * w + x) * 3
+                let edge = x < 6 || x >= w - 6 || y < 6 || y >= h - 6
+                let colour: [UInt8] = edge ? [30, 90, 200] : [250, 250, 250]
+                rgb[o] = colour[0]; rgb[o + 1] = colour[1]; rgb[o + 2] = colour[2]
             }
-            _ = y
         }
-        XCTAssertEqual(PanelImage.dominantColor(rgb: rgb, width: 16, height: 16),
-                       PanelColor(r: 200, g: 30, b: 40))
+        XCTAssertEqual(PanelImage.backdropColor(rgb: rgb, width: w, height: h),
+                       PanelColor(r: 30, g: 90, b: 200))
     }
 
-    func testATieGoesToTheBucketNearestTheMeanColour() {
-        // Two equal halves; the mean is between them, so both are equidistant and the lower bucket
-        // wins by the sorted-key rule. What matters is that it is *decided*, not that it is one of
-        // them by accident: the same picture must give the same colour on every frame.
-        var rgb = [UInt8]()
-        for _ in 0..<16 {
-            for x in 0..<16 {
-                rgb += x < 8 ? [0, 0, 0] : [255, 255, 255]
+    func testAUniformEdgeGivesThatColour() {
+        let w = 40, h = 30
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        for i in stride(from: 0, to: rgb.count, by: 3) { rgb[i] = 12; rgb[i + 1] = 200; rgb[i + 2] = 40 }
+        XCTAssertEqual(PanelImage.backdropColor(rgb: rgb, width: w, height: h),
+                       PanelColor(r: 12, g: 200, b: 40))
+    }
+
+    /// Two colours split down the middle of the ring: the fuller one wins, and the same picture
+    /// always gives the same answer.
+    func testTheFullerEdgeColourWinsAndTheAnswerIsStable() {
+        let w = 40, h = 40
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        for y in 0..<h {
+            for x in 0..<w {
+                let o = (y * w + x) * 3
+                let left = x < w / 2
+                let colour: [UInt8] = left ? [0, 0, 0] : [255, 255, 255]
+                rgb[o] = colour[0]; rgb[o + 1] = colour[1]; rgb[o + 2] = colour[2]
             }
         }
-        let first = PanelImage.dominantColor(rgb: rgb, width: 16, height: 16)
-        let second = PanelImage.dominantColor(rgb: rgb, width: 16, height: 16)
-        XCTAssertEqual(first, second)
+        let first = PanelImage.backdropColor(rgb: rgb, width: w, height: h)
+        XCTAssertEqual(first, PanelImage.backdropColor(rgb: rgb, width: w, height: h))
         XCTAssertEqual(first, PanelColor(r: 0, g: 0, b: 0))
     }
 
+    func testATinyPictureDoesNotTrap() {
+        // 1x1 and 2x2 have no "band" to speak of: the clamp is what keeps the indices in range.
+        XCTAssertEqual(PanelImage.backdropColor(rgb: [9, 8, 7], width: 1, height: 1),
+                       PanelColor(r: 9, g: 8, b: 7))
+        XCTAssertEqual(PanelImage.backdropColor(rgb: [UInt8](repeating: 4, count: 2 * 2 * 3),
+                                                width: 2, height: 2),
+                       PanelColor(r: 4, g: 4, b: 4))
+    }
+
     func testAnEmptyPictureIsBlackAndNeverTraps() {
-        XCTAssertEqual(PanelImage.dominantColor(rgb: [], width: 0, height: 0), .black)
-        XCTAssertEqual(PanelImage.dominantColor(rgb: [1, 2, 3], width: 100, height: 100), .black)
+        XCTAssertEqual(PanelImage.backdropColor(rgb: [], width: 0, height: 0), .black)
+        XCTAssertEqual(PanelImage.backdropColor(rgb: [1, 2, 3], width: 100, height: 100), .black)
     }
 
     // MARK: composite

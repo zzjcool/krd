@@ -12,7 +12,8 @@ enum WallPictures {
         let panel: WallPanel
         /// Exactly `panel.pixelWidth x panel.pixelHeight` RGB: the panel, bars included.
         let pixels: [UInt8]
-        /// The colour the bars took. Kept for the report below; the mask never uses it.
+        /// The colour the bars took: the picture's own edge colour, so they blend into it.
+        /// Kept for the report below; the mask never uses it.
         let backdrop: PanelColor
     }
 
@@ -44,7 +45,7 @@ enum WallPictures {
                 guard let raster = PanelRaster.rgb(image) else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                let backdrop = PanelImage.dominantColor(rgb: raster.pixels,
+                let backdrop = PanelImage.backdropColor(rgb: raster.pixels,
                                                         width: raster.width, height: raster.height)
                 let canvas = PanelImage.compose(content: raster.pixels,
                                                 width: raster.width, height: raster.height,
