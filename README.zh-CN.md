@@ -108,7 +108,8 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 | | |
 |---|---|
 | 可用 | 瓦片脏更新（静止画面 0 字节/秒）、指针跟随、左中右三键、双击、滚轮、键盘、应答握手的终端上的 kitty 键盘协议（`Cmd`、连发、释放）、窗口级镜像（输入直接投给该窗口所属进程）、显示器集合变化（插拔 / 改分辨率 / 合盖）就地重启采集、SSH |
-| 粗糙 | 大面积高速运动：最坏情况 13.58 MB/帧，成本见 [research-photo-bandwidth](docs/research-photo-bandwidth.zh-CN.md)（便宜的解法是 16 位 tile + 缩小采集，而不是编解码器）；Herdr 的图像删除语义 |
+| 粗糙 | 全密度下的大面积高速运动：最坏情况 13.58 MB/帧，成本见 [research-photo-bandwidth](docs/research-photo-bandwidth.zh-CN.md)；Herdr 的图像删除语义 |
+| 可用（带宽） | 用分辨率换带宽后，彩色重内容已经可用：不可压 tile 降到 5-6-5（`Z_HUFFMAN_ONLY`，不改协议）省 **1.29×**，`--scale 0.5` 只采四分之一的像素省 **3.98×** —— 合起来 20 fps 下 **68 MB/s**，落在本地 pty 的 103 MB/s 之内，且指针映射不变 |
 | 可用（剪贴板） | 剪贴板桥，`--clipboard=in|out|both` 显式打开：镜像桌面里复制 = 给本地终端发一条 OSC 52
 （`in`）；`Ctrl-V` = 向终端索取剪贴板、放进镜像端 pasteboard 再投 `Cmd-V`（`out`，需要终端支持 OSC 52 读回，
 不支持就用 `--clipboard-paste <file>`） |
