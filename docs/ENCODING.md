@@ -180,6 +180,12 @@ The frame-rate step is enforced in the frame loop rather than in ScreenCaptureKi
 delivering at `--fps`, and the frames the loop declines cost no zlib, no bytes and no dirty-region
 pass. The panel's `fps` target follows the rung, so the plumbing stays visible.
 
+To judge the rungs by eye rather than by table, `probe/quality_sliders.py` loops a video with the
+three axes on draggable bars — colour 100/90/80/70/50, `--scale` 1.0 … 0.1, `--fps` 30 … 5 — and
+prints bytes per frame, KB/s and the ratio to lossless for the current combination. `--once` prints
+the whole table instead (that is where the numbers above come from; `probe/quality_demo.py` was the
+earlier, non-interactive version of the same idea and had its own copy of the encoder).
+
 The stats panel's `encoder` row names the rung (`q80 5-6-5`), and the `wire` row counts what the last
 frame actually did (`quantised 41 raw 3`) — counted per frame, not guessed from the grid, because a
 picture that looks soft because a number is wrong is the hardest kind of bug to see from outside.
