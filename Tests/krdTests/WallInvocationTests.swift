@@ -315,4 +315,19 @@ final class ScaleTransportTests: XCTestCase {
         XCTAssertFalse(Desk.scaleNeedsPixelPlacements(placeholdersForced: false, pinnedScale: 0.8,
                                                       deviceCell: true))
     }
+
+    // MARK: the frame has to be the cell box (issue #86)
+
+    /// The other half of the same decision: *where* the placeholder frame must be the cell box. On a
+    /// terminal that draws one image pixel per device pixel a shorter frame is a seam at every tile
+    /// column; on one that scales the image into its cells `--scale` is bandwidth and nothing else, so
+    /// taking it away there would be a regression (`testATerminalThatStretchesKeepsPlaceholders`).
+    func testOnlyATerminalThatDrawsOneToOneNeedsTheCellBox() {
+        XCTAssertTrue(Desk.placeholderNeedsCellBox(placeholders: true, deviceCell: true))
+        XCTAssertFalse(Desk.placeholderNeedsCellBox(placeholders: true, deviceCell: false),
+                       "a terminal that stretches keeps --scale as bandwidth")
+        XCTAssertFalse(Desk.placeholderNeedsCellBox(placeholders: false, deviceCell: true),
+                       "a pixel placement is scaled by the terminal")
+        XCTAssertFalse(Desk.placeholderNeedsCellBox(placeholders: false, deviceCell: false))
+    }
 }
