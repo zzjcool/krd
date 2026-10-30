@@ -2246,6 +2246,16 @@ final class Desk {
         // out (a handed-over mirror runs `--bar` with no `--dev`), and gating on the `--dev` flag
         // here left `chromeGeometry` nil, so `drawChrome` bailed and the bar never appeared. Caught
         // by `testAMockMirrorDrawsItsBar`; the merge of #76 is where this gate regressed.
+        // One line that makes the mirror's geometry answerable without a screenshot: the pane, the
+        // cell, the source, and what the fit made of them. "The display page is smaller than the
+        // pane" has to be diagnosable by reading a number, not by looking at a picture.
+        Log.write("krd: mirror grid \(layout.paneCols)x\(layout.paneRows) cells at "
+                  + "\(Int(paneGeometry.cellSize.w))x\(Int(paneGeometry.cellSize.h)) px, "
+                  + "pane \(geometry.cols)x\(geometry.rows), src "
+                  + "\(Int(layout.sourceW))x\(Int(layout.sourceH)) px, "
+                  + "fit \(String(format: "%.3f", layout.fit)), "
+                  + "origin \(layout.originCol),\(layout.originRow), "
+                  + "frame \(layout.pixelW)x\(layout.pixelH) px\n")
         if chromeAvailable {
             // --full-frame draws one image the size of the picture, so the chrome still fits.
             chromeGeometry = Chrome.layout(paneCols: geometry.cols, paneRows: geometry.rows,
