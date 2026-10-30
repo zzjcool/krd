@@ -31,6 +31,7 @@ import gray_probe as gp
 
 CHUNK = 4096
 IMAGE_ID = 1001
+PLACEMENT_ID = 1
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CLIP = os.path.join(HERE, '..', 'docs', 'media', 'demo.mp4')
 
@@ -73,19 +74,28 @@ def encode(rows, w, h, quality):
 
 
 def transmit(kind, payload, cells_w, cells_h, dims):
+    """One frame as krd sends it: a=t to replace the pixels, a=p to place, all in one 2026 block.
+
+    `a=T` (transmit and display) deletes the image and creates it again, which on a slow link the
+    terminal can render halfway through -- that is the tearing. `a=t` swaps the pixels of the image
+    the placement already points at, and DEC 2026 makes the terminal commit the whole thing in one
+    repaint.
+    """
     b64 = base64.b64encode(payload).decode()
-    first = True
+    frame = ['\033[?2026h', '\033[3;2H']
     for i in range(0, len(b64), CHUNK):
         part = b64[i:i + CHUNK]
         more = 0 if i + CHUNK >= len(b64) else 1
-        if first:
-            ctl = f'\033_Gi={IMAGE_ID},a=T,q=2,f={kind},c={cells_w},r={cells_h},C=1,m={more}'
+        if i == 0:
+            ctl = f'\033_Gi={IMAGE_ID},a=t,q=2,f={kind},m={more}'
             if dims:
                 ctl += f',s={dims[0]},v={dims[1]},o=z'
-            out.write(ctl + ';' + part + '\033\\')
-            first = False
+            frame.append(ctl + ';' + part + '\033\\')
         else:
-            out.write(f'\033_Gm={more};{part}\033\\')
+            frame.append(f'\033_Gm={more};{part}\033\\')
+    frame.append(f'\033_Gi={IMAGE_ID},p={PLACEMENT_ID},a=p,q=2,C=1,c={cells_w},r={cells_h}\033\\')
+    frame.append('\033[?2026l')
+    out.write(''.join(frame))
 
 
 # ---------------------------------------------------------------- video
@@ -313,15 +323,19 @@ def main():
 
             if now - last_draw > 0.2:
                 last_draw = now
+                out.write('\033[?2026h')
                 draw_bars(screen, bars, bar_top + 1, bar_width, current)
                 draw_stats(screen, bar_top + 5, sent, seconds, write_ms, baseline_rate or 1)
                 screen.at(bar_top + 6, 1, f'  {len(sent)} frames sent · '
                                           f'{"paused" if paused else "playing"}')
+                out.write('\033[?2026l')
                 out.flush()
     except KeyboardInterrupt:
         pass
     finally:
-        out.write('\033_Ga=d,d=A,q=2\033\\\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\n')
+        # close any dangling 2026 block first: an unclosed one freezes the terminal's drawing
+        out.write('\033[?2026l\033_Ga=d,d=A,q=2\033\\'
+                  '\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\n')
         out.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
