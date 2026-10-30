@@ -94,10 +94,14 @@ noise, the worst case; layout as reported in the JSON `config`, 66 tiles):
 
 | | wire | encode p50 |
 |---|---:|---:|
-| skip zlib (issue #53, today's `main`) | 4,755,012 B | 3.20 ms |
-| **5-6-5 then Huffman-only zlib (this)** | **3,686,632 B (−22.5 %)** | **6.03 ms** |
+| skip zlib (issue #53) | 4,755,012 B | 3.20 ms |
+| 5-6-5 then Huffman-only zlib (#59, as shipped) | 3,686,632 B (−22.5 %) | 6.03 ms |
 
-`drag` (noise, but only part of the screen) moves with it: 1,198,117 → 1,105,258 B (−7.8 %),
+Those are the numbers #59 shipped with. The entropy stage has since changed: quantised tiles now go
+through deflate rather than huffman-only, which is ~17 % smaller again and faster (see the ladder
+section below), so the second row is history rather than what `main` does today.
+
+`drag` (noise, but only part of the screen) moved with it: 1,198,117 → 1,105,258 B (−7.8 %),
 2.70 → 2.80 ms. Text/UI/gradient are byte-identical, and their p50 does not move.
 
 The cost is 36.5 dB PSNR: banding on smooth ramps, invisible on photographs and video. `--no-quantise`
@@ -105,6 +109,80 @@ keeps the encoder strictly lossless and gets the `photo` case back to the skip-z
 trade is only worth taking because bytes, not CPU, are what limits a photo screen: at 20 fps the
 lossless path asks for ~95 MB/s against a local pty that tops out at 103.6 MB/s
 ([research-photo-bandwidth](research-photo-bandwidth.md) §0).
+
+### One number for colour: `--quality` (issue #52's ladder)
+
+5-6-5 was a single rung bolted onto the encoder. It is really one point on a continuous axis — **how
+many bits each pixel keeps** — and the useful values of that axis are all reachable without a new
+wire format:
+
+| `--quality` | bits/px | what a quantised tile looks like | photo wire | vs 100 |
+|---:|---:|---|---:|---:|
+| 100 | 24 | lossless (`--no-quantise`) | 521,797 B | 1.00× |
+| 90 | 18 | 6-6-6, 262k colours | 399,955 B | **1.30×** |
+| **80** | **16** | **5-6-5, 65k colours (the default)** | **408,935 B** | **1.28×** |
+| 70 | 15 | 5-5-5, 32k colours | 351,947 B | 1.48× |
+| 50 | 12 | 4-4-4, 4096 colours | 308,143 B | 1.69× |
+
+`krd --bench --json --rounds 4 --quality N`, `photo` case (hash noise, the worst case), wire bytes.
+
+The number is a **ceiling, not a target**: each tile still gets whatever encoder is cheapest for its
+content, and the ceiling says how far it may go. Three things follow from that.
+
+- **100 is the only lossless rung**, and it is what `--no-quantise` always meant; the old flag is
+  kept as an alias so existing command lines keep meaning the same thing.
+- **80 makes the same decision krd made before this flag existed** (5-6-5 behind the two-frame
+  guard), so the default rung changes nothing about *what* is sent. The bytes are not identical,
+  though: the entropy stage behind it changed in the same breath (see below), and quantised tiles
+  come out ~17 % smaller than they used to. A tile that is not quantised is byte-for-byte unchanged.
+- **70 and below quantise eagerly**, guard bypassed: at that point the user has asked for bytes, and
+  waiting two frames to save them is the wrong trade. Everything below 70 resolves to 4-4-4 until
+  the encoder grows PNG payloads (grey 8 = 2.16×, 3-3-2 = 5.07× on a photograph: coarse quantisation
+  creates the repeats, so at 8 bits per pixel coarse colour beats fine greyscale — see
+  `probe/gray_probe.py`). Values between rungs round down, so `--quality 79` is 80 and the panel
+  prints the requested number next to the rung that is actually in force.
+
+Note that 6-6-6 (quality 90) is both **higher fidelity and slightly cheaper** than 5-6-5 on noise:
+a uniform 64-symbol alphabet codes better than 5-6-5's mixed 32/64/32 one. It is a candidate default
+once the guard's numbers have been measured on real desktops.
+
+**Deflate, not huffman-only, after quantising.** The 5-6-5 path used to compress quantised tiles with
+`Z_HUFFMAN_ONLY`. That throws away the LZ matches — which are exactly what quantising creates.
+Measured on a 136×132 photo tile: 5-6-5 with deflate is 31,270 B against 37,905 B huffman-only
+(−17.5 %), and *faster* (0.70 ms against 1.1 ms), because the repetitive data finds long matches
+immediately. Huffman-only also broke the ladder's ordering: with every symbol coded independently,
+6-6-6 could come out cheaper than 5-6-5. `--bench` previously hid all of this by calling the old
+`compress(level:quantise:)` overload, which hard-coded 5-6-5 and dropped the rung; it now passes the
+`Plan` through.
+
+### `--quality auto`: spend colour, then frames, and resolution last
+
+`auto` is the **default** for a live mirror, because the alternative was worse than it looked: `--scale
+auto` has been the default since #64, so a plain `krd` on a slow link took resolution first — the worst
+lever for text — and never tried the cheap one. `--quality <n>` (and `--no-quantise`) pin the ladder,
+which is also how "exactly the behaviour of the last release" is spelled now; `--bench`, `--selftest`,
+`--record` and `--replay` never walk it, for the same reason they never adapt the scale.
+
+The ladder is walked by the same kind of governor that already handles resolution, from the same
+signal — whether a frame was written before the next one was ready:
+
+    quality 80 -> 70 -> 50, then fps 20 -> 15 -> 10, then (and only then) --scale auto takes pixels
+
+The order is the argument. Colour loss is mild on text and photographs, frame loss is noticeable but
+honest, and resolution loss is what makes text unreadable. So bits go first, and the scale governor is
+not allowed to act until `QualityGovernor.handOver` — which is only true at the bottom rung.
+
+Both thresholds are asymmetric, for the reason #64's are: a downgrade needs a *majority* of late frames
+over 3 s, an upgrade needs near-silence over 10 s, and an upgrade that is undone within 20 s multiplies
+the next quiet window by 3. A link that cannot hold a rung therefore settles instead of oscillating.
+
+The frame-rate step is enforced in the frame loop rather than in ScreenCaptureKit: the capture keeps
+delivering at `--fps`, and the frames the loop declines cost no zlib, no bytes and no dirty-region
+pass. The panel's `fps` target follows the rung, so the plumbing stays visible.
+
+The stats panel's `encoder` row names the rung (`q80 5-6-5`), and the `wire` row counts what the last
+frame actually did (`quantised 41 raw 3`) — counted per frame, not guessed from the grid, because a
+picture that looks soft because a number is wrong is the hardest kind of bug to see from outside.
 
 ## Why these levers and not others
 

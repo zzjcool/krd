@@ -31,7 +31,15 @@ struct Options {
     var scalePinned = false
     var scaleError: String? = nil
     var noInput = false
-    var noQuantise = false
+    /// How much colour the encoder may drop (`--quality`, 0...100, default 80 = adaptive 5-6-5).
+    /// `--no-quantise` is kept as an alias for 100 so old command lines keep meaning the same thing.
+    var quality = QualityBudget.default
+    /// `--quality auto`: let `QualityGovernor` spend colour, then frame rate, before the resolution
+    /// governor is allowed to take anything.
+    var qualityAuto = false
+    /// Whether `--quality` (or `--no-quantise`) was typed. The selftest's sha256 is a byte contract,
+    /// so naming a lossy rung next to it is a usage error -- the default must keep working.
+    var qualityPinned = false
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
     /// anything that is not plain ASCII.
@@ -160,7 +168,17 @@ func usage() -> String {
       --ime <m>           how characters reach the target: auto (default), raw (physical keys
                           only, the target's IME composes), unicode (inject the character)
       --no-input          view only, do not inject events
-      --no-quantise       never drop colour precision (default: incompressible tiles go 5-6-5)
+      --quality <0-100|auto>
+                          how much colour the picture may lose: 100 keeps every pixel, 80 (the
+                          default) is 5-6-5 on tiles that proved incompressible, 70 is 5-5-5 and
+                          50 is 4-4-4 for everything. Values in between round down to the next
+                          rung (79 is 80). Bit depth is the axis: on a photograph 70 costs 1.48x
+                          and 50 costs 1.69x less than 100 (docs/ENCODING.md). Only the mirror
+                          path encodes pixels, so the wall and --full-frame ignore it. 'auto' is
+                          the default: it spends colour first (80 -> 70 -> 50), then frame rate
+                          (20 -> 15 -> 10), and only then lets --scale auto take resolution.
+                          Give a number to pin it (--quality 80 is then exactly the old behaviour)
+      --no-quantise       same as --quality 100 (pinned, no ladder)
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
@@ -238,6 +256,17 @@ func adaptiveScaleRefusal(bench: Bool, selftest: Bool, recording: Bool, replay: 
     return nil
 }
 
+/// The same four paths must not let the quality ladder adapt either: they either have no live pipe to
+/// react to, or they write bytes a later run compares against. Kept separate from the scale refusal
+/// because the two levers can be pinned independently.
+func adaptiveQualityRefusal(bench: Bool, selftest: Bool, recording: Bool, replay: Bool) -> String? {
+    if bench { return "--bench runs at --quality 80 (the ladder reacts to a live pipe)" }
+    if selftest { return "--selftest runs at --quality 80 (its sha256 is a byte contract)" }
+    if recording { return "--record runs at --quality 80 (a bit depth that changes mid-file has no marker)" }
+    if replay { return "--replay runs at --quality 80 (the ladder reacts to a live pipe)" }
+    return nil
+}
+
 /// `--ime <spec>`, or a usage error: a typo must not silently pick a mode.
 func parseIMESpec(_ spec: String) -> IMEMode {
     guard let mode = IMEMode(spec: spec) else {
@@ -256,6 +285,19 @@ func parseClipboardSpec(_ spec: String) -> ClipboardPolicy {
         exit(2)
     }
     return policy
+}
+
+/// `--quality <0-100>`, or a usage error. Silent clamping would be the worst answer here: a user who
+/// types 150 means "as good as possible" and a user who types 5 means "as small as possible", and an
+/// assumption about which is a lie either way.
+func parseQualitySpec(_ spec: String?) -> (budget: QualityBudget, auto: Bool) {
+    if (spec ?? "").lowercased() == "auto" { return (.default, true) }
+    guard let spec, let value = Int(spec), (0...100).contains(value) else {
+        FileHandle.standardError.write(
+            Data("krd: --quality wants 0...100 or auto, got \"\(spec ?? "nothing")\"\n".utf8))
+        exit(2)
+    }
+    return (QualityBudget(value), false)
 }
 
 /// `--symbols <spec>`, or a usage error: a typo must not silently pick a glyph table.
@@ -351,7 +393,20 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
-        case "--no-quantise": options.noQuantise = true
+        case "--no-quantise": options.quality = QualityBudget(100); options.qualityPinned = true
+        case "--quality":
+            let parsed = parseQualitySpec(args[safe: i + 1])
+            options.quality = parsed.budget
+            options.qualityAuto = parsed.auto
+            options.qualityPinned = true
+            i += 1
+        // The other `--flag=value` spellings are handled the same way, so this one has to be too:
+        // a user who types `--quality=70` means it.
+        case let arg where arg.hasPrefix("--quality="):
+            let parsed = parseQualitySpec(String(arg.dropFirst("--quality=".count)))
+            options.quality = parsed.budget
+            options.qualityAuto = parsed.auto
+            options.qualityPinned = true
         case "--cursor": options.drawsCursor = true
         case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
@@ -497,6 +552,13 @@ final class Desk {
     /// `options.scale` and never changes (issue #64).
     private var effectiveScale = 1.0
     private var governor = ScaleGovernor()
+    /// `--quality auto`: colour first, then frame rate. Resolution stays `ScaleGovernor`'s, and this
+    /// governor has to say `handOver` before that one may act.
+    private var qualityGovernor = QualityGovernor()
+    /// Frames per second the loop is currently allowing. `--fps` is the capture target; this is what
+    /// the encoder actually runs at when the governor has taken a step.
+    private var effectiveFps = 20
+    private var lastDrawAt = Double(0)
     /// Frames and late frames since the last stats tick, for the `late` column.
     private var framesSinceTick = 0
     private var lateSinceTick = 0
@@ -652,7 +714,12 @@ final class Desk {
 
     func run() async throws {
         // Before any branch: --bench, --selftest and the live path all go through this writer.
-        writer.quantiseEnabled = !options.noQuantise
+        writer.quality = options.quality
+        effectiveFps = options.fps
+        if options.qualityAuto {
+            qualityGovernor = QualityGovernor(start: .init(quality: options.quality.value,
+                                                           fps: options.fps))
+        }
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
@@ -680,10 +747,36 @@ final class Desk {
         if options.selftest && options.scalePinned {
             throw DeskError.message("--selftest always captures at scale 1; drop --scale")
         }
+        // Same contract, same reason: `--quality 50` would change every byte the hash covers while
+        // still printing a hash. Reported the way the other usage errors are (`--ime`, `--symbols`),
+        // not thrown: a thrown error here reaches only the log, and a usage error the user cannot
+        // see is a usage error that will be reported as "the hash changed".
+        // `--quality 80` is the default and therefore the hash everyone already has; anything else
+        // that can quantise -- including `auto`, which is a moving target -- would change it.
+        let pinnedLossy = options.qualityPinned
+            && (options.qualityAuto || (options.quality.isLossy && options.quality != .default))
+        if options.selftest && pinnedLossy {
+            FileHandle.standardError.write(
+                Data("krd: --selftest checks a lossless byte contract; drop --quality or use --quality 100\n".utf8))
+            exit(2)
+        }
         // Adaptive scaling is the default, but these four paths must not have it: they either have no
         // pipe to measure, or they write something a later run reads back. Pin them to 1 and say why,
         // because a scale that moves under a recording leaves frames whose sizes differ with nothing
         // in the file to mark it.
+        // Colour before resolution, by default. `--scale auto` has always been the default (issue
+        // #64), so leaving the quality ladder opt-in meant a plain `krd` on a slow link took the
+        // *worst* lever first -- softer text -- and never tried the cheap one. `--quality <n>` and
+        // `--no-quantise` pin it, which is also how "exactly as before" is spelled now.
+        if !options.qualityPinned {
+            options.qualityAuto = true
+            if let why = adaptiveQualityRefusal(bench: options.bench, selftest: options.selftest,
+                                                recording: options.record != nil,
+                                                replay: options.replay != nil) {
+                options.qualityAuto = false
+                Log.write("krd: \(why)\n")
+            }
+        }
         if options.scaleAuto,
            let why = adaptiveScaleRefusal(bench: options.bench, selftest: options.selftest,
                                           recording: options.record != nil, replay: options.replay != nil) {
@@ -2019,16 +2112,43 @@ final class Desk {
     ///
     /// Called on the frame thread, which is serial, so the governor needs no lock of its own.
     private func noteFrame(writeMs: Double) {
-        guard options.scaleAuto else { return }
+        guard options.scaleAuto || options.qualityAuto else { return }
         framesSinceTick += 1
-        let late = writeMs > 1000.0 / Double(max(options.fps, 1))
+        let target = options.qualityAuto ? effectiveFps : options.fps
+        let late = writeMs > 1000.0 / Double(max(target, 1))
         if late { lateSinceTick += 1 }
         let now = benchNowMs() / 1000.0
+        // Colour and frame rate first: they are cheap to give up and cheap to take back, and they
+        // do not touch the capture stream. Resolution is the last lever and belongs to the other
+        // governor, which must wait until this ladder has nothing left (see `QualityGovernor`).
+        if options.qualityAuto {
+            if let change = qualityGovernor.observe(at: now, late: late) {
+                DispatchQueue.main.async { [weak self] in self?.applyQualityChange(change) }
+            } else {
+                qualityGovernor.settle(at: now)
+            }
+        }
+        guard options.scaleAuto, !options.qualityAuto || qualityGovernor.handOver else { return }
         if let change = governor.observe(at: now, late: late) {
             DispatchQueue.main.async { [weak self] in self?.applyScaleChange(change) }
         } else {
             governor.settle(at: now)
         }
+    }
+
+    /// A quality rung, applied in place: no reconfiguration, no teardown, the next frame is simply
+    /// encoded at the new ceiling and the loop allows the new frame rate.
+    ///
+    /// Setting `writer.quality` rebuilds `LevelPolicy`, so the per-tile levels and the quantisation
+    /// guard start over. That is deliberate: the measured ratios were for a different bit depth, and
+    /// carrying them across would make the first frames after a step compare apples to oranges.
+    private func applyQualityChange(_ change: QualityGovernor.Change) {
+        guard options.qualityAuto else { return }
+        writer.quality = QualityBudget(change.to.quality)
+        effectiveFps = change.to.fps
+        lastDrawAt = 0
+        chromeDirty = true
+        Log.write("krd: \(change.line)\n")
     }
 
     /// Step the capture resolution in place: the same `updateSource` a pan uses (#57), so the stream
@@ -2263,6 +2383,14 @@ final class Desk {
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         let started = benchNowMs()
+        // A frame-rate step from the governor is enforced here, before anything is encoded: the
+        // capture still delivers at `--fps` (ScreenCaptureKit's cadence is not worth reconfiguring
+        // mid-stream), and the frames the loop declines cost no zlib, no bytes and no `dirty` pass.
+        if options.qualityAuto, effectiveFps < options.fps {
+            let due = 1000.0 / Double(max(effectiveFps, 1))
+            if started - lastDrawAt < due - 1 { return }
+            lastDrawAt = started
+        }
         framesHandled += 1
         let emittedBefore = writer.framesEmitted
 
@@ -2349,8 +2477,7 @@ final class Desk {
                 let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
                 let plan = writer.plan(for: index)
                 base[i] = ScreenWriter.compress(index: index, rect: rect,
-                                                pixels: grid.extract(pixels, rect: rect),
-                                                level: plan.level, quantise: plan.quantise)
+                                                pixels: grid.extract(pixels, rect: rect), plan: plan)
             }
         }
         writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
@@ -2511,7 +2638,7 @@ final class Desk {
         var m = chromeMetrics
         m.version = krdVersion
         m.target = targetLabel
-        m.fpsTarget = options.fps
+        m.fpsTarget = options.qualityAuto ? effectiveFps : options.fps
         m.fps = Double(framesHandled - chromeSampleFrames) / elapsed
         m.scale = effectiveScale
         m.scaleAuto = options.scaleAuto
@@ -2520,6 +2647,10 @@ final class Desk {
         chromeSampleDelivered = capturer.framesDelivered
         m.mbps = Double(dBytes) / 1_048_576.0 / elapsed
         m.kbPerFrame = writer.lastFrameBytes / 1024
+        m.quality = writer.quality.value
+        m.qualityLabel = writer.quality.label
+        m.quantisedTiles = writer.quantisedTiles
+        m.skippedTiles = writer.skippedTiles
         m.tilesPerSec = Int(Double(dTiles) / elapsed)
         m.dirty = lastDirtyCount
         m.tilesTotal = layout?.count ?? 0

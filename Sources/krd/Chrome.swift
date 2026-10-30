@@ -108,6 +108,12 @@ struct ChromeMetrics {
     var pipeP99Ms = 0.0
     var e2eMs = 0.0
     var zlibMs = 0.0
+    /// `--quality` as it stands, and the bit depth it allows: "80" and "5-6-5", or "100 lossless".
+    var quality = 80
+    var qualityLabel = "5-6-5"
+    /// Tiles the encoder is currently quantising and the tiles it is sending raw (#53/#59).
+    var quantisedTiles = 0
+    var skippedTiles = 0
     var writeMs = 0.0
     var writeMaxMs = 0.0
     var writeOver5 = 0
@@ -420,7 +426,8 @@ final class Chrome {
             line(2, "pipe (ours)", "\(Int(m.e2eMs)) ms",
                  String(format: "%@ · max %.0f · capture→write, no network", cap, m.pipeP99Ms))
             line(3, "encoder", String(format: "zlib %.1f ms", m.zlibMs),
-                 String(format: "write %.1f max %.1f over5 %d", m.writeMs, m.writeMaxMs, m.writeOver5))
+                 String(format: "write %.1f max %.1f over5 %d · q%d %@",
+                        m.writeMs, m.writeMaxMs, m.writeOver5, m.quality, m.qualityLabel))
             line(4, "capture", "\(m.callbacks)/s callbacks",
                  "delivered \(m.delivered) · skipped \(m.skipped) · idle \(m.idle) · bad \(m.bad)")
             line(5, "geometry", "\(m.pxW)×\(m.pxH) px",
@@ -428,7 +435,9 @@ final class Chrome {
                  + " · scale \(String(format: "%.2g", m.scale))×"
                  + (m.scaleAuto ? " (auto)" : ""),
                  m.scale < 0.999 && m.scaleAuto ? .warn : .plain)
-            line(6, "wire", m.format, "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells")
+            line(6, "wire", m.format,
+                 "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells · "
+                 + "quantised \(m.quantisedTiles) raw \(m.skippedTiles)")
             if m.queueBytes >= 0 {
                 line(7, "pty buffer", "\(m.queueBytes) B",
                      String(format: "%.0f ms at this rate · sshd took %.1f MB/s", m.queueMs, m.drainMbps))

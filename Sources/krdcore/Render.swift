@@ -48,8 +48,18 @@ public final class ScreenWriter {
     /// payload, and the picture never waits for a UI tick (it is one uncontended lock).
     private let writeLock = NSRecursiveLock()
 
-    /// `--no-quantise`: keep the encoder lossless. Photos then cost ~2.3x the wire bytes (issue #59).
-    public var quantiseEnabled = true
+    /// `--quality`: how far the encoder may drop below lossless (see `QualityBudget`). 100 keeps
+    /// every pixel; 80 is the long-standing adaptive 5-6-5; 70 and below quantise eagerly.
+    ///
+    /// Rebuilds the policy, because the budget is captured when it is constructed: setting this
+    /// after the first `resize` (as the bench and the replay path do) used to leave the old budget
+    /// in place and silently ignore the flag.
+    public var quality = QualityBudget.default {
+        didSet {
+            guard quality != oldValue else { return }
+            levels = LevelPolicy(tiles: levels.count, quality: quality)
+        }
+    }
 
     public private(set) var framesEmitted = 0
     public private(set) var lastFrameBytes = 0
@@ -93,17 +103,26 @@ public final class ScreenWriter {
 
     /// Called when the grid (and therefore the tile count) changes.
     public func resize(tiles: Int) {
-        if tiles != levels.count { levels = LevelPolicy(tiles: tiles, allowsQuantise: quantiseEnabled) }
+        if tiles != levels.count { levels = LevelPolicy(tiles: tiles, quality: quality) }
     }
 
     public func level(for index: Int) -> Int { levels.level(for: index) }
     /// Level + quantise, the two decisions the tile loop needs per tile.
     public func plan(for index: Int) -> LevelPolicy.Plan { levels.plan(for: index) }
-    /// How many tiles are being quantised right now (tests and the stats line).
-    public var quantisedTiles: Int { levels.quantisedCount }
+    /// What the last frame actually did: how many tiles it quantised and how many it sent raw.
+    ///
+    /// Counted from `observe` rather than read back out of `LevelPolicy` on the UI thread: the
+    /// policy is mutated per tile on the capture queue, and walking its arrays from the chrome
+    /// timer was a race (and, under an eager budget, a guess: it reported the grid size rather than
+    /// what was encoded).
+    public private(set) var lastFrameQuantised = 0
+    public private(set) var lastFrameRaw = 0
+    public var quantisedTiles: Int { lastFrameQuantised }
+    public var skippedTiles: Int { lastFrameRaw }
     /// The tile loop compresses in parallel and reports the wall time once.
     public func addCompressTime(_ ms: Double) { lastCompressMs += ms }
     public func observe(index: Int, ratio: Double, quantisedIn: Bool = false) {
+        if quantisedIn { lastFrameQuantised += 1 } else if ratio >= 1 { lastFrameRaw += 1 }
         levels.observe(index: index, ratio: ratio, quantisedIn: quantisedIn)
     }
 
@@ -228,6 +247,8 @@ public final class ScreenWriter {
         lastCompressMs = 0
         lastWriteMs = 0
         lastCompressedTiles = 0
+        lastFrameQuantised = 0
+        lastFrameRaw = 0
         frameWireBytes = 0
         if syncMode == .frame && !batchOpen {
             append("\u{1B}[?2026h")
@@ -285,23 +306,38 @@ public final class ScreenWriter {
     /// every photo, which is megabytes on the wire.
     public static func compress(index: Int, rect: TileRect, pixels: [UInt8], level: Int,
                                quantise: Bool = false) -> CompressedTile? {
+        // The old signature is the 5-6-5 shape of this decision, kept for callers (and tests) that
+        // predate `--quality`; it goes through the same code as a `Plan` does.
+        compress(index: index, rect: rect, pixels: pixels,
+                 plan: LevelPolicy.Plan(level: level, quantise: quantise,
+                                        bits: quantise ? QualityBudget.fiveSixFive : nil))
+    }
+
+    public static func compress(index: Int, rect: TileRect, pixels: [UInt8],
+                                plan: LevelPolicy.Plan) -> CompressedTile? {
         guard !pixels.isEmpty else { return nil }
         var pixels = pixels
         var quantised = false
-        if level <= 0 {
-            // Two ways out of "zlib bought nothing last frame": the content became compressible
-            // again (lossless, issue #53), or it stayed incompressible long enough to quantise
-            // (issue #59). The predictor is what tells them apart, and it costs ~10 µs.
-            if quantise, !looksCompressible(pixels, rect: rect) {
-                pixels = quantise565(pixels, bytesPerPixel: max(3, pixels.count / max(1, rect.w * rect.h)))
-                quantised = true
-            } else if !looksCompressible(pixels, rect: rect) {
-                return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
-            }
-            // else: content is compressible after all -> fall through and compress losslessly
+        // Two ways to deal with content zlib cannot help with: the content became compressible
+        // again (lossless, issue #53), or it stays incompressible long enough to quantise (#59).
+        // The predictor is what tells them apart, and it costs ~10 µs.
+        if plan.quantise, let bits = plan.bits,
+           plan.eager || !looksCompressible(pixels, rect: rect) {
+            pixels = quantise(pixels, bits: bits,
+                              bytesPerPixel: max(3, pixels.count / max(1, rect.w * rect.h)))
+            quantised = true
+        } else if plan.level <= 0 && !looksCompressible(pixels, rect: rect) {
+            return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
         }
-        let level = level > 0 ? level : 1
-        guard let payload = zlibCompress(pixels, level: level, huffmanOnly: quantised),
+        // else: content is compressible after all -> fall through and compress losslessly
+        let level = plan.level > 0 ? plan.level : 1
+        // Deflate, not huffman-only, once the low bits are gone. Quantised bytes are *more*
+        // repetitive than the original (that is the point of dropping them), so LZ77 finds long
+        // matches immediately: measured on a 136x132 photo tile, full deflate is both smaller
+        // (5-6-5: 31,270 B against 37,905 B, -17.5%) and faster (0.70 ms against 1.1 ms) than
+        // huffman-only. Huffman-only also broke the ladder's ordering: with every symbol coded
+        // independently, 6-6-6 could come out cheaper than 5-6-5.
+        guard let payload = zlibCompress(pixels, level: level, huffmanOnly: false),
               !payload.isEmpty else { return nil }
         let ratio = Double(payload.count) / Double(pixels.count)
         if payload.count >= pixels.count {
@@ -343,16 +379,28 @@ public final class ScreenWriter {
     /// 1.29x and a photo 2.3x, where lossless zlib managed 1.00x. Cost: ~37 dB PSNR, visible as
     /// banding on smooth ramps (docs/ENCODING.md).
     public static func quantise565(_ pixels: [UInt8], bytesPerPixel bpp: Int = 3) -> [UInt8] {
+        quantise(pixels, bits: QualityBudget.fiveSixFive, bytesPerPixel: bpp)
+    }
+
+    /// Drop the low bits of every channel and replicate the high ones into the space they left, so a
+    /// white pixel stays white instead of drifting dark (`--quality 70` is 5-5-5, `50` is 4-4-4).
+    public static func quantise(_ pixels: [UInt8], bits: QualityBudget.Bits,
+                               bytesPerPixel bpp: Int = 3) -> [UInt8] {
         guard bpp >= 3 else { return pixels }
+        // Validate *before* any arithmetic: `8 - bits` is a UInt8 subtraction, so a bit count above 8
+        // traps before a guard could reject it (and a count below 4 would need a negative right shift
+        // to fill the low bits). 4...7 is the range the replication is defined for; the ladder never
+        // leaves it, but `Bits` is public.
+        let channels = [bits.r, bits.g, bits.b]
+        guard channels.allSatisfy({ (4...7).contains($0) }) else { return pixels }
+        let specs: [(shift: UInt8, low: UInt8)] = channels.map { (8 - $0, $0) }
         var out = pixels
         var i = 0
         while i + 2 < out.count {
-            let r = out[i] >> 3
-            out[i] = (r << 3) | (r >> 2)          // 5 bits, replicated into the low 3
-            let g = out[i + 1] >> 2
-            out[i + 1] = (g << 2) | (g >> 4)      // 6 bits, replicated into the low 2
-            let b = out[i + 2] >> 3
-            out[i + 2] = (b << 3) | (b >> 2)
+            for (c, spec) in specs.enumerated() {
+                let high = out[i + c] >> spec.shift
+                out[i + c] = (high << spec.shift) | (high >> (spec.low - spec.shift))
+            }
             i += bpp
         }
         return out

@@ -86,6 +86,31 @@ final class ChromeTests: XCTestCase {
         return m
     }
 
+    /// The encoder row has to say what `--quality` is doing: a picture that looks soft because a
+    /// number is wrong is the hardest kind of bug to see from the outside.
+    func testStatsPanelNamesTheQualityAndTheTileCounts() {
+        var m = metrics()
+        m.quality = 50
+        m.qualityLabel = "4-4-4"
+        m.quantisedTiles = 41
+        m.skippedTiles = 3
+        let geo = Chrome.layout(paneCols: 137, paneRows: 75, imageCols: 137, imageRows: 44,
+                                panel: .stats)
+        let text = String(decoding: Chrome().draw(geometry: geo, metrics: m,
+                                                 state: ChromeState(panel: .stats)),
+                          as: UTF8.self)
+        XCTAssertTrue(text.contains("q50 4-4-4"), "the encoder row must name the rung")
+        XCTAssertTrue(text.contains("quantised 41"), "and how many tiles it actually applied to")
+        XCTAssertTrue(text.contains("raw 3"), "and how many are being sent raw")
+    }
+
+    /// The default has to read as the thing krd has always done, not as a new mode.
+    func testDefaultQualityReadsAsFiveSixFive() {
+        let m = metrics()
+        XCTAssertEqual(m.quality, 80)
+        XCTAssertEqual(m.qualityLabel, "5-6-5")
+    }
+
     /// The picture owns every row above the status line; the chrome owns everything below it.
     func testStatusLineSitsDirectlyUnderThePicture() {
         let geo = Chrome.layout(paneCols: 137, paneRows: 60, imageCols: 137, imageRows: 43, panel: nil)

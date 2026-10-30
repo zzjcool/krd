@@ -66,7 +66,7 @@ tile，在 zlib 之前先量化；ratio 掉回可压缩区间（或像素重新�
 `drag`（也是噪声，但只占部分屏幕）跟着走：1,198,117 → 1,105,258 B（−7.8 %），2.70 → 2.80 ms。
 文本/UI/gradient 字节完全一致，p50 也不动。
 
-代价是 36.5 dB PSNR：平滑渐变上会有色带，照片和视频上看不出来。`--no-quantise` 让编码器保持严格
+代价是 36.5 dB PSNR：平滑渐变上会有色带，照片和视频上看不出来。`--no-quantise`（即 `--quality 100`） 让编码器保持严格
 无损，`photo` 用例回到跳过 zlib 的数字。这笔交易之所以划算，是因为限制照片画面的是字节而不是 CPU：
 20 fps 下无损路径需要约 95 MB/s，而本地 pty 的上限是 103.6 MB/s
 （[research-photo-bandwidth](research-photo-bandwidth.zh-CN.md) §0）。
