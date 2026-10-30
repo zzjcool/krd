@@ -2540,6 +2540,12 @@ final class Desk {
             // moment the terminal has a fresh answer to give, and it is where a font change lands.
             remeasureWallPane()
             wallCanvas?.invalidate()
+            // Drop every placement, not just the text. A picture is an object the terminal owns and
+            // keeps attached to the cell it was placed on; after a resize a terminal may keep the
+            // old one there, so the wall would show the old picture under the new one ("缩放的时候
+            // 不支持"). One escape, and the repaint below re-transmits every panel anyway - so this
+            // cannot lose anything, it can only remove what would otherwise be stale.
+            writer.clear()
             refreshWall(force: true)
             return
         }
