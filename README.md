@@ -169,6 +169,27 @@ text, with a log line — see TROUBLESHOOTING §19 |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
+## The mascot
+
+<p align="center">
+  <img src="docs/media/mascot.png" alt="krd's mascot: a hermit crab drawn in the terminal" width="760">
+</p>
+
+**A hermit crab** — and not just because it was the cutest sketch on the page.
+
+`SSH` stands for *secure shell*, and a shell is exactly what a hermit crab lives in. krd brings no
+client, no port and no codec of its own: it moves your Mac's desktop into the shell you already have
+open. Close the shell, reconnect, switch terminals — the crab walks out with the same desktop on its
+back. That is the whole product in one animal.
+
+Everything else lines up too: the claw is a capture, one frame at a time; the eyes on stalks are the
+two things it has to watch (the screen it reads, the terminal it paints into); the spiral is drawn
+with the same rounded cells as the tile grid going down the wire.
+
+It is drawn **twice from one geometry, by the terminal itself** — 24-bit half blocks for the
+picture, one ASCII character per cell for the text version — so the logo is made of the same cells
+the product is made of. `node docs/brand/tui/logo-tui.mjs` to see it move.
+
 ## Contact
 
 X: [**@zzjcoo**](https://x.com/zzjcoo)

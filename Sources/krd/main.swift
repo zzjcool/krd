@@ -546,6 +546,8 @@ final class Desk {
     /// (issue #73). Nothing else mutates it, so the closure reads are not a race.
     private var options: Options
     private let writer = ScreenWriter()
+    /// The mascot card shown until the first frame lands (see LoadingView).
+    private var loading: LoadingView?
     private let capturer = Capturer()
     private var input: InputReader?
     private var cleanedUp = false
@@ -1061,6 +1063,13 @@ final class Desk {
         // that made it, and a centred picture no longer covers the whole pane, so those leftovers
         // would show around it. Same delete the wall does, for the same reason.
         writer.clear()
+        // Nothing is on screen yet: the first frame is a full capture away. The mascot fills that
+        // window, in plain ANSI, and the first frame takes it away (`handleFrame`).
+        let card = LoadingView(paneCols: layout.paneCols, paneRows: layout.paneRows) { [writer] in
+            writer.write($0)
+        }
+        card.start()
+        loading = card
         startChrome()
         installSignalCleanup()
         installReportHandler()
@@ -1983,6 +1992,8 @@ final class Desk {
     /// child's stderr is a temp file) reads that file back and paints the line in its footer. The
     /// log gets it too, so a `--log` run explains itself.
     private func failCapture(_ message: String) {
+        // No frame is coming: the card must not keep looping behind the error.
+        if let card = loading { card.stop(); loading = nil }
         Log.write("krd: \(message)\n")
         FileHandle.standardError.write(Data("krd: \(message)\n".utf8))
         failureSaid = message
@@ -2563,6 +2574,7 @@ final class Desk {
     }
 
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
+        if let card = loading { card.stop(); loading = nil }
         let started = benchNowMs()
         // A frame-rate step from the governor is enforced here, before anything is encoded: the
         // capture still delivers at `--fps` (ScreenCaptureKit's cadence is not worth reconfiguring
@@ -3350,6 +3362,10 @@ final class Desk {
         wallTimer = nil
         mock?.stop()
         mock = nil
+        // The card is a 110 ms timer of its own: without this it keeps clearing rows after
+        // `endSession()` has handed the terminal back, i.e. it paints over the user's shell.
+        loading?.stop()
+        loading = nil
         input?.restore()
         // A mirror this pane was handed to becomes the wall again: `exec`, for the same reason the
         // hand-over was an `exec` (one ScreenCaptureKit client per executable).

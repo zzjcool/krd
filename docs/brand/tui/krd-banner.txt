@@ -1,0 +1,8 @@
+  ██    ██  ██████    ██████  
+  ██  ██    ██    ██  ██    ██
+  ████      ██████    ██    ██
+  ██  ██    ██  ██    ██    ██
+  ██    ██  ██    ██  ██████  
+
+  your mac's desktop, inside a terminal
+  SSH shell · kitty graphics · no codec

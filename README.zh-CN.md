@@ -145,6 +145,24 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题见 [SECURITY.md](SECURITY.md)。
 
+## 吉祥物
+
+<p align="center">
+  <img src="docs/media/mascot.png" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="760">
+</p>
+
+**一只寄居蟹** —— 不只是因为它在那几版草稿里最可爱。
+
+`SSH` 的全称是 *secure shell*，而 shell 就是寄居蟹住的那个壳。krd 不带自己的客户端、不开新端口、
+不装编解码器：它把你的 Mac 桌面搬进你已经打开的那个 shell 里。关掉、重连、换个终端 —— 蟹走出来，
+背上还是同一张桌面。整个产品就是这一只动物。
+
+其余的地方也对得上：钳子是一次抓屏，一次一帧；两根眼柄上的眼睛是它必须盯着的两样东西
+（它在读的那块屏、它在画的那个终端）；壳上那圈螺纹，和发送到线上去的 tile 用同一种圆角格子画。
+
+**同一份几何，由终端自己画两遍** —— 拟物版是 24-bit 半块像素，字符版是每格一个 ASCII 字符 ——
+所以这个 logo 和产品本身是同一个材料做的。`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。
+
 ## 联系
 
 X（Twitter）：[**@zzjcoo**](https://x.com/zzjcoo)
