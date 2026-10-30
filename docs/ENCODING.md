@@ -94,10 +94,14 @@ noise, the worst case; layout as reported in the JSON `config`, 66 tiles):
 
 | | wire | encode p50 |
 |---|---:|---:|
-| skip zlib (issue #53, today's `main`) | 4,755,012 B | 3.20 ms |
-| **5-6-5 then Huffman-only zlib (this)** | **3,686,632 B (−22.5 %)** | **6.03 ms** |
+| skip zlib (issue #53) | 4,755,012 B | 3.20 ms |
+| 5-6-5 then Huffman-only zlib (#59, as shipped) | 3,686,632 B (−22.5 %) | 6.03 ms |
 
-`drag` (noise, but only part of the screen) moves with it: 1,198,117 → 1,105,258 B (−7.8 %),
+Those are the numbers #59 shipped with. The entropy stage has since changed: quantised tiles now go
+through deflate rather than huffman-only, which is ~17 % smaller again and faster (see the ladder
+section below), so the second row is history rather than what `main` does today.
+
+`drag` (noise, but only part of the screen) moved with it: 1,198,117 → 1,105,258 B (−7.8 %),
 2.70 → 2.80 ms. Text/UI/gradient are byte-identical, and their p50 does not move.
 
 The cost is 36.5 dB PSNR: banding on smooth ramps, invisible on photographs and video. `--no-quantise`

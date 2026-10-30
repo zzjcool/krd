@@ -108,6 +108,38 @@ final class QualityTests: XCTestCase {
                        ScreenWriter.quantise(pixels, bits: QualityBudget.fiveSixFive))
     }
 
+    /// A quantised tile's bytes are a wire contract: downstream `--selftest`, `--record` and the
+    /// golden dump hash frames, and nothing else in the suite looks at these bytes -- which is how
+    /// the huffman-only -> deflate change could otherwise land unnoticed.
+    ///
+    /// Asserted against the *other* encoder rather than against a magic size, because the answer
+    /// depends on the content: on a photograph deflate wins by ~17%, on pure hash noise it loses by
+    /// a fraction of a percent (there are no matches to find, only table overhead). A picture tile is
+    /// the case that matters.
+    func testQuantisedPayloadUsesDeflateAndNotHuffmanOnly() {
+        var photo = [UInt8](repeating: 0, count: 32 * 32 * 3)
+        var seed: UInt32 = 0x1234_5678
+        for i in 0..<(32 * 32) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5
+            let jitter = Int(seed & 0x3F) - 32
+            photo[i * 3] = UInt8(clamping: (i % 32) * 2 + jitter)
+            photo[i * 3 + 1] = UInt8(clamping: (i / 32) * 2 + jitter)
+            photo[i * 3 + 2] = UInt8(clamping: (i % 32) + (i / 32) + jitter)
+        }
+        let quantised = ScreenWriter.quantise(photo, bits: QualityBudget.fiveSixFive)
+        let deflate = zlibCompress(quantised, level: 1)!.count
+        let huffman = zlibCompress(quantised, level: 1, huffmanOnly: true)!.count
+        XCTAssertLessThan(deflate, huffman, "deflate has to win now that the bytes are repetitive")
+
+        let plan = LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.fiveSixFive)
+        guard let tile = ScreenWriter.compress(index: 0, rect: rect, pixels: photo, plan: plan) else {
+            return XCTFail("no payload")
+        }
+        XCTAssertTrue(tile.isQuantised)
+        XCTAssertEqual(tile.payload.count, deflate, "the shipped path is the deflate one")
+        XCTAssertLessThan(tile.ratio, 1.0)
+    }
+
     // MARK: the ladder, measured on a tile
 
     private func payload(_ quality: Int, _ pixels: [UInt8]) -> CompressedTile? {

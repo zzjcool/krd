@@ -387,11 +387,13 @@ public final class ScreenWriter {
     public static func quantise(_ pixels: [UInt8], bits: QualityBudget.Bits,
                                bytesPerPixel bpp: Int = 3) -> [UInt8] {
         guard bpp >= 3 else { return pixels }
-        let specs: [(shift: UInt8, low: UInt8)] = [(8 - bits.r, bits.r), (8 - bits.g, bits.g),
-                                                  (8 - bits.b, bits.b)]
-        // 4...7 bits, because `high >> (low - shift)` has to be a real shift: at 3 bits the
-        // replication would need a negative one and trap. The ladder never goes below 4.
-        guard specs.allSatisfy({ $0.low >= 4 && $0.low < 8 }) else { return pixels }
+        // Validate *before* any arithmetic: `8 - bits` is a UInt8 subtraction, so a bit count above 8
+        // traps before a guard could reject it (and a count below 4 would need a negative right shift
+        // to fill the low bits). 4...7 is the range the replication is defined for; the ladder never
+        // leaves it, but `Bits` is public.
+        let channels = [bits.r, bits.g, bits.b]
+        guard channels.allSatisfy({ (4...7).contains($0) }) else { return pixels }
+        let specs: [(shift: UInt8, low: UInt8)] = channels.map { (8 - $0, $0) }
         var out = pixels
         var i = 0
         while i + 2 < out.count {
