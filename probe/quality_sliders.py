@@ -24,7 +24,7 @@ Usage:
 
 Requires ffmpeg on PATH (decode/resample only); the encoders are pure stdlib.
 """
-import sys, os, zlib, struct, base64, time, select, tty, termios, subprocess, array, fcntl
+import sys, os, zlib, struct, base64, time, select, tty, termios, subprocess, threading, fcntl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gray_probe as gp
@@ -128,7 +128,7 @@ def transmit(kind, payload, cells_w, cells_h, dims):
             frame.append(f'\033_Gm={more};{part}\033\\')
     frame.append(f'\033_Gi={IMAGE_ID},p={PLACEMENT_ID},a=p,q=2,C=1,c={cells_w},r={cells_h}\033\\')
     frame.append('\033[?2026l')
-    out.write(''.join(frame))
+    out.emit(''.join(frame), kind='frame')
 
 
 # ---------------------------------------------------------------- video
@@ -224,14 +224,24 @@ def draw_bars(screen, bars, top, width, current):
         screen.at(row, 1, f'{mark} {bar.name:<7s} {bar.text(width)}  {bar.flag} {bar.fmt(bar.value)}')
 
 
-def draw_stats(screen, row, sent, seconds, write_ms, baseline):
+def draw_stats(screen, row, sent, seconds, write_ms, baseline, queued=0, dropped=0):
     rate = sum(sent[-60:]) / max(0.2, sum(seconds[-60:]))
     frame = sent[-1] if sent else 0
     ratio = baseline / rate if rate > 1 else 0
     blocked = sum(write_ms[-60:]) / max(1, len(write_ms[-60:]))
     screen.at(row, 1, f'  {human(frame):>9s}/frame   {human(int(rate)):>10s}/s   '
-                      f'{ratio:5.2f}x smaller than 100 / 1.0 / 30 fps   '
-                      f'write {blocked:4.1f} ms')
+                      f'{ratio:5.2f}x smaller   write {blocked:4.1f} ms   '
+                      f'queued {human(queued)}'
+                      f'{f"  dropped {dropped}" if dropped else ""}')
+
+
+TRACE = os.environ.get('KRD_PROBE_TRACE')
+
+
+def trace(phase, t0):
+    if TRACE:
+        with open(TRACE, 'a') as f:
+            f.write(f'{phase} {time.time() - t0:.4f}\n')
 
 
 def human(n):
@@ -242,19 +252,118 @@ def human(n):
     return f'{n} B'
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- io that never blocks the keyboard
+
+class Segment:
+    __slots__ = ('kind', 'data', 'offset')
+
+    def __init__(self, kind, data):
+        self.kind, self.data, self.offset = kind, data, 0
+
+
+class Out:
+    """stdout in non-blocking mode, queued as whole segments, with text outranking pixels.
+
+    Two problems this solves, both of which read as "the UI is frozen":
+
+    - `flush()` on a pty blocks until the far end drains, so one frame on a slow link stopped the
+      loop -- and with it the keyboard -- for as long as that frame took to leave.
+    - Queuing alone is not enough: a key press then waits behind hundreds of KB of video. Text is
+      feedback and frames are stale the moment a bar moves, so a key press drops every frame that
+      has not started writing and lets the bars jump the queue.
+    """
+
+    def __init__(self, stream, limit=192 * 1024):
+        self.fd = stream.fileno()
+        self.segments = []
+        self.limit = limit
+        self.dropped = 0
+        self.written = 0
+        flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
+        fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+    def emit(self, text, kind='text'):
+        if isinstance(text, str):
+            text = text.encode()
+        if kind == 'frame' and self.full():
+            self.dropped += 1
+            return False
+        self.segments.append(Segment(kind, text))
+        self.pump()
+        return True
+
+    def pump(self):
+        while self.segments:
+            seg = self.segments[0]
+            try:
+                n = os.write(self.fd, seg.data[seg.offset:])
+            except BlockingIOError:
+                return
+            except OSError:
+                self.segments.clear()
+                return
+            seg.offset += n
+            self.written += n
+            if seg.offset >= len(seg.data):
+                self.segments.pop(0)
+
+    def drop_frames(self):
+        """A frame already half written has to finish (a truncated kitty transmission would leave
+        the image unposted); everything behind it is stale and goes."""
+        keep = []
+        for i, seg in enumerate(self.segments):
+            if seg.kind == 'frame' and (i > 0 or seg.offset == 0):
+                self.dropped += 1
+                continue
+            keep.append(seg)
+        self.segments = keep
+
+    @property
+    def queued(self):
+        return sum(len(s.data) - s.offset for s in self.segments)
+
+    def full(self):
+        return self.queued > self.limit
+
+
+class Reader:
+    """ffmpeg frames in a one-slot mailbox: the loop never waits for the next frame, it takes the
+    newest one or nothing at all. Reading inline made a stalled decoder look like a frozen UI."""
+
+    def __init__(self, clip, w, h, fps=30):
+        self.slot = None
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, args=(clip, w, h, fps), daemon=True)
+        self.thread.start()
+
+    def _run(self, clip, w, h, fps):
+        try:
+            for rows in source(clip, w, h, fps):
+                if self.stop.is_set():
+                    return
+                with self.lock:
+                    self.slot = rows
+        except SystemExit:
+            return
+
+    def take(self):
+        with self.lock:
+            rows, self.slot = self.slot, None
+        return rows
+
 
 class Screen:
     def __init__(self, cols, rows):
         self.cols, self.rows = cols, rows
 
     def at(self, row, col, text):
-        out.write(f'\033[{row};{col}H\033[0m{text[:max(0, self.cols - 1)]}\033[K')
+        out.emit(f'\033[{row};{col}H\033[0m{text[:max(0, self.cols - 1)]}\033[K')
 
 
 def main():
     argv = sys.argv[1:]
-    flags = {'--cells', '--start', '--once'}
+    flags = {'--cells', '--start', '--once', '--max-bytes'}
     positional = [a for i, a in enumerate(argv)
                   if not a.startswith('-') and not (i and argv[i - 1] in flags)]
     clip = os.path.abspath(positional[0]) if positional else os.path.abspath(DEFAULT_CLIP)
@@ -263,6 +372,7 @@ def main():
     cells = argv[argv.index('--cells') + 1] if '--cells' in argv else None
     once = '--once' in argv
     start = argv[argv.index('--start') + 1] if '--start' in argv else '60,2,15'
+    cap = int(argv[argv.index('--max-bytes') + 1]) if '--max-bytes' in argv else 48_000
     try:
         start_quality, start_space, start_fps = (float(v) for v in start.split(','))
     except ValueError:
@@ -306,17 +416,22 @@ def main():
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     tty.setraw(fd)
-    out.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')      # mouse press, drag, SGR, no cursor
-    out.write('\033[2J\033[H')
+
+    reader = Reader(clip, src_w, src_h, fps=30)
+    while reader.take() is None:                 # the first frame, once
+        time.sleep(0.01)
+    first_frame, baseline_frame = None, None
+    # grab a still for the baseline while the mailbox keeps filling
+    still_rows = still(clip, src_w, src_h)
+    baseline_rate = len(encode(still_rows, src_w, src_h, 100)[0]) * 30
+
+    out = Out(sys.stdout)
+    out.emit('\033[?1000h\033[?1002h\033[?1006h\033[?25l')      # mouse press, drag, SGR, no cursor
+    out.emit('\033[2J\033[H')
     screen.at(1, 1, f'quality sliders — {os.path.basename(clip)} {clip_w}x{clip_h} in '
                     f'{box_w}x{box_h} cells, {src_w}x{src_h} px source — drag the bars')
     screen.at(2, 1, '  ↑↓ pick · ←→ step · 0-9 jump · click or drag a bar · space pause · q quit')
-    out.flush()
-
-    frames = source(clip, src_w, src_h, fps=30)
     sent, seconds, write_ms = [], [], []
-    first_frame = next(frames)
-    baseline_rate = len(encode(first_frame, src_w, src_h, 100)[0]) * 30
     current = 1                       # start on colour, the least destructive axis
     paused = False
     last_draw = 0.0
@@ -326,11 +441,31 @@ def main():
     pending = b''
     quit_now = False
     checked = set()
+    key_at = 0.0
+    budget = float(cap)         # a one-second token bucket, in bytes
+    last_fill = time.time()
+    paced = 0
+    paced_ok = True             # a manual change may exceed the budget once, so it is felt: a slider
+    last_change = 0.0           # that looks dead on a slow link is worse than one late frame
+    budget = float(cap)          # a one-second token bucket, in bytes
+    last_fill = time.time()
+    paced = 0
+    paced_ok = True          # a manual change may exceed the budget once, so it is felt
+                        # (the alternative is a slider that appears dead on a slow link)
+    last_change = 0.0
 
+    budget = float(cap)         # a one-second token bucket, in bytes
+    last_fill = time.time()
+    paced = 0
+    paced_ok = True             # a manual change may go over the budget once, so the
+    last_change = 0.0           # slider never looks dead on a slow link
     try:
         while True:
-            # ---- input, non-blocking
-            while select.select([fd], [], [], 0)[0]:
+            # ---- keys first, always, and never after a blocking write
+            t0 = time.time()
+            ready = select.select([fd], [], [], 0.005)[0]
+            trace('select', t0)
+            while ready and select.select([fd], [], [], 0)[0]:
                 pending += os.read(fd, 64)
             while pending:
                 if pending[0:1] == b'\033' and len(pending) < 3:
@@ -345,6 +480,9 @@ def main():
                     data, pending = pending[:3], pending[3:]
                 else:
                     data, pending = pending[:1], pending[1:]
+                trace('key', time.time())
+                key_at = time.time()
+                out.drop_frames()        # any key at all: what is queued is now stale
                 if data[:1] == b'\033':
                     if data.startswith(b'\033[<'):
                         try:
@@ -357,8 +495,11 @@ def main():
                             bars[index].set_fraction(max(0.0, min(0.999, (x - 11) / bar_width)))
                             current = index
                             due = 0.0                                # show it now, not next tick
+                            last_draw = 0.0
                     elif len(data) >= 3 and data[1:2] == b'[':
                         key = data[2:3]
+                        if key in (b'A', b'B', b'C', b'D'):
+                            last_draw = 0.0
                         if key == b'A':
                             current = (current - 1) % len(bars)
                         elif key == b'B':
@@ -374,10 +515,13 @@ def main():
                     break
                 elif data == b' ':
                     paused = not paused
+                    last_draw = 0.0
                 elif data[:1] in (b'j', b'J'):
                     current = (current + 1) % len(bars)
+                    last_draw = 0.0
                 elif data[:1] in (b'k', b'K'):
                     current = (current - 1) % len(bars)
+                    last_draw = 0.0
                 elif data[:1] in (b'l', b'L'):
                     bars[current].nudge(1)
                 elif data[:1] in (b'h', b'H'):
@@ -386,59 +530,82 @@ def main():
                     bars[current].index = min(len(bars[current].steps) - 1, int(data[:1]))
                 if data[:1] in b'hHlL0123456789' or data.startswith(b'\033[CD'):
                     due = 0.0
+                    last_draw = 0.0                  # redraw the bars immediately, not in 200 ms
 
             if quit_now:
                 break
 
-            # ---- frames: read at the clip's own 30 fps so time keeps moving, draw at the bar's fps
+            # ---- output: give the queue a chance to drain, never wait for it
+            t0 = time.time(); out.pump(); trace('pump', t0)
+
+            # ---- frames: the mailbox hands over the newest frame or nothing at all
             now = time.time()
-            if not paused and now >= next_read:
-                rows = next(frames)
-                next_read = max(next_read + 1 / 30.0, now - 0.3)
-                # a change asked for a redraw; otherwise send at most `fps` per second, and never
-                # catch up in a burst (a backlog would make the fps bar a lie)
-                if now - last_send >= 1.0 / bars[2].value or due <= 0:
+            t0 = time.time(); rows = reader.take() if not paused else None; trace('take', t0)
+            budget = min(cap, budget + (now - last_fill) * cap)
+            last_fill = now
+            if rows is not None and (now - last_send >= 1.0 / bars[2].value or due <= 0):
+                if out.full():
+                    out.dropped += 1                 # behind: dropping a frame beats freezing
+                else:
                     factor = bars[1].value
+                    t0 = time.time()
                     rows, tw, th = resample(rows, src_w, src_h, factor)
+                    trace('resample', t0)
+                    t0 = time.time()
                     payload, kind, dims = encode(rows, tw, th, bars[0].value)
-                    if (bars[0].value, factor) not in checked:
-                        try:
-                            verify(payload, kind, tw, th)
-                        except AssertionError as e:
-                            out.write('\033[?2026l\033_Ga=d,d=A,q=2\033\\'
-                                      '\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\r\n')
-                            out.flush()
-                            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-                            raise SystemExit(f'quality {bars[0].value} at scale 1/{factor}: {e}')
-                        checked.add((bars[0].value, factor))
-                    out.write('\033[3;2H')
-                    wrote = time.time()
-                    transmit(kind, payload, box_w, box_h, dims)
-                    out.flush()
-                    write_ms.append((time.time() - wrote) * 1000)
-                    sent.append(len(payload))
-                    seconds.append(1.0 / bars[2].value)
-                    last_send = now
-                    due = 1.0
-            else:
-                time.sleep(0.004)
+                    trace('encode', t0)
+                    wire = len(payload) * 4 // 3 + 64   # base64 plus the escape around it
+                    if wire > budget and paced_ok and (now - last_change) > 0.5:
+                        paced += 1                   # the budget says no; the bars stay responsive
+                    else:
+                        if (bars[0].value, factor) not in checked:
+                            try:
+                                verify(payload, kind, tw, th)
+                            except AssertionError as e:
+                                out.emit('\033[?2026l\033_Ga=d,d=A,q=2\033\\'
+                                         '\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\r\n')
+                                out.pump()
+                                time.sleep(0.2)
+                                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+                                raise SystemExit(f'quality {bars[0].value} at scale 1/{factor}: {e}')
+                            checked.add((bars[0].value, factor))
+                        out.emit('\033[3;2H')
+                        wrote = time.time()
+                        transmit(kind, payload, box_w, box_h, dims)
+                        out.pump()
+                        trace('send', wrote)
+                        write_ms.append((time.time() - wrote) * 1000)
+                        sent.append(len(payload))
+                        seconds.append(1.0 / bars[2].value)
+                        budget -= wire
+                        last_send = now
+                        due = 1.0
 
             if now - last_draw > 0.2:
                 last_draw = now
-                out.write('\033[?2026h')
+                t0 = time.time()
+                out.emit('\033[?2026h')
                 draw_bars(screen, bars, bar_top + 1, bar_width, current)
-                draw_stats(screen, bar_top + 5, sent, seconds, write_ms, baseline_rate or 1)
+                draw_stats(screen, bar_top + 5, sent, seconds, write_ms, baseline_rate or 1,
+                           out.queued, out.dropped)
                 screen.at(bar_top + 6, 1, f'  {len(sent)} frames sent · '
-                                          f'{"paused" if paused else "playing"}')
-                out.write('\033[?2026l')
-                out.flush()
+                                          f'{"paused" if paused else "playing"} · '
+                                          f'paced {human(cap)}/s · {paced} held back')
+                out.emit('\033[?2026l')
+                trace('draw', t0)
+                if key_at:
+                    trace('latency', key_at)
+                    key_at = 0.0
     except KeyboardInterrupt:
         pass
     finally:
         # close any dangling 2026 block first: an unclosed one freezes the terminal's drawing
-        out.write('\033[?2026l\033_Ga=d,d=A,q=2\033\\'
-                  '\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\n')
-        out.flush()
+        out.emit('\033[?2026l\033_Ga=d,d=A,q=2\033\\'
+                 '\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m\n')
+        deadline = time.time() + 1.0                 # let the farewell leave before the fd closes
+        while out.queued and time.time() < deadline:
+            out.pump()
+            time.sleep(0.02)
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
