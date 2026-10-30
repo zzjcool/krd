@@ -56,6 +56,17 @@ enum WallPictures {
                 guard let raster = PanelRaster.rgb(image) else {
                     throw PanelCaptureError.noPixelBuffer
                 }
+                // The stage is the desktop itself. The mirror draws it square and edge to edge, and
+                // rounding it here made the wall's display look like "a different frame" around the
+                // desktop (the report that produced this) - the same pixels, drawn two ways on two
+                // screens is exactly what a reader notices. Cards keep their rounding: they read as
+                // windows lying on the wall, which the stage never was.
+                var radius = 0
+                if case .window = panel.source {
+                    // The capture is the size it will be drawn at, so the radius is in the same
+                    // pixels and does not change when the pane is resized.
+                    radius = PanelImage.cornerRadius(width: raster.width, height: raster.height)
+                }
                 let canvas = PanelImage.compose(
                     content: raster.pixels,
                     width: raster.width, height: raster.height,
@@ -64,11 +75,7 @@ enum WallPictures {
                     panelHeight: raster.height,
                     originX: 0,
                     originY: 0,
-                    // Round the picture's own corners (design §6.6): the capture is the size it will
-                    // be drawn at, so the radius is in the same pixels and does not change when the
-                    // pane is resized.
-                    cornerRadius: PanelImage.cornerRadius(width: raster.width,
-                                                          height: raster.height))
+                    cornerRadius: radius)
                 guard canvas.count == raster.width * raster.height * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }
