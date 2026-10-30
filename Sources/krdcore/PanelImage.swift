@@ -43,8 +43,13 @@ public enum PanelImage {
     ///
     /// Both outputs come out of the same two numbers so the cells and the pixels cannot disagree:
     /// the pixel box is the truth, and the cell box is that box rounded to the grid.
+    ///
+    /// `maxHeight` lowers the picture without changing its aspect or its centre: the wall uses it to
+    /// give a row of cards one height, so their top and bottom edges line up (design §6.6). It can
+    /// only shrink - a cap above the fitted height is ignored, because the fit already did the
+    /// clipping that keeps the picture inside `rect`.
     public static func fit(aspect: Double, in rect: CellRect,
-                           cellW: Double, cellH: Double) -> PanelFit {
+                           cellW: Double, cellH: Double, maxHeight: Int? = nil) -> PanelFit {
         guard !rect.isEmpty, aspect > 0, aspect.isFinite, cellW > 0, cellH > 0 else {
             return PanelFit(contentWidth: 0, contentHeight: 0, originX: 0, originY: 0, cellRect: rect)
         }
@@ -59,6 +64,10 @@ public enum PanelImage {
         }
         w = max(1, min(availW, w))
         h = max(1, min(availH, h))
+        if let maxHeight, maxHeight > 0, maxHeight < h {
+            h = maxHeight
+            w = max(1, min(availW, Int((Double(h) * aspect).rounded())))
+        }
         let x = (availW - w) / 2
         let y = (availH - h) / 2
 

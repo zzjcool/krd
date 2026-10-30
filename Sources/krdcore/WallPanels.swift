@@ -66,19 +66,43 @@ public enum WallPanels {
            let panel = make(slot: 0, source: stageSource, rect: layout.stage, cellW: cellW, cellH: cellH) {
             panels.append(panel)
         }
+        // One height for the whole row. Each picture is fitted to its own aspect, so a 16:9 window
+        // ends up shorter than a square one and the row's top and bottom edges disagree - review
+        // called that out ("窗口的最高高度需要保持一致"). The tallest height every picture can reach
+        // without cropping or stretching is the *widest* window's, so the row shares that one: the
+        // wide picture keeps the full width and nothing is cut or distorted. The price is that one
+        // wide window shortens its neighbours for as long as it is on the page.
+        let shared = sharedCardHeight(layout: layout, cardSources: cardSources,
+                                      cellW: cellW, cellH: cellH)
         for (index, rect) in layout.cards.enumerated() {
             guard index < cardSources.count, let source = cardSources[index], source.isUsable,
                   let panel = make(slot: 1 + index, source: source, rect: rect,
-                                   cellW: cellW, cellH: cellH) else { continue }
+                                   cellW: cellW, cellH: cellH, maxHeight: shared) else { continue }
             panels.append(panel)
         }
         return panels
     }
 
+    /// The height every card's picture is drawn at, or `nil` when there is nothing to line up.
+    ///
+    /// `nil` for a single card: it has no neighbour to agree with, so it may use the whole rect.
+    public static func sharedCardHeight(layout: WallLayout, cardSources: [PanelSource?],
+                                        cellW: Double, cellH: Double) -> Int? {
+        var heights: [Int] = []
+        for (index, rect) in layout.cards.enumerated() {
+            guard index < cardSources.count, let source = cardSources[index], source.isUsable,
+                  !rect.isEmpty else { continue }
+            let fit = PanelImage.fit(aspect: source.aspect, in: rect, cellW: cellW, cellH: cellH)
+            if !fit.isEmpty { heights.append(fit.contentHeight) }
+        }
+        return heights.count > 1 ? heights.min() : nil
+    }
+
     private static func make(slot: Int, source: PanelSource, rect: CellRect,
-                             cellW: Double, cellH: Double) -> WallPanel? {
+                             cellW: Double, cellH: Double, maxHeight: Int? = nil) -> WallPanel? {
         guard !rect.isEmpty, cellW > 0, cellH > 0 else { return nil }
-        let fit = PanelImage.fit(aspect: source.aspect, in: rect, cellW: cellW, cellH: cellH)
+        let fit = PanelImage.fit(aspect: source.aspect, in: rect, cellW: cellW, cellH: cellH,
+                                 maxHeight: maxHeight)
         guard !fit.isEmpty else { return nil }
         let pixelWidth = max(1, Int((Double(rect.cols) * cellW).rounded()))
         let pixelHeight = max(1, Int((Double(rect.rows) * cellH).rounded()))

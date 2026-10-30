@@ -89,3 +89,35 @@ final class PanelImageTests: XCTestCase {
         XCTAssertEqual(canvas, [UInt8](repeating: 0, count: 3 * 2 * 4))
     }
 }
+
+/// `maxHeight` is how a row of cards agrees on one height (design §6.6): it lowers a picture without
+/// changing its aspect or its centre.
+final class PanelImageHeightCapTests: XCTestCase {
+    private let rect = CellRect(col: 1, row: 1, cols: 44, rows: 14)
+
+    func testACapLowersThePictureAndKeepsItsShape() {
+        let full = PanelImage.fit(aspect: 1.0, in: rect, cellW: 17, cellH: 33)
+        let capped = PanelImage.fit(aspect: 1.0, in: rect, cellW: 17, cellH: 33,
+                                     maxHeight: full.contentHeight - 60)
+        XCTAssertEqual(capped.contentHeight, full.contentHeight - 60)
+        XCTAssertEqual(capped.contentWidth, full.contentWidth - 60, "a cap keeps the aspect")
+        XCTAssertEqual(capped.originY, (14 * 33 - capped.contentHeight) / 2, "centred, not pinned")
+        XCTAssertEqual(capped.originX, (44 * 17 - capped.contentWidth) / 2)
+    }
+
+    func testACapAboveTheFitChangesNothing() {
+        let full = PanelImage.fit(aspect: 1.62, in: rect, cellW: 17, cellH: 33)
+        let capped = PanelImage.fit(aspect: 1.62, in: rect, cellW: 17, cellH: 33,
+                                     maxHeight: full.contentHeight + 100)
+        XCTAssertEqual(capped, full)
+        XCTAssertEqual(PanelImage.fit(aspect: 1.62, in: rect, cellW: 17, cellH: 33, maxHeight: nil),
+                       full)
+    }
+
+    func testACapNeverLeavesThePanel() {
+        let capped = PanelImage.fit(aspect: 3.0, in: rect, cellW: 17, cellH: 33, maxHeight: 100)
+        XCTAssertEqual(capped.contentHeight, 100)
+        XCTAssertLessThanOrEqual(capped.contentWidth, 44 * 17)
+        XCTAssertGreaterThanOrEqual(capped.contentWidth, 1)
+    }
+}

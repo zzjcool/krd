@@ -147,9 +147,10 @@ card reads as a window lying on the wall, not a window in a frame.
 
 | case | handling |
 |---|---|
-| landscape (16:10 / 1.54) | the height fills all 24 rows and the width is ~75 cells centred (137×44 at 17×33 cells); 30 cells of transparency on each side |
+| landscape (16:10 / 1.54) | the height fills the stage's rows and the width is ~72 cells centred (137×44 at 17×33 cells); ~30 cells of transparency on each side |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
-| window card | the card rect **never changes** (44×14 cells at 137×44); the picture fits inside at the window's own aspect, the rest is dominant colour - a 980×620 window leaves almost none, a 760×900 one leaves bars |
+| window card | the card rect **never changes** (44×14 cells at 137×44); the picture fits inside at the window's own aspect, the rest is transparent |
+| one height per row | the cards of a page are drawn at **one height** - the tallest one every picture can reach without cropping, i.e. the widest window's (`WallPanels.sharedCardHeight`, then `PanelImage.fit(maxHeight:)`). Per-window fitting left a 16:9 card shorter than a square one, so the row's top and bottom edges disagreed ("窗口的最高高度需要保持一致"). The cost is that one wide window shortens its neighbours while it is on the page; the alternative would be cropping, which the design rules out |
 | the maths | `pixelAspect = w/h`; `availW = cols×cellW`, `availH = rows×cellH`; if `availW/availH > aspect` then `w = availH×aspect/cellW`, else `h = availW/aspect/cellH`; then centre |
 | order | the menu-bar display first (`kCGDisplayIsMain`), then by `bounds.origin.x`, left to right |
 | capture | **only the one on stage**: three displays + three windows = 4 panels, the same cost as a single display |

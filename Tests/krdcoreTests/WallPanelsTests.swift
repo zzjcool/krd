@@ -79,3 +79,79 @@ final class WallPanelsTests: XCTestCase {
         }
     }
 }
+
+/// Review asked for one thing the row could not give on its own: the three pictures must reach the
+/// same height. Fit is per picture, so a 16:9 window is shorter than a square one, and the row's top
+/// and bottom edges disagree. The tallest height every picture can reach without cutting or
+/// stretching is the widest window's.
+final class WallPanelRowHeightTests: XCTestCase {
+    private func layout(per: Int = 3, windows: Int = 7) -> WallLayout {
+        WallLayout.make(paneCols: 137, paneRows: 44, displayCount: 2, windowCount: windows,
+                        per: per, stageStart: 0, cardStart: 0)
+    }
+
+    func testEveryCardInTheRowIsTheSameHeight() {
+        let layout = self.layout()
+        let cards = [PanelSource(kind: .window(11), aspect: 1.62),
+                     PanelSource(kind: .window(12), aspect: 1.03),      // nearly square
+                     PanelSource(kind: .window(13), aspect: 1.78)]
+        let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
+                                    stageSource: PanelSource(kind: .display(1), aspect: 1.6),
+                                    cardSources: cards)
+        let cardsOut = Array(panels.dropFirst())
+        XCTAssertEqual(cardsOut.count, 3)
+        let heights = Set(cardsOut.map(\.fit.contentHeight))
+        XCTAssertEqual(heights.count, 1, "one height for the row: \(heights)")
+        // The widest window is the one that decides it, and it keeps the card's full width.
+        let widest = cardsOut.max { $0.fit.contentWidth * 1000 / $0.fit.contentHeight
+                                     < $1.fit.contentWidth * 1000 / $1.fit.contentHeight }!
+        XCTAssertEqual(widest.fit.contentWidth, widest.pixelWidth, "the wide picture is not narrowed")
+        XCTAssertEqual(widest.fit.contentHeight, cardsOut[0].fit.contentHeight)
+        // A shorter picture is centred, not pinned to the top, so the cards look like one row.
+        for panel in cardsOut {
+            XCTAssertEqual(panel.fit.originY, (panel.pixelHeight - panel.fit.contentHeight) / 2)
+            XCTAssertEqual(panel.fit.originX, (panel.pixelWidth - panel.fit.contentWidth) / 2)
+            XCTAssertLessThanOrEqual(panel.fit.contentHeight, panel.pixelHeight)
+            XCTAssertLessThanOrEqual(panel.fit.contentWidth, panel.pixelWidth)
+        }
+    }
+
+    func testNothingIsCutOrStretched() {
+        let layout = self.layout()
+        let cards = [PanelSource(kind: .window(11), aspect: 1.03),
+                     PanelSource(kind: .window(12), aspect: 2.4),
+                     PanelSource(kind: .window(13), aspect: 1.33)]
+        let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
+                                    stageSource: nil, cardSources: cards)
+        for (index, panel) in panels.enumerated() {
+            let aspect = Double(panel.fit.contentWidth) / Double(panel.fit.contentHeight)
+            // Rounding to whole pixels is the only slack allowed.
+            XCTAssertEqual(aspect, cards[index].aspect, accuracy: 0.01,
+                           "card \(index) changed shape")
+        }
+    }
+
+    func testASingleCardKeepsTheWholeRect() {
+        let layout = self.layout(per: 1, windows: 1)
+        let cards = [PanelSource(kind: .window(11), aspect: 1.62)]
+        XCTAssertNil(WallPanels.sharedCardHeight(layout: layout, cardSources: cards,
+                                                cellW: 17, cellH: 33),
+                     "a card with no neighbour has nothing to line up with")
+        let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
+                                    stageSource: nil, cardSources: cards)
+        // Uncapped: exactly what one fit of that aspect gives, i.e. it uses as much of the rect as
+        // its shape allows.
+        XCTAssertEqual(panels[0].fit,
+                       PanelImage.fit(aspect: 1.62, in: layout.cards[0], cellW: 17, cellH: 33))
+    }
+
+    func testASlotWithNoSourceDoesNotDragTheRowDown() {
+        let layout = self.layout()
+        let cards: [PanelSource?] = [PanelSource(kind: .window(11), aspect: 1.62), nil,
+                                     PanelSource(kind: .window(13), aspect: 1.62)]
+        let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
+                                    stageSource: nil, cardSources: cards)
+        XCTAssertEqual(panels.count, 2)
+        for panel in panels { XCTAssertEqual(panel.fit.contentHeight, 462) }
+    }
+}
