@@ -49,4 +49,18 @@ final class PaneGeometryTests: XCTestCase {
         XCTAssertEqual(empty.cols, 1)
         XCTAssertEqual(empty.rows, 1)
     }
+
+    /// A placeholder probe's reply echoes the request, so an accepted placement answers
+    /// `i=31,p=1;OK`. Reading only `i=31;OK` made an accepting terminal look like a silent one, and
+    /// the wall then drew its pictures one image pixel per device pixel - half size, in the corner.
+    func testThePlaceholderProbeVerdictReadsTheEchoedParameters() {
+        XCTAssertEqual(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=31,p=1;OK\u{1B}\\"), true)
+        XCTAssertEqual(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=31;OK\u{1B}\\"), true)
+        XCTAssertEqual(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=31,p=1;EINVAL:bad\u{1B}\\"), false)
+        XCTAssertNil(TermGeometry.placeholderProbeVerdict(nil), "no answer")
+        XCTAssertNil(TermGeometry.placeholderProbeVerdict(""), "empty answer")
+        XCTAssertNil(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=7,p=1;OK\u{1B}\\"),
+                     "another image's reply is not ours")
+        XCTAssertNil(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=31,p=1"), "a partial line")
+    }
 }

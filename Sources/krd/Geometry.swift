@@ -147,15 +147,32 @@ extension TermGeometry {
     /// `q=0`, so the only message that comes back is the placement's `OK` or `E...`. A terminal that
     /// ignores `U=1` draws the placeholder cells as missing-glyph boxes over the picture - much worse
     /// than a small picture - so "no answer" counts as "no".
-    static func supportsPlaceholders(timeoutMs: Int = 300) -> Bool? {
+    static func supportsPlaceholders(timeoutMs: Int = 600) -> Bool? {
         let transmit = "\u{1B}_Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA\u{1B}\\"
         let place = "\u{1B}_Gi=31,p=1,a=p,U=1,q=0,c=1,r=1\u{1B}\\"
+        // The reply echoes whatever the request carried, so it is `i=31,p=1;OK` here - *not*
+        // `i=31;OK`. Matching the literal `i=31;OK` made every answer look like silence, which sent
+        // the wall down the pixel path on a terminal that had accepted the placeholder (measured
+        // against Rex: `ESC_Gi=31,p=1;OK ESC\`).
         let reply = ask(transmit + place, timeoutMs: timeoutMs) { text in
-            text.contains("i=31;OK") || text.contains("i=31;E")
+            placeholderProbeVerdict(text) != nil
         }
         DeleteProbeImage()
-        guard let reply else { return nil }
-        return reply.contains("i=31;OK")
+        return placeholderProbeVerdict(reply)
+    }
+
+    /// What a placeholder probe's reply means: `true` accepted, `false` refused, `nil` no answer yet.
+    ///
+    /// Split out of the probe so the one thing that broke can be tested without a terminal: the reply
+    /// echoes the request's parameters, so an accepted placement answers `i=31,p=1;OK` and *not*
+    /// `i=31;OK`. Matching the short form made Rex - which accepts `U=1` - look like a terminal that
+    /// ignores it, and the wall silently fell back to drawing one image pixel per device pixel with a
+    /// cell reported in points: the desktop at half size in the corner of its box.
+    static func placeholderProbeVerdict(_ reply: String?) -> Bool? {
+        guard let reply, reply.contains("i=31") else { return nil }
+        if reply.contains(";OK") { return true }
+        if reply.contains(";E") { return false }
+        return nil
     }
 
     /// Remove the probe's image by id, so it can never sit on the wall as a stray pixel.
@@ -195,9 +212,12 @@ extension PaneGeometry {
             deviceCell = true
         } else if let measured = TermGeometry.query(timeoutMs: 500) {
             (cellW, cellH) = (measured.cellSize.w, measured.cellSize.h)
-            // `CSI 14t` is the text area *in pixels*, so a cell derived from it is a device pixel
-            // cell; `CSI 16t` alone is whatever the terminal calls a pixel (Rex answers points).
-            deviceCell = TermGeometry.lastAnswer.sawWindowPixels
+            // Neither answer may be believed as *device* pixels: the protocol says `14t` is a pixel
+            // count, but a terminal that reports its cell in points reports its text area in points
+            // too (measured against Rex: 8x16 and a text area that divides to 8x16, on a 16x33 device
+            // cell). Only the pty's own `ws_xpixel` and an explicit `--cell` are device pixels;
+            // everything else is doubled by `dpr`, which is a no-op with placeholders (quality only).
+            deviceCell = false
             source = "measured from the terminal (\(TermGeometry.lastAnswer.label))"
         } else {
             (cellW, cellH) = (TermGeometry.fallbackCell.w, TermGeometry.fallbackCell.h)
