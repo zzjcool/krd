@@ -425,7 +425,7 @@ public final class ScreenWriter {
 
     /// Writes TUI-layer text. Positioned escapes only: the caller guarantees no newline and no
     /// write above the picture (Chrome.swift), and this lock guarantees no split escape.
-    func writeChrome(_ bytes: [UInt8]) {
+    public func writeChrome(_ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }
         writeLock.lock()
         defer { writeLock.unlock() }
@@ -434,14 +434,14 @@ public final class ScreenWriter {
     }
 
     /// What `KRD_SYNC` / `KRD_NOSYNC` actually selected, for the stats panel.
-    var syncLabel: String {
+    public var syncLabel: String {
         switch syncMode {
         case .frame: return "frame"
         case .tile: return "tile"
         case .none: return "none"
         }
     }
-    var quietLabel: String { quiet }
+    public var quietLabel: String { quiet }
 
     private func flushLocked() {
         guard !out.isEmpty else { return }

@@ -478,7 +478,7 @@ final class Desk {
             // Nothing below this line is mocked: same tiles, same encoder, same placements, same
             // chrome. Only the pixel source is different, which is why this needs no permission.
             let size = options.mockSize ?? (w: 1920, h: 1200)
-            self.sourceRect = CGRect(x: 0, y: 0, width: size.w, height: size.h)
+            useLiteralSource(CGRect(x: 0, y: 0, width: size.w, height: size.h))
             targetLabel = "mock \(size.w)×\(size.h)"
             self.filter = nil
             applyLayout(geometry: geometry)
@@ -1555,7 +1555,7 @@ final class Desk {
         pipeSamples.append(lastPipeMs)
         if pipeSamples.count > 300 { pipeSamples.removeFirst(pipeSamples.count - 300) }
         m.pipeP99Ms = pipeSamples.max() ?? 0
-        m.capMs = -1                       // not measured yet: see issue #24 (PTS split)
+        m.capMs = -1                       // not measured yet: splitting it needs PTS (#52)
         m.e2eMs = lastPipeMs
         m.zlibMs = writer.lastCompressMs
         m.writeMs = writer.lastWriteMs
