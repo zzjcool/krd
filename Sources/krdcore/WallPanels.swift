@@ -104,14 +104,23 @@ public enum WallPanels {
         let fit = PanelImage.fit(aspect: source.aspect, in: rect, cellW: cellW, cellH: cellH,
                                  maxHeight: maxHeight)
         guard !fit.isEmpty else { return nil }
-        let pixelWidth = max(1, Int((Double(rect.cols) * cellW).rounded()))
-        let pixelHeight = max(1, Int((Double(rect.rows) * cellH).rounded()))
+        // The panel **is** the picture: `rect` is the fitted rectangle, not the band it was fitted
+        // into, and the pixels are the picture's own size. Two reasons, both measured on a pane that
+        // reports no pixel size:
+        //
+        // 1. A panel-sized canvas with transparent bars around the picture is only invisible on a
+        //    terminal that lets the background through image alpha. Rex paints it **black**, so a
+        //    picture occupying 64% of its canvas read as "the display is smaller than its frame,
+        //    with a black ring" - the report that produced this. Cells outside the picture are now
+        //    simply unpainted, exactly like the mirror's leftover cells.
+        // 2. Keeping the band meant the caption row sat under the band's bottom edge, so freeing the
+        //    picture from the band would have left the caption floating rows below its picture.
         let id: WallPanel.Source
         switch source.kind {
         case let .display(displayID): id = .display(displayID)
         case let .window(windowID): id = .window(windowID)
         }
-        return WallPanel(slot: slot, source: id, rect: rect,
-                         pixelWidth: pixelWidth, pixelHeight: pixelHeight, fit: fit)
+        return WallPanel(slot: slot, source: id, rect: fit.cellRect,
+                         pixelWidth: fit.contentWidth, pixelHeight: fit.contentHeight, fit: fit)
     }
 }

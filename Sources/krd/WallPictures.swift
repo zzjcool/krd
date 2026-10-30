@@ -10,9 +10,22 @@ import krdcore
 enum WallPictures {
     struct Picture {
         let panel: WallPanel
-        /// Exactly `panel.pixelWidth x panel.pixelHeight` **RGBA**: the picture, with the bars
-        /// left transparent so the wall's own background shows through (design §6.6).
+        /// The picture itself, **RGBA**, exactly `fit.contentWidth x fit.contentHeight`: no bars,
+        /// no padding. The placement is the same rectangle in cells (`fit.cellRect`), so the
+        /// terminal stretches the picture over exactly the box the fit chose and there is nothing
+        /// left over to draw.
+        ///
+        /// WHY this is not a panel-sized canvas any more: it used to be, with the fit's bars left
+        /// transparent for the wall's background to show through. Terminals do not all agree on what
+        /// a transparent image pixel means - Rex paints it **black** - so a picture that occupied
+        /// 64% of its canvas came out as a picture inside a black frame, which the reader reports as
+        /// "the display is smaller than its frame, with a black ring around it". The mirror never had
+        /// this because it places tiles: nothing outside a tile exists. A panel is now the same
+        /// shape: the cells are the rectangle, and cells outside it are simply not painted (the
+        /// placeholder frame is drawn on `cellRect` too, so mask and picture still coincide).
         let pixels: [UInt8]
+        let width: Int
+        let height: Int
     }
 
     /// Capture every panel, in order, one at a time.
@@ -46,19 +59,21 @@ enum WallPictures {
                 let canvas = PanelImage.compose(
                     content: raster.pixels,
                     width: raster.width, height: raster.height,
-                    panelWidth: panel.pixelWidth,
-                    panelHeight: panel.pixelHeight,
-                    originX: panel.fit.originX,
-                    originY: panel.fit.originY,
+                    // Panel == content: the corner rounding is the only thing compose adds here.
+                    panelWidth: raster.width,
+                    panelHeight: raster.height,
+                    originX: 0,
+                    originY: 0,
                     // Round the picture's own corners (design §6.6): the capture is the size it will
                     // be drawn at, so the radius is in the same pixels and does not change when the
                     // pane is resized.
                     cornerRadius: PanelImage.cornerRadius(width: raster.width,
                                                           height: raster.height))
-                guard canvas.count == panel.pixelWidth * panel.pixelHeight * 4 else {
+                guard canvas.count == raster.width * raster.height * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                pictures.append(Picture(panel: panel, pixels: canvas))
+                pictures.append(Picture(panel: panel, pixels: canvas,
+                                        width: raster.width, height: raster.height))
             } catch {
                 let reason = PanelCapture.classify(error)
                 failures[panel.slot] = reason

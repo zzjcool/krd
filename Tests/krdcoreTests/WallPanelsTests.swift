@@ -24,12 +24,21 @@ final class WallPanelsTests: XCTestCase {
         XCTAssertEqual(panels.map(\.slot), [0, 1, 2, 3])
         XCTAssertEqual(panels[0].source, .display(1))
         XCTAssertEqual(panels[2].source, .window(12))
-        // The stage is the whole band, the cards are one card wide: the plan uses the layout's
-        // rects, so a picture can never be placed somewhere the text layer did not leave empty.
-        XCTAssertEqual(panels[0].rect, layout.stage)
-        XCTAssertEqual(panels[1].rect, layout.cards[0])
-        XCTAssertEqual(panels[0].pixelWidth, layout.stage.cols * 17)
-        XCTAssertEqual(panels[0].pixelHeight, layout.stage.rows * 33)
+        // The panel **is** the picture: `rect` is the fitted rectangle inside the layout's band
+        // (mask rect == picture rect, so the caption hangs under the picture and a failed capture
+        // never reflows anything), and the pixels are the picture's own size - no canvas, no bars.
+        // The band is only what the fit had to work with, which is why every rect has to stay inside
+        // the rectangle the text layer left empty.
+        XCTAssertEqual(panels[0].rect, panels[0].fit.cellRect)
+        XCTAssertEqual(panels[1].rect, panels[1].fit.cellRect)
+        for (panel, band) in zip(panels, [layout.stage] + layout.cards) {
+            XCTAssertGreaterThanOrEqual(panel.rect.col, band.col)
+            XCTAssertGreaterThanOrEqual(panel.rect.row, band.row)
+            XCTAssertLessThanOrEqual(panel.rect.maxCol, band.maxCol)
+            XCTAssertLessThanOrEqual(panel.rect.maxRow, band.maxRow)
+        }
+        XCTAssertEqual(panels[0].pixelWidth, panels[0].fit.contentWidth)
+        XCTAssertEqual(panels[0].pixelHeight, panels[0].fit.contentHeight)
     }
 
     func testAPanelGetsItsOwnIDsAndTheyDoNotMoveBetweenFrames() {
@@ -64,18 +73,30 @@ final class WallPanelsTests: XCTestCase {
         XCTAssertEqual(panels.map(\.slot), [0, 1])
     }
 
-    func testTheContentIsAlwaysInsideThePanel() {
+    /// A panel's canvas is the picture and nothing else, and the picture never leaves its band.
+    ///
+    /// Both halves were a visible bug: a panel-sized canvas padded the picture with *transparent*
+    /// bars, which Rex paints black - "the display is smaller than its frame, with a black ring".
+    /// Cells outside the picture are now unpainted, so the patch of wall behind it shows.
+    func testThePanelIsExactlyThePictureAndStaysInItsBand() {
         for aspect in [0.4, 1.0, 1.6, 2.4, 3.0] {
-            let panels = WallPanels.plan(layout: layout(), cellW: 17, cellH: 33,
+            let layout = self.layout()
+            let panels = WallPanels.plan(layout: layout, cellW: 17, cellH: 33,
                                         stageSource: PanelSource(kind: .display(1), aspect: aspect),
                                         cardSources: [])
             let panel = panels[0]
-            XCTAssertLessThanOrEqual(panel.fit.contentWidth, panel.pixelWidth, "aspect \(aspect)")
-            XCTAssertLessThanOrEqual(panel.fit.contentHeight, panel.pixelHeight, "aspect \(aspect)")
-            XCTAssertGreaterThanOrEqual(panel.fit.originX, 0, "aspect \(aspect)")
-            XCTAssertGreaterThanOrEqual(panel.fit.originY, 0, "aspect \(aspect)")
-            XCTAssertEqual(panel.fit.originX + panel.fit.contentWidth <= panel.pixelWidth, true)
-            XCTAssertEqual(panel.fit.originY + panel.fit.contentHeight <= panel.pixelHeight, true)
+            XCTAssertEqual(panel.rect, panel.fit.cellRect, "aspect \(aspect)")
+            XCTAssertEqual(panel.pixelWidth, panel.fit.contentWidth, "aspect \(aspect)")
+            XCTAssertEqual(panel.pixelHeight, panel.fit.contentHeight, "aspect \(aspect)")
+            // No bars to pad with: the fit's offsets are the panel's origin by construction.
+            XCTAssertEqual(panel.fit.originX, 0, "aspect \(aspect)")
+            XCTAssertEqual(panel.fit.originY, 0, "aspect \(aspect)")
+            XCTAssertGreaterThanOrEqual(panel.rect.col, layout.stage.col, "aspect \(aspect)")
+            XCTAssertGreaterThanOrEqual(panel.rect.row, layout.stage.row, "aspect \(aspect)")
+            XCTAssertLessThanOrEqual(panel.rect.maxCol, layout.stage.maxCol, "aspect \(aspect)")
+            XCTAssertLessThanOrEqual(panel.rect.maxRow, layout.stage.maxRow, "aspect \(aspect)")
+            let drawn = Double(panel.pixelWidth) / Double(panel.pixelHeight)
+            XCTAssertEqual(drawn, aspect, accuracy: 0.05, "aspect \(aspect): the picture changed shape")
         }
     }
 }
@@ -107,12 +128,15 @@ final class WallPanelRowHeightTests: XCTestCase {
                                      < $1.fit.contentWidth * 1000 / $1.fit.contentHeight }!
         XCTAssertEqual(widest.fit.contentWidth, widest.pixelWidth, "the wide picture is not narrowed")
         XCTAssertEqual(widest.fit.contentHeight, cardsOut[0].fit.contentHeight)
-        // A shorter picture is centred, not pinned to the top, so the cards look like one row.
-        for panel in cardsOut {
-            XCTAssertEqual(panel.fit.originY, (panel.pixelHeight - panel.fit.contentHeight) / 2)
-            XCTAssertEqual(panel.fit.originX, (panel.pixelWidth - panel.fit.contentWidth) / 2)
-            XCTAssertLessThanOrEqual(panel.fit.contentHeight, panel.pixelHeight)
-            XCTAssertLessThanOrEqual(panel.fit.contentWidth, panel.pixelWidth)
+        // A shorter picture is centred in its band, not pinned to the top. The *panel* is the
+        // picture, so the centring lives in the rect the picture was placed at, not in an origin
+        // offset: the cells the picture does not use are left unpainted.
+        for (panel, band) in zip(cardsOut, layout.cards) {
+            XCTAssertEqual(panel.rect, panel.fit.cellRect)
+            XCTAssertEqual(panel.rect.row, band.row + (band.rows - panel.rect.rows) / 2)
+            XCTAssertEqual(panel.rect.col, band.col + (band.cols - panel.rect.cols) / 2)
+            XCTAssertLessThanOrEqual(panel.rect.rows, band.rows)
+            XCTAssertLessThanOrEqual(panel.rect.cols, band.cols)
         }
     }
 

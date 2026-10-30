@@ -146,12 +146,14 @@ worth less than a row of picture.
 ## 6.6 How a display and a window fit their cells
 
 **Fit, always: keep the aspect, never crop, never stretch.** The picture shrinks to the largest size that fits its
-cells and **the cells left over stay transparent** (`f=32`, alpha 0), so the wall's own background shows through: a
-card reads as a window lying on the wall, not a window in a frame.
+band, and **the panel *is* that picture**: the image is exactly the fitted pixels, placed on exactly the cells the fit
+measured, and the cells the band has over are **not painted at all** - the wall's own background is what shows there, so
+a card reads as a window lying on the wall, not a window in a frame.
 
 | case | handling |
 |---|---|
-| landscape (16:10 / 1.54) | the height fills the stage's rows and the width is ~72 cells centred (137×44 at 17×33 cells); ~30 cells of transparency on each side |
+| landscape (16:10 / 1.54) | the width fills the stage's columns and the height is whatever the aspect gives (~44 of 53 rows at a 137×73 pane on an 8×16 cell); the band's leftover rows are wall |
+| where the cell size comes from | the terminal, not the pty: over ssh `ws_xpixel/ws_ypixel` are 0, so `runWall` asks `CSI 16t`/`14t` (as the mirror does) and keeps the 8×20 fallback only for a terminal that answers nothing. The fallback's cell *aspect* is 0.40; Rex's is 0.51, and that alone left 36% of the stage empty - the picture looked smaller than its frame |
 | portrait (1200×1920) | still height-bound, the picture is simply narrow (~29 cells), centred |
 | window card | the card rect **never changes** (43×13 cells at 137×44); the picture fits inside at the window's own aspect, the rest is transparent |
 | rounded corners | every picture's own corners are cut to a radius of **one twenty-fourth of its short side** (`PanelImage.cornerRadius`), and the pixels outside the arc keep alpha 0 - so a display or a window reads as an object lying on the wall instead of a rectangle cut out of it. macOS rounds its windows anyway, so the card pictures lose nothing; the stage is where it shows |
@@ -161,21 +163,26 @@ card reads as a window lying on the wall, not a window in a frame.
 | capture | **only the one on stage**: three displays + three windows = 4 panels, the same cost as a single display |
 
 Why not cover: cover throws content away, and the display's own shape *is* information - no menu bar, no Dock, and the
-reader cannot tell which display they are looking at. Fitting costs only the bars, and transparent bars cost nothing in
-meaning: they are not decoration on the wall, they *are* the wall.
+reader cannot tell which display they are looking at.
 
-Why not a colour: two versions tried. Black read as a frame around every picture; then "the picture's own edge colour",
-which was technically defensible but still a guess at a background the terminal already has - a light window got a light
-bar on a dark wall, a bright stripe. Transparency lets the wall answer that question itself, and it follows the
-terminal's theme for free.
+Why not bars in the image at all (three versions tried, all measured): black bars read as a frame around every picture;
+"the picture's own edge colour" was a guess at a background the terminal already has (a light window got a light bar on a
+dark wall); and transparent bars (`f=32`, alpha 0) are only invisible on a terminal that blends alpha into the *cell
+background*. **Rex paints a transparent image pixel black** - it does not let the wall through - so a stage whose
+picture filled 64% of a panel-sized canvas arrived as a picture with a black ring, reported as "the display is smaller
+than its frame, and the capture resolution must be wrong". It was not: the pixels were exactly the fitted size. The
+fix is to stop shipping a canvas at all. The image is the picture, the placement is the fitted cells, and the cells
+between the picture and its band are simply not painted - which is what the mirror has always done with the cells its
+letterbox leaves over, and nobody has ever reported those as a bug.
 
-The cost: one alpha channel per panel, 1.18 MB → 1.28 MB for a whole wall (+8%, the cleared area compresses well), and
-the terminal has to blend `f=32` alpha (kitty, Ghostty and WezTerm do). A terminal that ignores alpha shows those cells
-black, i.e. the first version.
+Two consequences, both accepted. The picture is **smaller than its band** (a 16:10 display in a 53-row stage at 8×16
+cells uses 42 rows), so the band's slack shows as wall above and below the picture instead of inside it; and because a
+caption hangs one row under its picture, that slack now sits between the caption and the divider. The alternative - a
+panel that always fills its band - means stretching by however wrong the cell aspect is, and a stretched desktop is a
+worse lie than a letterboxed one.
 
-Transparency has one thing that has to be right: **the cells under a picture must be cleared first**. Whatever is
-transparent shows what is underneath, so a placeholder box or an older picture left in those cells would show through
-the bars. `WallCanvas`'s `.picture` branch now writes spaces over the whole rect (spaces only, no visible glyph, so the
+The cells under a picture still have to be cleared first: the placeholder box and any older placement live in the same
+cells. `WallCanvas`'s `.picture` branch writes spaces over the picture's rect (spaces only, no visible glyph, so the
 "no text under a placement" rule still holds) before the picture is emitted.
 
 Why a window's aspect must not reshape its card: **the layout being fixed** is the whole value of this screen - if

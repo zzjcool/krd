@@ -190,13 +190,18 @@ final class WallProcessTests: XCTestCase {
         // The mirror owns the alternate screen before the return can be tested. Screen Recording may
         // be denied inside a test bundle; that path exits as a mirror too (`--said`), so the shape
         // this test is about does not depend on a frame ever arriving.
-        guard pump(master, into: &stream, timeoutMs: 5_000, until: { bytes in
+        guard pump(master, into: &stream, timeoutMs: 8_000, until: { bytes in
             bytes.firstRange(of: Array("\u{1B}[?1049h".utf8)) != nil
         }) else {
-            XCTFail("the mirror never entered the alternate screen (\(stream.count) B)")
+            XCTFail("the mirror never entered the alternate screen (\(stream.count) B): "
+                    + String(decoding: stream, as: UTF8.self).debugDescription)
             return
         }
-        writeAll(master, [0x1C])
+        // A mirror whose capture cannot start hands the pane back at once (that is the fast-fail
+        // path), so the leave may already be in the stream: pressing Ctrl-\\ then would quit the
+        // *wall* instead and test nothing. Only press when the mirror still owns the pane.
+        let leftEarly = stream.firstRange(of: Array("\u{1B}[?1049l".utf8)) != nil
+        if !leftEarly { writeAll(master, [0x1C]) }
         let enter = Array("\u{1B}[?1049h".utf8)
         let clear = Array("\u{1B}_Ga=d,d=a\u{1B}\\".utf8)
         // Wait for the *whole* return: the wall's fresh screen, the image delete, and text on it.

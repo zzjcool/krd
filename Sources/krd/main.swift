@@ -980,7 +980,21 @@ final class Desk {
     /// Start the landing screen: alternate screen, resize handler, input, one enumeration and a
     /// 1 s tick. No capturer, no tile grid, no chrome rows — the wall owns every cell.
     private func runWall() {
-        if let cell = options.cell { TermGeometry.fallbackCell = cell }
+        if let cell = options.cell {
+            TermGeometry.fallbackCell = cell
+        } else if options.pane == nil {
+            // The pane's *cell* size, asked from the terminal itself. Over ssh the pty reports
+            // `ws_xpixel/ws_ypixel = 0`, so without this the wall fitted every picture to the
+            // hard-coded 8x20 fallback - a cell aspect of 0.40. Rex's real cell is 0.51 (and its
+            // ANSI answers say 8x16 = 0.50), so the fit left 36% of the stage's height empty: the
+            // picture looked smaller than its frame. Only the *ratio* has to be roughly right for
+            // the layout, and a terminal that answers nothing keeps the fallback.
+            // 150 ms per question, not the default 250: a terminal that answers does so in
+            // microseconds, and this runs before the first paint, where half a second is visible.
+            if let measured = TermGeometry.query(timeoutMs: 150) {
+                TermGeometry.fallbackCell = measured.cellSize
+            }
+        }
         // A size-zero viewport is what "there is no picture" means to the mouse path: no cell and
         // no pixel is inside it (`Viewport.contains`), so every report lands in `chromeClick`,
         // which routes it to the wall. Set before input starts, and never overwritten — nothing in
@@ -1174,11 +1188,13 @@ final class Desk {
         // is exactly what the first live run looked like: blank panels and no bytes on the wire.
         writer.beginFrame()
         for picture in pictures {
+            // `panel.rect` is the picture's own rectangle (WallPanels.make), so mask, placeholder,
+            // caption and picture are one box, and the cells outside it stay unpainted.
             writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
                              row: picture.panel.rect.row, col: picture.panel.rect.col,
                              cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
-                             pixels: picture.pixels, width: picture.panel.pixelWidth,
-                             height: picture.panel.pixelHeight, level: Self.wallPanelLevel,
+                             pixels: picture.pixels, width: picture.width,
+                             height: picture.height, level: Self.wallPanelLevel,
                              // RGBA: the bars are transparent so the wall's own background shows
                              // through (design §6.6) - the mirror's tiles stay opaque RGB.
                              format: .rgba, sync: writer.perTileSync)
