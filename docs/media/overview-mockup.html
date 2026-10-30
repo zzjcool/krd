@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>krd — 3 个最近窗口 + 缩略图 v6</title>
+<style>
+  :root{
+    --bg:#08090c; --panel:#12141a; --line:#232732; --fg:#d7dae3; --dim:#7c8493;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --cellw:8px; --cellh:15.5px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1100px 600px at 25% -10%,#161d2b,#08090c 62%) no-repeat,var(--bg);
+    color:var(--fg);font:14px/1.55 -apple-system,"PingFang SC",system-ui,sans-serif;padding:16px 18px 40px}
+  h1{margin:0 0 12px;font-size:16px}
+  h1 small{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+  .group{display:flex;align-items:center;gap:2px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px}
+  .group>label{font-size:11px;color:var(--dim);padding:0 8px 0 6px}
+  button{font:inherit;font-size:12px;color:var(--fg);background:transparent;border:0;border-radius:6px;padding:5px 9px;cursor:pointer}
+  button:hover{background:#1d2230}
+  button.on{background:#2a3550;box-shadow:inset 0 0 0 1px #3d4c6e;color:#fff}
+  input[type=range]{width:100px;accent-color:#5eb8ff}
+
+  main{display:grid;grid-template-columns:minmax(0,1fr) 306px;gap:18px;align-items:start}
+  @media (max-width:1080px){main{grid-template-columns:1fr}}
+
+  .term{background:#000;border:1px solid #262a35;border-radius:10px;overflow:hidden;box-shadow:0 26px 60px -24px #000}
+  .titlebar{display:flex;align-items:center;gap:8px;padding:7px 12px;background:#15181f;border-bottom:1px solid #262a35}
+  .dots{display:flex;gap:6px}.dots i{width:10px;height:10px;border-radius:50%;display:block}
+  .dots i:nth-child(1){background:#ff5f57}.dots i:nth-child(2){background:#febc2e}.dots i:nth-child(3){background:#28c840}
+  .titlebar span{font:12px var(--mono);color:var(--dim)}
+
+  .pane{position:relative;display:flex;align-items:stretch;background:#000;overflow:hidden;
+    font-family:var(--mono);font-size:calc(var(--cellh)*.82);line-height:var(--cellh);color:#c8cedb}
+
+  .row{display:flex;align-items:center;height:var(--cellh);padding:0 1ch;white-space:nowrap;cursor:pointer;overflow:hidden}
+  .row:hover{background:#d7dae3;color:#08090c}
+  .row:hover .k,.row:hover .dim,.row:hover .act{color:#08090c}
+  .row.sect{background:#0b0e13;color:#5d6577;cursor:default}
+  .row.sect:hover{background:#0b0e13;color:#5d6577}
+  .row .k{color:#9fb4d4;flex:0 0 auto;margin-right:1ch}
+  .row .sp{white-space:pre}
+  .row .dim{color:#5d6577;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .row>.end{flex:0 0 auto;white-space:pre}
+  .row .grow{flex:1 1 auto;min-width:0}
+  .row .act{color:#5eb8ff;flex:0 0 auto;cursor:pointer}
+
+  .shot{position:relative;overflow:hidden;margin:0 auto;background:#05070c}
+  .mask{position:absolute;inset:0;border:1px dashed #2b3242;background:
+      repeating-linear-gradient(135deg,#0a0d13 0 6px,#0c1017 6px 12px);
+      display:flex;align-items:center;justify-content:center}
+  .mask span{opacity:.5;text-align:center;line-height:1.5}
+  .cap{height:var(--cellh);line-height:var(--cellh);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    color:#8b93a3;padding:0 1ch;cursor:pointer}
+  .cap:hover{background:#d7dae3;color:#08090c}
+  .cards{display:flex;justify-content:flex-start;gap:0;align-items:flex-end}
+  .band{display:flex;align-items:stretch;gap:0;overflow:hidden}
+  /* cover: fill the band, crop whatever hangs over — anchored top so the menu bar survives */
+  .cover{position:absolute;inset:0;overflow:hidden;background:#05070c}
+  .cover>i{position:absolute;left:50%;top:0;transform:translateX(-50%);display:block}
+  /* the scroll control: one column, as tall as the pane, split into one segment per shelf */
+  .wall{position:relative;overflow:hidden;flex:0 0 auto}
+  .sbar{flex:0 0 var(--cellw);width:var(--cellw);background:#0a0d13;border-left:1px solid #1b2130;
+    display:flex;flex-direction:column;justify-content:flex-start;z-index:3}
+  .sbar .seg{display:flex;flex-direction:column;justify-content:space-between;background:#0d1119}
+  .sbar .seg.shelf1{background:#0f141d}
+  .sbar .sb{height:var(--cellh);line-height:var(--cellh);width:100%;text-align:center;cursor:pointer;
+    color:#657087;font-size:calc(var(--cellh)*.8)}
+  .sbar .sb.gap{background:#0a0d13;cursor:default;color:#1e2534;font-size:calc(var(--cellh)*.7)}
+  .sbar .sb:hover:not(.gap){background:#d7dae3;color:#08090c}
+  .sbar .sb.live{color:#5eb8ff}
+  .sbar .sb.thumb{color:#c8cedb}
+  .sbar .sb.dead{color:#2b3242;cursor:default}
+  .cell{flex:0 0 auto}
+
+  .desk{position:absolute;inset:0;background:
+      radial-gradient(60% 90% at 16% 8%, #2f6ea8bb 0%, transparent 62%),
+      radial-gradient(52% 78% at 84% 26%, #9b4a8faa 0%, transparent 64%),
+      radial-gradient(70% 95% at 52% 106%, #1b2f6bbb 0%, transparent 62%),
+      linear-gradient(158deg,#101927 0%,#20304a 46%,#0b1320 100%)}
+  .menubar{position:absolute;inset:0 0 auto 0;height:5%;background:#0e1626aa;border-bottom:1px solid #ffffff14}
+  .win{position:absolute;border-radius:3px;background:#0f1420;box-shadow:0 8px 24px #0009,0 0 0 1px #ffffff12;overflow:hidden}
+  .win .t{height:14%;background:#1b2231;border-bottom:1px solid #ffffff10}
+  .win .b{position:absolute;left:8%;right:8%;top:26%;height:5%;border-radius:2px;background:#ffffff10}
+  .win .b:nth-child(3){top:38%}.win .b:nth-child(4){top:50%;right:26%}
+  .win .blk{position:absolute;left:8%;right:8%;top:62%;bottom:8%;border-radius:3px;
+    background:linear-gradient(120deg,#20375c,#3a2a4e 55%,#182a44)}
+  .dock{position:absolute;left:50%;bottom:1.4%;transform:translateX(-50%);height:8%;width:34%;
+    border-radius:4px;background:#ffffff12;box-shadow:0 0 0 1px #ffffff10}
+
+  .app{position:absolute;inset:0;display:flex;flex-direction:column;background:#101620}
+  .app .bar{flex:0 0 13%;background:#1a2130;display:flex;align-items:center;gap:2%;padding:0 3%}
+  .app .bar i{width:2.2%;aspect-ratio:1;border-radius:50%;background:#39414f}
+  .app .body{flex:1;display:flex;min-height:0}
+  .app .side{flex:0 0 26%;background:#0c1119;border-right:1px solid #ffffff10;padding:5% 6%}
+  .app .side u{display:block;height:5%;min-height:2px;border-radius:2px;background:#212938;margin-bottom:9%}
+  .app .side u.on{background:#33507a}
+  .app .main{flex:1;padding:5% 6%;overflow:hidden;display:flex;flex-direction:column}
+  .app .l{height:4.5%;min-height:2px;border-radius:2px;background:#1e2634;margin-bottom:5%}
+  .app .l.thin{height:2.5%;margin-bottom:3.5%}
+  .app .url{height:6%;border-radius:2px;background:#1b2433;margin-bottom:6%}
+  .app .hero{margin-top:4%;flex:1;border-radius:3px;background:linear-gradient(120deg,#28405f,#3b2b52 60%,#1a2c46)}
+  .app .art{flex:0 0 46%;border-radius:3px;margin-bottom:6%;background:linear-gradient(140deg,#4a2c62,#7a3f6a 45%,#243450)}
+  .app .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:5%;padding-top:2%}
+  .app .grid i{aspect-ratio:1;border-radius:2px;background:#1d2634}
+  .app .grid i:nth-child(3n){background:#27384f}
+  .app .bub{height:12%;border-radius:6px;margin-bottom:6%;background:#1e2a3d}
+  .app .bub.l{width:62%}.app .bub.r{width:48%;margin-left:auto;background:#28405f}
+
+  aside{display:flex;flex-direction:column;gap:11px}
+  .card2{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .card2 h3{margin:0 0 7px;font-size:11px;letter-spacing:.6px;color:var(--dim);text-transform:uppercase}
+  .card2 p{margin:0 0 7px;font-size:12.5px;color:#aeb6c6}
+  .card2 p:last-child{margin:0}
+  code{font-family:var(--mono);color:#9fc7ff}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font:12px var(--mono)}
+  .kv span:nth-child(odd){color:var(--dim)}
+  .badge{display:inline-block;font:10px var(--mono);padding:1px 6px;border-radius:4px}
+  .badge.ok{background:#17301f;color:#67d391;box-shadow:inset 0 0 0 1px #2c5a3c}
+  .badge.warn{background:#332612;color:#ffb454;box-shadow:inset 0 0 0 1px #6b5220}
+  .foot{margin-top:10px;color:var(--dim);font:11.5px var(--mono)}
+</style>
+</head>
+<body>
+
+<h1>krd · 3 个最近窗口 <small>缩略图保留 · 按最近使用排序 · ◀ ▶ 左右滚动 · 纯点击，无快捷键</small></h1>
+
+<div class="toolbar">
+  <div class="group"><label>pane</label>
+    <button data-size="137x44" class="on">137×44</button><button data-size="100x36">100×36</button><button data-size="60x24">60×24</button>
+  </div>
+  <div class="group"><label>窗口</label><input id="wins" type="range" min="1" max="14" value="7"><span id="winsv" style="font:12px var(--mono);color:#7c8493;width:2ch">7</span></div>
+  <div class="group"><label>每页</label>
+    <button data-per="2">2</button><button data-per="3" class="on">3</button><button data-per="4">4</button>
+  </div>
+  <div class="group"><label>滚动</label>
+    <button data-step="1" class="on">一格</button><button data-step="3">一页</button>
+  </div>
+  <div class="group"><label>其他显示器</label>
+    <button data-others="0">0</button><button data-others="1" class="on">1</button><button data-others="2">2</button><button data-others="3">3</button><button data-others="4">4</button>
+  </div>
+  <div class="group"><label>边界</label>
+    <button id="failbtn">模拟拍失败（遮罩）</button>
+  </div>
+</div>
+
+<main>
+  <section>
+    <div class="term">
+      <div class="titlebar"><div class="dots"><i></i><i></i><i></i></div><span>ssh -t mac krd</span></div>
+      <div class="pane" id="pane"></div>
+    </div>
+    <div class="foot" id="foot"></div>
+  </section>
+
+  <aside>
+    <div class="card2">
+      <h3>成本（bench 实测换算）</h3>
+      <div class="kv">
+        <span>进来</span><span>≈ 28 KB 上链 · 4 次采集</span>
+        <span>翻一格</span><span>≈ 2–4 KB（只拍新露出的那一块）</span>
+        <span>静止后</span><span>0 B/s（逐块 dedupe）</span>
+        <span>主屏那一块</span><span>0.8 MP ≈ 23 KB</span>
+        <span>一个窗口块</span><span>0.06 MP ≈ 1.8 KB</span>
+      </div>
+      <p style="margin-top:7px">舞台那块 23 KB ＋ 3 个窗口 5.4 KB ≈ <b>28 KB</b>。屏一次只放一块，所以再多几块屏、再多几个窗口，这个数字都不变。</p>
+    </div>
+
+    <div class="card2">
+      <h3>排序怎么来的</h3>
+      <p><span class="badge ok">实测</span> <code>CGWindowListCopyWindowInfo(.optionOnScreenOnly)</code> 就是前到后的 z 序。</p>
+      <p><span class="badge warn">坑</span> 系统会插 <code>WindowManager Gesture Blocking Overlay</code>，**也是 layer 0**，与真窗口成对 → 只保留"有 Dock 图标的 regular app 的窗口"。</p>
+      <p>不是严格 MRU（抬起未激活也会前移），但免费、够用。</p>
+    </div>
+
+    <div class="card2">
+      <h3>显示器不止一块</h3>
+      <p><b>一次一块，铺满整条舞台</b>；其余靠右边那根竖条上下滚（和窗口同一套控件）。</p>
+      <p>顺序：<b>菜单栏那块</b>第一（`kCGDisplayIsMain`），其余按 x 从左到右，和桌上的实际摆法一致。</p>
+      <p><b>横向屏</b>铺满宽度、底部裁掉——顶部对齐，菜单栏一定还在。<b>竖屏</b>裁掉就只剩四分之一，所以改成铺满高度、居中，两侧留黑。</p>
+      <p>好处：一次只拍 1 块屏。3 块屏 + 3 窗 = <b>4 块图</b>，和只有一块屏时一样省。</p>
+    </div>
+
+    <div class="card2">
+      <h3>点哪里</h3>
+      <p>点卡片＝进入；点主屏/副屏图＝整屏镜像；点 <code>◀ ▶</code>＝滚动，到头变暗。</p>
+      <p>进入后底部 <code>⬅ 🖥 返回</code>。拍不到的块显示遮罩，版式不动。</p>
+    </div>
+  </aside>
+</main>
+
+<script>
+(() => {
+  const WINDOWS = [
+    { app:"Safari",   title:"Apple Developer",      size:"1452×1050", kind:"browser" },
+    { app:"Xcode",    title:"kkrt — Sources/krd",   size:"1440×2530", kind:"editor" },
+    { app:"Terminal", title:"~/code/kkrt — zsh",    size:"980×620",   kind:"terminal" },
+    { app:"Finder",   title:"访达 — 桌面",            size:"1180×740",  kind:"finder" },
+    { app:"Slack",    title:"#eng — 12 条新消息",     size:"1340×880",  kind:"chat" },
+    { app:"Music",    title:"正在播放 — Ambient",     size:"1200×700",  kind:"music" },
+    { app:"Notes",    title:"备忘 — 周一",            size:"900×640",   kind:"editor" },
+    { app:"WeChat",   title:"微信",                  size:"760×900",   kind:"chat" },
+    { app:"Preview",  title:"design-overview.pdf",   size:"1000×800",  kind:"browser" },
+    { app:"Mail",     title:"收件箱 — 4 封未读",       size:"1280×820",  kind:"editor" },
+    { app:"Calendar", title:"本周",                  size:"1100×760",  kind:"editor" },
+    { app:"Figma",    title:"krd overview",          size:"1512×940",  kind:"browser" },
+    { app:"Chrome",   title:"localhost:3000",        size:"1420×980",  kind:"browser" },
+    { app:"iTerm2",   title:"bench — python3",       size:"860×540",   kind:"terminal" },
+  ];
+  // order: the menu-bar display first, then left to right — the way the desk is arranged
+  const DISPLAYS = [
+    { name:"内建显示器",        w:1512, h:982,  main:true },
+    { name:"DELL U2720Q",      w:2560, h:1440 },
+    { name:"DELL U2422 · 竖屏", w:1200, h:1920, portrait:true },
+    { name:"Studio Display",   w:2880, h:1620 },
+    { name:"iPad (Sidecar)",   w:1180, h:820  },
+  ].map(d => ({ ...d, aspect: d.w / d.h }));
+
+  const state = { cols:137, rows:44, wins:7, others:1, per:3, step:1,
+                  start:0, dstart:0, fail:false, view:"wall", focus:null,
+                  cellw:8, cellh:15.5 };
+
+  const pane = document.getElementById("pane");
+  const foot = document.getElementById("foot");
+  const esc = s => String(s).replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+  const clamp = (a, b, v) => Math.max(a, Math.min(b, v));
+
+  const wins = () => WINDOWS.slice(0, state.wins);
+  const dispList = () => DISPLAYS.slice(0, 1 + state.others);
+  const maxStart = () => Math.max(0, state.wins - state.per);
+  const start = () => clamp(0, maxStart(), state.start);
+  const maxDStart = () => Math.max(0, dispList().length - 1);
+  const dstart = () => clamp(0, maxDStart(), state.dstart);
+
+  // ---- pictures --------------------------------------------------------------
+  const rnd = (seed, n) => ((Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453) % 1 + 1) % 1;
+
+  function deskHTML(seed, portrait) {
+    const r = n => rnd(seed, n);
+    if (portrait) {
+      return `<div class="desk"></div><div class="menubar"></div>
+        <div class="win" style="left:5%;top:9%;right:5%;height:26%"><div class="t"></div><div class="b"></div><div class="blk"></div></div>
+        <div class="win" style="left:5%;top:38%;right:5%;height:30%"><div class="t"></div><div class="b"></div><div class="b"></div><div class="blk"></div></div>
+        <div class="win" style="left:5%;top:71%;right:5%;height:24%"><div class="t"></div><div class="b"></div><div class="blk"></div></div>
+        <div class="dock"></div>`;
+    }
+    return `<div class="desk"></div><div class="menubar"></div>
+      <div class="win" style="left:${8 + r(4) * 4}%;top:${13 + r(5) * 4}%;width:${44 + r(1) * 8}%;bottom:${11 + r(6) * 6}%">
+        <div class="t"></div><div class="b"></div><div class="b"></div><div class="blk"></div></div>
+      <div class="win" style="left:${36 + r(7) * 6}%;top:${22 + r(8) * 5}%;width:${32 + r(2) * 8}%;bottom:${8 + r(9) * 4}%">
+        <div class="t"></div><div class="b"></div><div class="blk"></div></div>
+      <div class="win" style="left:${58 + r(10) * 5}%;top:${16 + r(11) * 6}%;width:${34 + r(3) * 6}%;bottom:${28 + r(12) * 8}%">
+        <div class="t"></div><div class="b"></div><div class="blk"></div></div>
+      <div class="dock"></div>`;
+  }
+
+  function winHTML(seed, kind) {
+    const r = n => rnd(seed, n);
+    const lines = (n, cls = "l") => Array.from({ length: n }, (_, i) =>
+      `<div class="${cls}" style="width:${Math.round(34 + r(i + 1) * 60)}%"></div>`).join("");
+    let inner;
+    switch (kind) {
+      case "browser":  inner = `<div class="url"></div>${lines(2)}<div class="hero"></div>`; break;
+      case "finder":   inner = `<div class="grid">${"<i></i>".repeat(8)}</div>`; break;
+      case "editor":   inner = lines(9); break;
+      case "terminal": inner = lines(11, "l thin"); break;
+      case "music":    inner = `<div class="art"></div>${lines(3)}`; break;
+      case "chat":     inner = `<div class="bub l"></div><div class="bub r"></div><div class="bub l"></div>`; break;
+      default:         inner = lines(4);
+    }
+    const side = ["browser","finder","editor"].includes(kind)
+      ? `<div class="side"><u class="on"></u><u></u><u></u></div>` : "";
+    return `<div class="app"><div class="bar"><i></i><i></i><i></i></div>
+      <div class="body">${side}<div class="main">${inner}</div></div></div>`;
+  }
+
+  const picHTML = c => c.kind === "window" ? winHTML(c.id + 2, c.appKind) : deskHTML(c.id + 2, c.portrait);
+
+  // a window card: fit, a mask if the capture failed — always the same rectangle
+  function cardHTML(c, wCells, hCells) {
+    const w = wCells * state.cellw, h = hCells * state.cellh;
+    const body = state.fail
+      ? `<div class="mask"><span>${hCells >= 5 ? `👁 ${esc(c.name)}<br>${wCells}×${hCells} 格` : "👁"}</span></div>`
+      : picHTML(c);
+    return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">${body}</div>`;
+  }
+
+  // a display fills the whole shelf: cover, anchored to the top (the menu bar stays)
+  function displayHTML(c, wCells, hCells) {
+    const w = wCells * state.cellw, h = hCells * state.cellh;
+    if (state.fail) {
+      return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">
+        <div class="mask"><span>👁 ${esc(c.name)}<br>${c.sub}</span></div></div>`;
+    }
+    // fill the width and crop the bottom, unless that would throw away more than half the display
+    // (a rotated 1200x1920 keeps only a quarter) — then fill the height and centre it instead
+    const picAspect = c.aspect, bandAspect = w / h;
+    const keepIfWidth = picAspect / bandAspect;                 // fraction of the height that survives
+    const fillWidth = keepIfWidth >= 0.5;
+    const iw = fillWidth ? w : h * picAspect;
+    const ih = fillWidth ? w / picAspect : h;
+    return `<div class="shot" data-focus="${c.key}" style="width:${w}px;height:${h}px">
+      <div class="cover"><i style="width:${iw}px;height:${ih}px">${picHTML(c)}</i></div></div>`;
+  }
+
+  const capHTML = (c, wCells) =>
+    `<div class="cap" data-focus="${c.key}" style="width:${wCells * state.cellw}px">` +
+    `${c.glyph} ${esc(c.name)}<span class="dim"> — ${esc(c.short || c.sub || "")}</span></div>`;
+
+  // ---- layout ----------------------------------------------------------------
+  function layout() {
+    const cols = state.cols, rows = state.rows, ch = state.cellh, cw = state.cellw;
+    const barW = 1, gapW = 1;
+    const content = cols - barW - gapW;                        // the bar owns the last column
+    const gap = 1;
+    const winW = Math.max(10, Math.floor((content - gap * (state.per - 1)) / state.per));
+    const aspectRows = (wCells, aspect) => Math.max(2, Math.round((wCells * cw) / (aspect * ch)));
+
+    const avail = rows - 4;                                    // header, band header, footer, 1 blank
+    const winRows = Math.min(aspectRows(winW, 1.62), Math.max(5, Math.floor(avail * 0.45)));
+    const dispBand = Math.max(4, avail - winRows - 1);          // + the cards' caption row
+    const mainH = Math.max(3, dispBand - 1);                    // + the display's caption row
+
+    // where each shelf sits, so the scroll bar can line up with it
+    const rowOfDisp = 1, rowOfBandHdr = 1 + dispBand;
+    const rowOfCards = rowOfBandHdr + 1;
+    return { content, winW, winRows, mainH, dispBand,
+             rowOfDisp, dispBandRows: dispBand, rowOfCards, cardRows: winRows + 1,
+             usedRows: 4 + dispBand + winRows + 1 };
+  }
+
+  // ---- the right-edge control: one column, one segment per shelf --------------
+  function barHTML(L, ch) {
+    const ds = dstart(), dcount = dispList().length, dvis = 1;
+    const ws = start(), wcount = state.wins, wvis = Math.min(state.per, state.wins);
+
+    const segment = (rows, cls, atDir) => {
+      let out = `<div class="seg ${cls}" style="height:${rows * ch}px">`;
+      for (let i = 0; i < rows; i++) out += atDir(i, rows);
+      return out + `</div>`;
+    };
+    const thumbRow = (i, rows, frac) => 1 + Math.round(frac * (rows - 3));
+
+    let html = `<div class="sbar" id="scrollbar">`;
+    html += `<div class="sb gap" style="height:${ch}px">╷</div>`;          // the header row
+    // Nothing to scroll -> one continuous dim shaft, no arrows: a greyed arrow still claims a cell
+    // is live. Matches WallCanvas.drawSegment (design §6).
+    html += segment(L.dispBandRows, "shelf1", (i, rows) => {
+      if (dcount <= dvis) return `<div class="sb dead">│</div>`;
+      if (i === 0) return `<div class="sb live" data-dnav="-1" title="上一块屏">▲</div>`;
+      if (i === rows - 1) return `<div class="sb live" data-dnav="1" title="下一块屏">▼</div>`;
+      const t = thumbRow(i, rows, ds / (dcount - dvis));
+      return i === t ? `<div class="sb thumb live">█</div>`
+                     : `<div class="sb" data-djump="${i}">│</div>`;
+    });
+    html += `<div class="sb gap" style="height:${ch}px">╵</div>`;          // the band header row
+    html += segment(L.cardRows, "shelf2", (i, rows) => {
+      if (wcount <= wvis) return `<div class="sb dead">│</div>`;
+      if (i === 0) return `<div class="sb live" data-nav="-1" title="上一组窗口">▲</div>`;
+      if (i === rows - 1) return `<div class="sb live" data-nav="1" title="下一组窗口">▼</div>`;
+      const t = thumbRow(i, rows, ws / Math.max(1, maxStart()));
+      return i === t ? `<div class="sb thumb live">█</div>` : `<div class="sb" data-jump="${i}">│</div>`;
+    });
+    const rest = state.rows - (1 + L.dispBandRows + 1 + L.cardRows);
+    html += `<div class="sb gap" style="height:${Math.max(0, rest) * ch}px"></div>`;
+    return html + `</div>`;
+  }
+
+  // ---- the wall --------------------------------------------------------------
+  function renderWall() {
+    const L = layout(), cw = state.cellw, ch = state.cellh;
+    const s = start(), e = Math.min(state.wins, s + state.per), ds = dstart();
+    const pad = n => Math.round(n * cw) + "px";
+    let h = "";
+
+    h += `<div class="row sect" style="height:${ch}px"><span class="k">▪</span>krd
+      <span class="sp dim">   ${state.wins} 个窗口 · ${dispList().length} 块屏 · 最近使用在前</span>
+      <span class="grow"></span><span class="end dim">${new Date().toTimeString().slice(0, 5)}</span></div>`;
+
+    // display shelf: exactly one display, filling the shelf
+    const d = dispList()[ds];
+    h += `<div class="band" style="height:${L.dispBandRows * ch}px;flex-direction:column">` +
+      displayHTML({ key:`d${ds}`, kind:"display", id:ds, name:d.name, sub:`${d.w}×${d.h}`,
+                    aspect:d.aspect, portrait:d.portrait }, L.content, L.mainH) +
+      capHTML({ key:`d${ds}`, glyph:"🖥", name:d.name,
+                sub:`${d.w}×${d.h}${d.main ? " · 主屏" : ""}${dispList().length > 1 ? ` · ${ds + 1}/${dispList().length}` : ""}` },
+              L.content) + `</div>`;
+
+    // window shelf header
+    h += `<div class="row sect" style="height:${ch}px"><span class="k">▣</span>最近使用
+      <span class="sp dim">    ${state.wins ? `${s + 1}–${e} / ${state.wins}` : "没有窗口"}</span>
+      <span class="grow"></span><span class="end act" data-perCycle="1">⤢ ${state.per}</span></div>`;
+
+    // the cards
+    h += `<div class="cards">`;
+    for (let i = 0; i < state.per; i++) {
+      const w = wins()[s + i];
+      if (!w) { h += `<div class="cell" style="width:${pad(L.winW + 1)}"></div>`; continue; }
+      const c = { key:`w${s + i}`, kind:"window", id:s + i, appKind:w.kind,
+                  name:w.app, short:w.title, glyph:"▣" };
+      h += `<div class="cell" style="width:${pad(L.winW + 1)}">` +
+        cardHTML(c, L.winW, L.winRows) + capHTML(c, L.winW) + `</div>`;
+    }
+    h += `</div>`;
+
+    h += `<div class="row sect" style="height:${ch}px;position:absolute;left:0;right:0;bottom:0">
+      <span class="k">▪</span><span class="dim" style="flex:1 1 auto">点卡片进入 · 右边竖条上下滚 · 静止后 0 B/s</span>
+      <span class="end dim">${state.fail ? "拍不到 → 遮罩" : (() => {
+        const kb = Math.round(23 + Math.min(state.per, state.wins) * 1.8);
+        return `${1 + Math.min(state.per, state.wins)} 块图 · ~${kb} KB`;
+      })()}</span></div>`;
+
+    pane.innerHTML = `<div class="wall" style="width:${Math.round(L.content * cw)}px;height:${state.rows * ch}px">${h}</div>`
+      + barHTML(L, ch);
+    wire();
+    foot.textContent = `wall: 显示器 ${ds + 1}/${dispList().length}（${L.content}×${L.mainH} 格，cover 铺满）· ` +
+      `卡片 ${L.winW}×${L.winRows} 格 × ${state.per} · 窗口 ${s + 1}–${e} / ${state.wins} · ` +
+      `总用 ${L.usedRows} / ${state.rows} 行 · 每次只拍 ${1 + Math.min(state.per, state.wins)} 块`;
+  }
+
+  // ---- focus -----------------------------------------------------------------
+  function renderFocus() {
+    const f = state.focus, ch = state.cellh;
+    const availH = (state.rows - 1) * ch;
+    const aspect = f.kind === "display" ? (f.aspect || 1.54) : 1.62;
+    let w = Math.min(state.cols * state.cellw, availH * aspect), hh = w / aspect;
+    if (hh > availH) { hh = availH; w = hh * aspect; }
+    // the pane is a flex *row* (wall + scroll bar), so the focus view stacks its own column
+    pane.innerHTML =
+      `<div style="flex:1 1 auto;display:flex;flex-direction:column">
+       <div style="height:${availH}px;flex:0 0 auto;display:flex;align-items:center;justify-content:center">
+         <div class="shot" style="width:${w}px;height:${hh}px">${picHTML(f)}</div></div>
+       <div class="row" data-back="1" style="height:${ch}px;flex:0 0 auto"><span class="k">⬅</span>🖥 返回
+         <span class="sp dim">   ${esc(f.name)}${f.sub ? " — " + esc(f.sub) : ""}</span>
+         <span class="grow"></span><span class="end dim">${f.kind === "display" ? "整屏镜像" : "单窗口镜像"} · 20 fps</span></div>
+       </div>`;
+    wire();
+    foot.textContent = `focus(${f.name}) · 只有进来之后才是 20 fps 的镜像；墙上只是静止的缩略图`;
+  }
+
+  function wire() {
+    pane.querySelectorAll("[data-back]").forEach(el => el.onclick = () => {
+      state.view = "wall"; state.focus = null; render();
+    });
+    pane.querySelectorAll("[data-nav]").forEach(el => el.onclick = (ev) => {
+      ev.stopPropagation();
+      state.start = clamp(0, maxStart(), start() + Number(el.dataset.nav) * state.step); render();
+    });
+    pane.querySelectorAll("[data-jump]").forEach(el => el.onclick = (ev) => {
+      ev.stopPropagation();
+      const L = layout(), i = Number(el.dataset.jump);
+      state.start = Math.round(((i - 1) / Math.max(1, L.cardRows - 3)) * maxStart()); render();
+    });
+    pane.querySelectorAll("[data-dnav]").forEach(el => el.onclick = (ev) => {
+      ev.stopPropagation();
+      state.dstart = clamp(0, maxDStart(), dstart() + Number(el.dataset.dnav)); render();
+    });
+    pane.querySelectorAll("[data-djump]").forEach(el => el.onclick = (ev) => {
+      ev.stopPropagation();
+      const L = layout(), i = Number(el.dataset.djump);
+      state.dstart = Math.round(((i - 1) / Math.max(1, L.dispBandRows - 3)) * maxDStart()); render();
+    });
+    pane.querySelectorAll("[data-perCycle]").forEach(el => el.onclick = (ev) => {
+      ev.stopPropagation();
+      state.per = state.per >= 4 ? 2 : state.per + 1;
+      state.start = 0;
+      document.querySelectorAll("[data-per]").forEach(x => x.classList.toggle("on", +x.dataset.per === state.per));
+      render();
+    });
+    pane.querySelectorAll("[data-focus]").forEach(el => el.onclick = () => {
+      const key = el.dataset.focus;
+      if (key[0] === "d") {
+        const i = Number(key.slice(1)), d = DISPLAYS[i];
+        state.focus = { key, kind:"display", id:i, name:d.name, sub:`${d.w}×${d.h}`, aspect:d.aspect };
+      } else {
+        const i = Number(key.slice(1)), w = wins()[i];
+        if (!w) return;
+        state.focus = { key, kind:"window", id:i, appKind:w.kind, name:w.app, sub:w.title };
+      }
+      state.view = "focus"; render();
+    });
+  }
+
+  // ---- controls ---------------------------------------------------------------
+  function render() {
+    const avail = Math.min(pane.parentElement.clientWidth || 1100, 1280) - 4;
+    const cw = Math.max(3.4, Math.min(9.0, avail / state.cols));
+    state.cellw = cw; state.cellh = Math.round(cw * 1.94);
+    pane.style.setProperty("--cellw", cw + "px");
+    pane.style.setProperty("--cellh", state.cellh + "px");
+    pane.style.width = `${state.cols * cw}px`;
+    pane.style.height = `${state.rows * state.cellh}px`;
+    if (state.view === "focus") renderFocus(); else renderWall();
+    document.getElementById("failbtn").classList.toggle("on", state.fail);
+  }
+
+  const group = (attr, apply) => document.querySelectorAll(`[${attr}]`).forEach(b => b.onclick = () => {
+    apply(b.dataset[attr]);
+    document.querySelectorAll(`[${attr}]`).forEach(x => x.classList.toggle("on", x === b));
+    state.start = 0; state.dstart = 0; render();
+  });
+  document.querySelectorAll("[data-size]").forEach(b => b.onclick = () => {
+    const [c, r] = b.dataset.size.split("x").map(Number);
+    state.cols = c; state.rows = r; state.start = 0; state.dstart = 0;
+    document.querySelectorAll("[data-size]").forEach(x => x.classList.toggle("on", x === b));
+    render();
+  });
+  group("data-per", v => state.per = +v);
+  group("data-step", v => state.step = +v);
+  group("data-others", v => state.others = +v);
+
+  const winsInput = document.getElementById("wins");
+  winsInput.oninput = () => {
+    state.wins = +winsInput.value; state.start = 0;
+    document.getElementById("winsv").textContent = winsInput.value;
+    render();
+  };
+  document.getElementById("failbtn").onclick = () => { state.fail = !state.fail; render(); };
+
+  // #wins=7&others=1&per=3&start=0&dstart=1&fail=1&focus=w2
+  for (const kv of (location.hash || "").replace("#", "").split("&").filter(Boolean)) {
+    const [k, v] = kv.split("=");
+    if (k === "wins") { state.wins = +v; winsInput.value = v; document.getElementById("winsv").textContent = v; }
+    if (k === "others") state.others = +v;
+    if (k === "per") state.per = +v;
+    if (k === "step") state.step = +v;
+    if (k === "start") state.start = +v;
+    if (k === "dstart") state.dstart = +v;
+    if (k === "fail") state.fail = v === "1";
+    if (k === "size") { const [c, r] = v.split("x").map(Number); state.cols = c; state.rows = r; }
+    if (k === "focus") {
+      const i = Number(v.slice(1));
+      if (v[0] === "d") state.focus = { kind:"display", id:i, name:DISPLAYS[i].name,
+        sub:`${DISPLAYS[i].w}×${DISPLAYS[i].h}`, aspect:DISPLAYS[i].aspect };
+      else { const w = WINDOWS[i % WINDOWS.length];
+             state.focus = { kind:"window", id:i, appKind:w.kind, name:w.app, sub:w.title }; }
+      state.view = "focus";
+    }
+  }
+  addEventListener("resize", render);
+  render();
+})();
+</script>
+</body>
+</html>
