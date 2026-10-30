@@ -375,8 +375,8 @@ which is why §7.6 exists.
 | `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand |
 | `--dev-panel` | `ChromeState.panel` set before the first layout, for screenshots and pty tests |
 | `--no-chrome` | forces the layer off, so `--dev` can live in a wrapper script |
-| `--wall` | `WallSource` + `WallCanvas` + `runWall()`: the landing screen, text only, no capture |
-| `--symbols <m>` | `WallSymbols`: `emoji` (default) or `ascii` glyphs for `--wall` |
+| `krd` (no flags) | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`: the landing screen, one display on stage and three recent windows below, as pictures. `--mirror` selects the old whole-display path, `--window <q>` implies it |
+| `--symbols <m>` | `WallSymbols`: `emoji` (default) or `ascii` glyphs for the wall |
 
 The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
 

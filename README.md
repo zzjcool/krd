@@ -44,7 +44,9 @@ Everything is explained in [docs/DEPLOY.md](docs/DEPLOY.md); the script itself i
 ## Use
 
 ```bash
-krd --fps 20                 # mirror the display the pointer is on
+krd                          # the landing screen: the display on top, the three most recent windows
+                             # below, both scrolling on the right bar (the wall)
+krd --mirror --fps 20        # the whole display as one picture, the old default
 krd --list                   # displays and windows; backdrop entries are marked
 krd --window Safari          # mirror a single window (a backdrop window is refused, not shown black)
 krd --zoom 2                 # show half the screen at twice the density (crop on the capture side)
@@ -60,9 +62,9 @@ krd --cursor                 # draw the target's pointer into the picture (defau
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture
 krd --mock --dev             # the same, with the screen mocked: no permission needed
-wall                         # the landing screen: displays + recent windows (krd --wall)
-krd --wall                   # the same, spelled out (wall is a symlink the installer adds)
-krd --wall --symbols ascii   # one-cell-everywhere glyphs (terminals that draw ▲ two wide)
+wall                         # the same landing screen under its own name (a symlink the
+                             # installer adds: today `wall` and `krd` are the same command)
+krd --symbols ascii          # one-cell-everywhere glyphs (terminals that draw ▲ two wide)
 krd --debug                  # stats to a log file, never to the screen
 krd --format rgba            # fall back to f=32 if the terminal rejects f=24
 krd --bench                  # time the encoder on synthetic frames, no terminal needed

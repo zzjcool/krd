@@ -318,8 +318,12 @@ Restart-path facts already hit once (do not relearn them):
   slot states (placeholder / picture / mask). Measured at 137×44: **4 pictures, 1.18 MB**, once; the
   mirror path's bytes and golden dumps are unchanged. No dedupe: the wall only repaints when the
   model changes, so a cache waits until CPU is actually the bottleneck.
-- **P3** everything open + scrolling + `⤢` + the mouse hit map.
-- **P4** flip the default + docs (README both languages, ARCHITECTURE, TROUBLESHOOTING) + `bench/budget.json`.
+- **P3 done (2026-10-30)**: every section open, the right bar (two segments, wheel = one item, bar = one
+  page), the mouse hit map, one height per card row, a divider between the stage and the cards, a 3-cell gap.
+- **P4 done (2026-10-30)**: plain `krd` opens the wall. `--mirror` (or `--window <query>`, which asks for one
+  window and so cannot mean the wall) takes the old default back; `wall` stays a symlink and `--wall` still
+  parses, because scripts spell it. `--list`, `--selftest`, `--bench`, `--mock` keep their own paths - they are
+  checked before the wall branch, and `--list` is the one that would otherwise have been swallowed.
 
 ## 13. What would change the answer
 

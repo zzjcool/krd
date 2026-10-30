@@ -328,8 +328,8 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `--dev` | `Chrome` + `startChrome()`：TUI 层，预留一行状态栏，面板按需占行 |
 | `--dev-panel` | 在第一次布局前就打开面板，用于截图和 pty 测试 |
 | `--no-chrome` | 强制关闭该层，方便把 `--dev` 写进包装脚本 |
-| `--wall` | `WallSource` + `WallCanvas` + `runWall()`：落地屏，纯文本，不采集 |
-| `--symbols <m>` | `WallSymbols`：`--wall` 的 `emoji`（默认）/ `ascii` 字形 |
+| `krd`（无参数） | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`：落地屏，舞台放一块屏、下面三张最近用过的窗口，都是图片。`--mirror` 选回老的整屏镜像路径，`--window <查询>` 隐含它 |
+| `--symbols <m>` | `WallSymbols`：墙的 `emoji`（默认）/ `ascii` 字形 |
 | `KRD_REAP` | 每 n 帧整屏重绘（0 = 关闭，默认） |
 | `KRD_BENCH_BUDGET_SCALE` | 只给 `bench/bench.py` 用（krd 本身不读）：按机器速度倍数放大 `ms.*` / `write_ms.*` 预算，bytes 永不放宽（见 [BENCHMARK](BENCHMARK.md) §6） |
 

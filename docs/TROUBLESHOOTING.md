@@ -135,6 +135,15 @@ that reports no pixel size it falls back to `--cell`, which may not match the ne
 `SIGWINCH` still triggers re-layout, `writer.clear()` and a stream restart at the new size; the
 layout is never left stale, only possibly under-informed.
 
+### 13b. `krd` opens a screen of pictures instead of the desktop
+
+**Cause.** Since phase 4 that *is* `krd`: the landing screen (design `design-overview.md` §2) shows one
+display on stage and the three most recently used windows below, as pictures, refreshed when the desk
+changes. Nothing forwards input in that mode - it is a landing screen, not a mirror.
+**Fix.** Ask for the mirror explicitly: `krd --mirror` (the whole display at `--fps`), or
+`krd --window <query>` for one window (that flag implies the mirror, because naming a window to mirror
+cannot mean the wall). `wall` and `--wall` still work and still mean the landing screen.
+
 ## 3. Input
 
 ### 14. Keys and clicks do nothing, and the log says `input DISABLED`

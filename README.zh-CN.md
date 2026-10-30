@@ -42,7 +42,8 @@ curl -fsSL … | sh -s -- --from-source                # 直接从源码编译
 ## 用法
 
 ```bash
-krd --fps 20                 # 镜像指针所在的那块屏
+krd                          # 落地屏：上面是显示器，下面是最近用过的三个窗口，两边都用右边竖条滚
+krd --mirror --fps 20        # 整块屏当一张图镜像，也就是原来的默认行为
 krd --list                   # 列出显示器与窗口，背板条目会标出来
 krd --window Safari          # 只镜像一个窗口（背板窗口会被拒绝，而不是给黑屏）
 krd --zoom 2                 # 看一半的屏幕、按两倍密度显示（在采集端裁剪）
@@ -56,9 +57,8 @@ krd --no-quantise           # 保持严格无损（照片类画面字节数约 2
 krd --cursor                 # 把目标端的指针画进画面（默认不画：画了之后鼠标每动一下都会弄脏瓦片）
 krd --dev                    # TUI 层：画面下面一条状态栏 + 面板
 krd --mock --dev             # 同上，但屏幕是模拟的：不需要任何权限
-wall                         # 落地屏：显示器 + 最近用过的窗口（等于 krd --wall）
-krd --wall                   # 全拼写法（wall 是安装脚本建的软链）
-krd --wall --symbols ascii   # 每个字形都只占一格（终端把 ▲ 画成两格宽时用）
+wall                         # 同一个落地屏的另一个名字（安装脚本建的软链：今天 wall 和 krd 一样）
+krd --symbols ascii          # 每个字形都只占一格（终端把 ▲ 画成两格宽时用）
 krd --debug                  # 统计写日志文件，不会打到画面上
 krd --format rgba            # 终端不认 f=24 时退回 f=32
 krd --bench                  # 在合成帧上给编码器计时，不需要终端

@@ -171,9 +171,10 @@ cat <<EOF
 Next:
   1. approve Screen Recording (and Accessibility for input) the first time it runs:
        $installed --list
-  2. mirror this Mac:            $installed --fps 20
-     mirror it over SSH:         ssh -t <host> krd --fps 20      (exit with Ctrl-\\)
-     see what is on screen:      $PREFIX/wall                   (exit with Ctrl-\\)
+  2. open the landing screen:    $installed                    (exit with Ctrl-\\)
+     the same under its name:    $PREFIX/wall
+     mirror the whole display:   $installed --mirror --fps 20
+     ...over SSH:                ssh -t <host> krd --mirror     (exit with Ctrl-\\)
   3. the terminal must speak the kitty graphics protocol: rex, Ghostty, kitty, WezTerm
      (Terminal.app does not)
 

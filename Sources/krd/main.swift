@@ -78,13 +78,14 @@ struct Options {
     var noChrome = false
     /// Open a panel at startup, for screenshots and for `--dev --selftest` without input.
     var devPanel: String? = nil
-    /// The landing screen (`--wall`): displays plus the most recently used windows, as pictures.
+    /// The landing screen: the display plus the most recently used windows, as pictures.
     ///
-    /// It renders fully with the Screen Recording grant denied: the layout, the captions and the
-    /// scroll bar are text, and a panel that cannot be captured draws its mask instead (design §4).
-    /// Opt-in for now, because the mirror is what krd is for; the flip is phase 4.
-    var wall = false
-    /// The `--wall` glyph table (`--symbols`): `emoji` unless the terminal draws `▲ ▣ ⤢` two cells
+    /// **This is what plain `krd` starts** (design §2, phase 4). The mirror is one flag away:
+    /// `--mirror`, or `--window <query>`, which asks for exactly that window and cannot mean the
+    /// wall. The wall renders fully with the Screen Recording grant denied: the layout, the captions
+    /// and the scroll bar are text, and a panel that cannot be captured draws its mask (design §4).
+    var wall = true
+    /// The wall's glyph table (`--symbols`): `emoji` unless the terminal draws `▲ ▣ ⤢` two cells
     /// wide, which would slide the bar off the column a click maps to.
     var symbols: WallSymbols = .emoji
     /// Replace ScreenCaptureKit with a desktop drawn in process. No permission, runs forever.
@@ -128,9 +129,10 @@ func usage() -> String {
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
       --no-chrome         force the TUI layer off, e.g. for scripts
       --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
-      --wall              the landing screen: the display and the most recently used windows,
-                          as pictures instead of a mirror (opt-in; the mirror stays the default)
-      --symbols <m>       --wall glyphs: emoji (default) or ascii, for terminals that draw
+      --mirror            the whole display as one picture at --fps (the old behaviour; plain krd
+                          now opens the wall: the display on top, the three most recent windows
+                          below, both scrolling on the right bar)
+      --symbols <m>       the wall's glyphs: emoji (default) or ascii, for terminals that draw
                           ▲ ▣ ⤢ two cells wide
       --mock              draw the desktop in process: no screen, no permission, runs forever
       --mock-size WxH     size of the generated desktop (default 1920x1200)
@@ -201,16 +203,23 @@ func invokedAsWall(_ argv0: String) -> Bool {
     (argv0 as NSString).lastPathComponent == "wall"
 }
 
-func parseArguments() -> Options {
+/// `argv` is a parameter for the tests' sake, not for the app's: the wall-vs-mirror decision is the
+/// one piece of the parse that a reader cannot check by running the binary, and it is now a default
+/// plus two overrides, i.e. exactly the shape that rots silently.
+func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
     var options = Options()
-    if invokedAsWall(CommandLine.arguments.first ?? "") { options.wall = true }
-    let args = Array(CommandLine.arguments.dropFirst())
+    if invokedAsWall(argv.first ?? "") { options.wall = true }
+    let args = Array(argv.dropFirst())
     var i = 0
     while i < args.count {
         switch args[i] {
         case "--fps": options.fps = max(1, Int(args[safe: i + 1] ?? "") ?? options.fps); i += 1
         case "--display": options.displayIndex = Int(args[safe: i + 1] ?? ""); i += 1
-        case "--window": options.windowQuery = args[safe: i + 1]; i += 1
+        case "--window":
+            // Naming one window to mirror is a request for the mirror, never for the wall.
+            options.windowQuery = args[safe: i + 1]
+            options.wall = false
+            i += 1
         case "--zoom":
             if let value = Double(args[safe: i + 1] ?? ""), value.isFinite { options.zoom = value }
             i += 1
@@ -322,7 +331,9 @@ func parseArguments() -> Options {
             let parts = spec.split(separator: "x").compactMap { Int($0) }
             if parts.count == 2, parts[0] > 8, parts[1] > 8 { options.mockSize = (parts[0], parts[1]) }
         case "--no-chrome": options.noChrome = true
+        // The default since phase 4; kept because scripts and muscle memory spell it.
         case "--wall": options.wall = true
+        case "--mirror": options.wall = false
         case "--symbols":
             options.symbols = parseSymbolsSpec(args[safe: i + 1] ?? "")
             i += 1
@@ -464,7 +475,7 @@ final class Desk {
     private var chromeSampleTiles = 0
     private var chromeSampleTime = Date()
     private var chromeToastUntil = Date()
-    // The wall (`--wall`). `wallState != nil` *is* wall mode: no picture, no capturer, and every
+    // The wall (the default mode). `wallState != nil` *is* wall mode: no capturer, and every
     // cell of the pane belongs to `WallCanvas`, so each path that would fit or restart a mirror
     // looks at this one flag first.
     private var wallState: WallState?
@@ -520,7 +531,7 @@ final class Desk {
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
-        // `--wall` is in the list for its own reason: the pane *is* the wall, so a diagnostic must
+        // Wall mode is in the list for its own reason: the pane *is* the wall, so a diagnostic must
         // not reach it at all — `Log`'s fallback sink is stderr, i.e. the pane, and one line there
         // scrolls the picture off its own grid (CONTRIBUTING.md rule 1). The reader's own
         // `input:` lines are gated separately (`InputReader(forward:)`); this half catches the rest
@@ -642,7 +653,7 @@ final class Desk {
         // no title draws `window N`). This branch is therefore strictly before the first
         // `SCShareableContent` call — the one that throws when Screen Recording is denied — so a
         // wall-only session starts and renders with the grant missing.
-        if options.wall {
+        if options.wall, !options.listOnly {
             runWall()
             while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         }

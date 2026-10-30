@@ -18,3 +18,33 @@ final class WallInvocationTests: XCTestCase {
         XCTAssertFalse(invokedAsWall(""))
     }
 }
+
+/// Phase 4 flipped the default: plain `krd` opens the wall, and two flags take it back. Those three
+/// facts are what a reader of the README relies on, so they are pinned here rather than in the help
+/// text - the help text is a string, the parser is behaviour.
+final class WallModeDefaultTests: XCTestCase {
+    func testPlainKrdStartsOnTheWall() {
+        XCTAssertTrue(parseArguments(["/usr/local/bin/krd"]).wall)
+        XCTAssertTrue(parseArguments(["/Users/me/bin/krd", "--fps", "30"]).wall,
+                      "a mirror-only knob does not change which screen krd opens")
+        XCTAssertTrue(parseArguments(["krd", "--wall"]).wall, "--wall still means the wall")
+        XCTAssertTrue(parseArguments(["wall"]).wall)
+        XCTAssertTrue(parseArguments(["/usr/local/bin/wall", "--symbols", "ascii"]).wall)
+    }
+
+    func testMirrorIsOneFlagAway() {
+        XCTAssertFalse(parseArguments(["krd", "--mirror"]).wall)
+        // The alias cannot out-vote an explicit flag: the flags are read after argv[0].
+        XCTAssertFalse(parseArguments(["wall", "--mirror"]).wall)
+        // ...and order is ordinary: the last one wins.
+        XCTAssertTrue(parseArguments(["krd", "--mirror", "--wall"]).wall)
+    }
+
+    func testNamingOneWindowImpliesTheMirror() {
+        let options = parseArguments(["krd", "--window", "Safari"])
+        XCTAssertFalse(options.wall, "--window asks for that window, i.e. for the mirror")
+        XCTAssertEqual(options.windowQuery, "Safari")
+        // Unless the wall is asked for after it.
+        XCTAssertTrue(parseArguments(["krd", "--window", "Safari", "--wall"]).wall)
+    }
+}
