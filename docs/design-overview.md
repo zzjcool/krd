@@ -321,10 +321,19 @@ Restart-path facts already hit once (do not relearn them):
   model changes, so a cache waits until CPU is actually the bottleneck.
 - **P3 done (2026-10-30)**: every section open, the right bar (two segments, wheel = one item, bar = one
   page), the mouse hit map, one height per card row, a divider between the stage and the cards, a 3-cell gap.
-- **P3b done (2026-10-30)**: clicking a picture hands the pane to a child `krd --window <id>` - the mirror as
-  it has always been built - and the wall comes back when that child exits. A child rather than an in-process
-  switch: the mirror is a capture target, a tile grid and a 20 fps loop that forwards input, and "back" then
-  costs nothing. When the child stops badly the wall's footer says its exit code and its own last sentence.
+- **P3b done (2026-10-30)**: clicking a picture turns this process *into* `krd --window <id>` (`execv`, not
+  spawn), and `Ctrl-\` inside that mirror `exec`s the wall back, on the page it was left on.
+  **Why not a child process** (the first attempt, which shipped for an hour): two live processes of one
+  executable cannot both be ScreenCaptureKit clients — the newcomer's stream dies at once with `-3805`
+  ("failed during stream due to application connection being interrupted"). Measured four ways on the dev
+  Mac: the same child streams fine alone, fails while a wall runs, fails while that wall is `SIGSTOP`ped
+  before it paints, and works again when the same binary is copied to another path and started there. What
+  collides is the executable's identity with the window server, so the fix is to leave exactly one client.
+  The price of `exec` is that nothing is left to wait for the mirror, so the shelf (`--wall-at <s>:<c>`) and
+  a failed mirror's sentence (`--said <exit> <text>`) travel in argv — the only state that survives a
+  replaced process — and the wall a reader returns to shows the reason in its footer instead of a silent
+  gap. A stream that dies *before its first frame* exits at once with that sentence (it names a target that
+  will never open) rather than spending five retries behind a frozen pane.
 - **P4 done (2026-10-30)**: plain `krd` opens the wall. `--mirror` (or `--window <query>`, which asks for one
   window and so cannot mean the wall) takes the old default back; `wall` stays a symlink and `--wall` still
   parses, because scripts spell it. `--list`, `--selftest`, `--bench`, `--mock` keep their own paths - they are

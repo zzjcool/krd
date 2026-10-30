@@ -276,20 +276,27 @@ so the two spellings of F1–F4 cannot disagree; the parser decision and the tab
 first frame is delivered, then no more callbacks arrive and nothing is logged.
 **Fix.** `queueDepth = 3` (`Capture.swift`).
 
-### 23a. Clicking a picture flashes and comes straight back to the wall
+### 23a. Clicking a picture comes straight back to the wall with a sentence
 
-**Cause.** The click works: krd hands the pane to a child `krd --window <id>`, and that child exited
-without drawing. The wall's footer now carries the child's exit code and its own last sentence, so
-read that first. The usual ones:
+**Cause.** The click works: krd `exec`s itself into `krd --window <id>`, that mirror could not draw a
+frame, and it handed the pane back with the reason in the wall's footer. The usual ones:
 
 - `the mirror stopped (exit 1) - The user declined TCCs ...` - the stream half of ScreenCaptureKit
   (`SCStream`) is denied while the one-shot half (`SCScreenshotManager`, which the wall's pictures
   use) is allowed. Grant Screen Recording to the terminal krd runs in (23b).
-- `the mirror stopped (exit 1) - no window matched "<id>"` - the window closed between the page
-  being drawn and the click. Scroll and click again.
+- `the mirror stopped (exit 1) - Screen Recording is off for this terminal` - the same thing, already
+  translated: a stream that dies before its first frame says which mode failed.
+- `the mirror stopped (exit 1) - the window closed before it could be shown` - the window went away
+  between the page being drawn and the click. Scroll and click again.
+- `the mirror stopped (exit 1) - Failed during stream due to application connection being interrupted`
+  (`-3805`) on **one particular window**: that window cannot be streamed live at all, although a
+  single screenshot of it works (the wall's picture on its card is one). Small, layer-backed or
+  otherwise odd windows do this (`-3805` also what a *second* process of the same binary gets, which
+  is why the hand-over is an `exec`). There is no fix inside krd: `--mirror` (the whole display) or a
+  bigger window next to it are the ways in.
 
-**Fix.** Nothing to do in krd: the reason is on the footer. If the child works, `Ctrl-\` inside it
-brings the wall back - that is the way out of a window mirror.
+**Fix.** Nothing to do in krd: the reason is on the footer. `Ctrl-\` inside a working mirror brings
+the wall back on the page it was left on - that is the way out of a window mirror.
 
 ### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
 

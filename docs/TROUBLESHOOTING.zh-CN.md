@@ -248,18 +248,24 @@ Alt-`G`，后面全变成文字。
 任何回调，也不打日志。
 **对策。** `queueDepth = 3`（`Capture.swift`）。
 
-### 23a. 点一张图闪一下就回到墙
+### 23a. 点一张图，墙立刻回来还带一句话
 
-**原因。** 点击是生效的：krd 把面板交给子进程 `krd --window <id>`，是这个子进程没画出东西就退出了。
-墙的页脚现在会带子进程的退出码和它自己最后一句话，先看那行。最常见两种：
+**原因。** 点击是生效的：krd 把自己 `exec` 成 `krd --window <id>`，这个镜像一帧都没画出来，于是把面板
+交回墙，并在页脚写上原因。常见的几种：
 
 - `the mirror stopped (exit 1) - The user declined TCCs ...`——SCK 的流式那一半（`SCStream`）被拒，
   而一次性那一半（`SCScreenshotManager`，墙的图片用的就是它）是允许的。给运行 krd 的那个终端屏幕录制权限（23b）。
-- `the mirror stopped (exit 1) - no window matched "<id>"`——窗口在这一页画出来之后、点之前关掉了。
-  滚一下再点。
+- `the mirror stopped (exit 1) - Screen Recording is off for this terminal`——同一件事，但已经翻译过：
+  首帧都没拿到的流会直接说是哪一半被拒了。
+- `the mirror stopped (exit 1) - the window closed before it could be shown`——窗口在这一页画出来之后、
+  点之前关掉了。滚一下再点。
+- `the mirror stopped (exit 1) - Failed during stream due to application connection being interrupted`（`-3805`）
+  出现在**某一个特定窗口**上：那个窗口根本没法开流，虽然对它做一次性截图是正常的（卡片上的图就是）。
+  很小的窗口、layer-backed 的窗口、以及一些奇怪的窗口会这样（同一个二进制的**第二个进程**也会拿到
+  `-3805`，这正是交接用 `exec` 的原因）。krd 内部没有解法：换 `--mirror`（整块屏）或者点旁边大一点的窗口。
 
-**解决。** krd 这边不用做什么，原因就在页脚上。子进程正常跑起来的话，在它里面按 `Ctrl-\` 就回墙——
-这就是退出窗口镜像的方式。
+**解决。** krd 这边不用做什么，原因就在页脚上。镜像正常跑起来后，在它里面按 `Ctrl-\` 就回墙，并停在
+原来那一页——这就是退出窗口镜像的方式。
 
 ### 23b. 每块面板都是 `no picture`，页脚让你去给屏幕录制权限
 

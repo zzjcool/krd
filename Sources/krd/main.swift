@@ -85,12 +85,33 @@ struct Options {
     /// wall. The wall renders fully with the Screen Recording grant denied: the layout, the captions
     /// and the scroll bar are text, and a panel that cannot be captured draws its mask (design §4).
     var wall = true
+    /// Where the wall's shelf and stage were, or — in a mirror this process handed the pane to — the
+    /// offsets to go back to when it leaves (`--wall-at <stage>:<card>`).
+    ///
+    /// One flag, two readers, because it is one number: the wall that hands over, the mirror that
+    /// returns, and the wall that comes back all have to agree about which page the reader was on.
+    var wallAt: (stage: Int, card: Int)? = nil
+    /// A failed mirror's sentence, and the status it left with (`--said <exit> <text>`), so the wall
+    /// it returns to can paint the reason in its footer instead of coming back without a word.
+    var said: (exit: Int32, text: String)? = nil
     /// The wall's glyph table (`--symbols`): `emoji` unless the terminal draws `▲ ▣ ⤢` two cells
     /// wide, which would slide the bar off the column a click maps to.
     var symbols: WallSymbols = .emoji
     /// Replace ScreenCaptureKit with a desktop drawn in process. No permission, runs forever.
     var mock = false
     var mockSize: (w: Int, h: Int)? = nil
+}
+
+/// `<stage>:<card>`, the wall's two scroll offsets in one flag (`--wall-at`).
+///
+/// Negative and non-numeric halves are refused rather than clamped: this flag is written by krd for
+/// krd, so a malformed one is a bug in the hand-over, not a reader's typo to be patched over. A
+/// missing value means "start where a fresh wall starts", which is the same as not passing it.
+func parseWallAt(_ spec: String) -> (stage: Int, card: Int)? {
+    let parts = spec.split(separator: ":")
+    guard parts.count == 2, let stage = Int(parts[0]), let card = Int(parts[1]),
+          stage >= 0, card >= 0 else { return nil }
+    return (stage, card)
 }
 
 func usage() -> String {
@@ -138,6 +159,11 @@ func usage() -> String {
       --mock-size WxH     size of the generated desktop (default 1920x1200)
       --list              list displays and windows, then exit
       -v, --version       print the version and exit
+
+    wall internals (written by krd for krd; a reader has no reason to type them):
+      --wall-at <s>:<c>   where the shelf and the stage are. A wall starts there; a mirror this
+                          pane was handed to returns there when it leaves
+      --said <exit> <txt> the footer sentence of a mirror that failed, carried back to the wall
 
     test modes (no screen access, no terminal needed):
       --selftest          paint a synthetic pattern through the tile pipeline
@@ -334,6 +360,17 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
         // The default since phase 4; kept because scripts and muscle memory spell it.
         case "--wall": options.wall = true
         case "--mirror": options.wall = false
+        case "--wall-at":
+            // `<stage>:<card>`. Parsed by the same function both times, so the wall that hands over
+            // and the wall that comes back cannot disagree about the spelling.
+            if let spec = args[safe: i + 1] { options.wallAt = parseWallAt(spec) }
+            i += 1
+        case "--said":
+            // `<exit>` then the child's sentence as its own token: the text has spaces in it.
+            if let code = Int32(args[safe: i + 1] ?? "") {
+                options.said = (code, args[safe: i + 2] ?? "")
+            }
+            i += 2
         case "--symbols":
             options.symbols = parseSymbolsSpec(args[safe: i + 1] ?? "")
             i += 1
@@ -410,6 +447,16 @@ final class Desk {
     /// dead window server cannot turn the retry loop into a hot loop.
     private var streamStopAttempts = 0
     private var streamStopTimer: DispatchSourceTimer?
+    /// Frames the *current* stream has delivered. A stream that stops before its first one names a
+    /// target the window server will not hand out at all, so it is a setup failure and not an
+    /// interruption worth retrying (see `recoverFromStoppedStream`).
+    private var framesSinceStreamStart = 0
+    /// What a failure said, kept so the wall this process returns to can repeat it. Nil for a clean
+    /// exit (`Ctrl-\`), which is not a failure and has nothing to explain.
+    private var failureSaid: String?
+    /// The process status this desk leaves with. Handing a wall's child a non-zero code is how the
+    /// wall learns to paint "the mirror stopped (exit N)" instead of a silent gap.
+    private var exitStatus: Int32 = 0
     /// Last `callbacks` count and when it last moved: a stream that stops delivering frames
     /// without calling `didStopWithError` is the failure this catches (issue #44).
     private var frameWatchdog: DispatchSourceTimer?
@@ -747,6 +794,7 @@ final class Desk {
         }
         capturer.onFrame = { [weak self] pixels, width, height in
             guard let self else { return }
+            self.framesSinceStreamStart += 1
             self.handleFrame(pixels: pixels, width: width, height: height)
         }
 
@@ -872,7 +920,17 @@ final class Desk {
         // race-free moment to read that. The first paint stays after it, so input is installed
         // before the wall appears.
         wallCanvas = WallCanvas(symbols: options.symbols)
-        wallState = WallState()
+        // A returning mirror brings the page the reader was on, and — when it failed — the sentence
+        // it failed with. Both arrive in argv because the process that knew them was replaced.
+        var state = WallState()
+        if let at = options.wallAt {
+            state.stageStart = at.stage
+            state.cardStart = at.card
+        }
+        wallState = state
+        if let said = options.said {
+            mirrorNotice = .mirrorStopped(exit: said.exit, message: said.text.isEmpty ? nil : said.text)
+        }
         wallMode = true
         startInput()
         refreshWall(force: true)
@@ -1056,90 +1114,103 @@ final class Desk {
         return false
     }
 
-    /// What a click on a picture does: hand the pane to a child `krd` that mirrors it, and take the
-    /// wall back when that child exits.
+    /// What a click on a picture does: *become* the mirror, and come back to the wall when it leaves.
     ///
-    /// Why a child process rather than a mode switch inside this one: the mirror is a different
-    /// machine - a capture target, a tile grid, a 20 fps loop that forwards every key and click to
-    /// the remote. Swapping it in would mean re-running `run()`'s setup halfway with a teardown path
-    /// in the middle, and the wall's reader would have to be kept from eating the mirror's input
-    /// anyway. A child gets the mirror exactly as `--window` builds it (the path that has shipped for
-    /// months, measured, debugged), and "back" costs nothing: when the child exits - the usual
-    /// `Ctrl-\` - the wall repaints.
+    /// `execv`, not spawn-and-wait. Two live processes of one executable cannot both be
+    /// ScreenCaptureKit clients: the newcomer's stream dies at once with `-3805` ("failed during
+    /// stream due to application connection being interrupted"). Measured on this machine, four ways:
+    /// the same child streams a window fine on its own, fails while a wall is running, fails while
+    /// that wall is `SIGSTOP`ped even before it paints, and succeeds again when the very same binary
+    /// is copied to another path and started there — so what collides is the executable's identity
+    /// with the window server, not CPU, not the capture rate, not the tty. Replacing the image leaves
+    /// exactly one client, and it is the one that paints.
+    ///
+    /// The cost is that nothing is left to wait for the mirror, so the mirror returns by `exec`ing
+    /// the wall again. That is why the wall's offsets and a failed mirror's sentence travel in argv
+    /// (`--wall-at`, `--said`): they are the state that has to survive a replaced process.
     private func enterFocus(_ focus: WallState.Focus) {
+        guard let state = wallState else { return }
+        let at = (stage: state.stageStart, card: state.cardStart)
         let arguments: [String]
         switch focus {
         case .display:
-            // The stage is a whole display: the child mirrors the display the pointer is on, which
-            // is the one the reader is looking at when they click it.
-            arguments = Self.mirrorArguments(windowID: nil, cell: options.cell)
+            // The stage is a whole display: the mirror shows the display the pointer is on, which is
+            // the one the reader is looking at when they click it.
+            arguments = Self.mirrorArguments(windowID: nil, cell: options.cell, at: at)
         case .window(let index):
             guard wallModel.windows.indices.contains(index) else { return }
             arguments = Self.mirrorArguments(windowID: wallModel.windows[index].windowID,
-                                             cell: options.cell)
+                                             cell: options.cell, at: at)
         }
-        // The wall stays behind as the parent, so its cursor state has no meaning while the child
-        // owns the pane: the frame this returns to is the plain grid, not one showing a pick.
+        // A handed-over pane has no cursor: the wall that comes back starts on the plain grid, not
+        // on a pick the reader made in a session that no longer exists.
         wallState?.focus = nil
-        mirrorInChild(arguments)
+        handOver(arguments)
     }
 
-    /// The child's command line. Pure, so the one thing that can be wrong about it (a flag that
-    /// silently means something else in the child) is a test and not a manual check.
+    /// The mirror's command line. Pure, so the one thing that can be wrong about it (a flag that
+    /// silently means something else in the mirror) is a test and not a manual check.
     ///
-    /// `--cell` is forwarded: a pty that reports no pixel size is exactly the case where the child
-    /// would otherwise assume the built-in cell and draw a picture of the wrong size.
-    static func mirrorArguments(windowID: CGWindowID?, cell: (w: Double, h: Double)?) -> [String] {
+    /// `--cell` is forwarded: a pty that reports no pixel size is exactly the case where the mirror
+    /// would otherwise assume the built-in cell and draw a picture of the wrong size. `--wall-at` is
+    /// where the wall was, i.e. where this process turns back into a wall.
+    static func mirrorArguments(windowID: CGWindowID?, cell: (w: Double, h: Double)?,
+                               at: (stage: Int, card: Int)?) -> [String] {
         var arguments = windowID.map { ["--window", String($0)] } ?? ["--mirror"]
         if let cell {
             arguments += ["--cell", "\(Int(cell.w))x\(Int(cell.h))"]
         }
+        if let at {
+            arguments += ["--wall-at", "\(at.stage):\(at.card)"]
+        }
         return arguments
     }
 
-    /// Run the child and wait for it. Blocking is right here: the wall has nothing else to do, its
-    /// timer is cancelled and its reader has handed the tty over.
-    private func mirrorInChild(_ arguments: [String]) {
+    /// The wall's command line, as a mirror spells it on its way back. Pure, and the exact inverse of
+    /// the parser — `wallArguments` then `parseArguments` has to be a round trip, or the reader
+    /// returns to a different shelf than the one they left.
+    static func wallArguments(at: (stage: Int, card: Int)?,
+                              exit: Int32 = 0, said: String? = nil) -> [String] {
+        var arguments = ["--wall"]
+        if let at {
+            arguments += ["--wall-at", "\(at.stage):\(at.card)"]
+        }
+        if exit != 0 {
+            arguments += ["--said", String(exit), said ?? ""]
+        }
+        return arguments
+    }
+
+    /// Hand the pane over: stop owning it, then replace this process with the mirror.
+    ///
+    /// `writer.clear()` is not cleanup, it is the picture: the wall's kitty placements belong to this
+    /// terminal and would stay on screen under the mirror's tiles. The alternate screen itself is
+    /// left *entered* — the mirror starts with `beginSession()` a moment later, and bouncing through
+    /// the main screen in between is a flash of the shell for no reason.
+    private func handOver(_ arguments: [String]) {
         guard !mirroring else { return }
         mirroring = true
-        defer { mirroring = false }
-
         wallTimer?.cancel()
         wallTimer = nil
         input?.stop()
         input = nil
-        // The wall's pictures are the terminal's, not the child's: drop them or they stay on screen
-        // under the mirror's tiles.
         writer.clear()
-
-        guard let child = Desk.spawnMirror(arguments) else {
-            Log.write("krd: could not start the mirror (krd: \(arguments.joined(separator: " ")))\n")
-            mirrorNotice = .mirrorStopped(exit: -1, message: "could not start krd")
-            resumeWall()
-            return
-        }
-        var status: Int32 = 0
-        _ = waitpid(child.pid, &status, 0)
-        let code = Desk.exitCode(of: status)
-        if code != 0 {
-            // The child's own sentence beats anything the parent can guess: it is the one that knows
-            // whether the window is gone, the grant is missing or the id was never valid.
-            let line = Desk.lastLine(of: child.errorPath)
-            Log.write("krd: the window mirror exited \(code)\(line.map { ": \($0)" } ?? "")\n")
-            mirrorNotice = .mirrorStopped(exit: code, message: line)
-            try? FileManager.default.removeItem(atPath: child.errorPath)
-        } else {
-            mirrorNotice = nil
-            try? FileManager.default.removeItem(atPath: child.errorPath)
-        }
+        // In the log and never on the pane: a report of "clicking that card does nothing" is
+        // answerable with what was asked for plus what the mirror said on its way back.
+        Log.write("krd: handing the pane to krd \(arguments.joined(separator: " "))\n")
+        Self.execSelf(arguments)
+        // Only on failure to exec (no image, no permission): the wall is the thing that can still be
+        // shown, so it comes back with the reason in its footer.
+        Log.write("krd: could not start the mirror (krd \(arguments.joined(separator: " ")))\n")
+        mirrorNotice = .mirrorStopped(exit: -1, message: "could not start krd")
+        mirroring = false
         resumeWall()
     }
 
-    /// Take the pane back and put the wall on it again.
+    /// Take the pane back and put the wall on it again (only reached when `exec` failed).
     private func resumeWall() {
         writer.beginSession()
         wallPaintedOnce = false
-        // Force, not "if it changed": the child left whatever it left, and the wall owns every cell.
         refreshWall(force: true)
         startInput()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -1149,68 +1220,17 @@ final class Desk {
         wallTimer = timer
     }
 
-    /// `posix_spawn` this binary with the child's arguments, inheriting the tty.
+    /// Replace this process with `krd <arguments>`. Returns only when the image could not be started.
     ///
-    /// `posix_spawn` rather than `fork`: krd has threads (the reader, the stats timers), and only
-    /// `fork`-then-`exec` in a threaded process is a subtle way to hang. The child inherits fds 0/1/2
-    /// by default, which is the whole point - it draws on the pane we are about to give up.
-    private static func spawnMirror(_ arguments: [String]) -> (pid: pid_t, errorPath: String)? {
-        guard let executable = Bundle.main.executablePath ?? CommandLine.arguments.first else {
-            return nil
-        }
-        // The child's stderr goes to a file: on the pane it would scroll the wall, and in the log it
-        // would be indistinguishable from the parent's. The file is read back when the child fails.
-        let errorPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krd-mirror-\(getpid())-\(Int(Date().timeIntervalSince1970)).log")
-            .path
+    /// `execv` on `Bundle.main.executablePath` rather than on `argv[0]`: the latter is what the shell
+    /// typed (`wall`, a relative path), and after a `chdir` or with a PATH-only name it need not
+    /// resolve at all.
+    static func execSelf(_ arguments: [String]) {
+        guard let executable = Bundle.main.executablePath ?? CommandLine.arguments.first else { return }
         var argv: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { strdup($0) }
         argv.append(nil)
         defer { for pointer in argv where pointer != nil { free(pointer) } }
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, errorPath,
-                                         O_WRONLY | O_CREAT | O_TRUNC, 0o644)
-        var pid: pid_t = 0
-        let status = posix_spawn(&pid, executable, &actions, nil, argv, environ)
-        return status == 0 ? (pid, errorPath) : nil
-    }
-
-    /// `waitpid`'s status, as the number a shell would report.
-    ///
-    /// The raw value is `exit << 8` (and a signal death is the signal in the low bits), which is how
-    /// "exit 256" for a plain `exit(1)` gets into a user-facing sentence: exact but unreadable.
-    static func exitCode(of status: Int32) -> Int32 {
-        let term = status & 0x7F
-        if term == 0 { return (status >> 8) & 0xFF }
-        return 128 + term
-    }
-
-    /// A child's stderr line, cut down to the part a reader can act on.
-    ///
-    /// krd's own failures are one clean sentence ("no window matched \"30\""); anything that came
-    /// from the frameworks arrives as `krd: Error Domain=… Code=… "NSLocalizedDescription=…"`, where
-    /// only the description survives contact with a footer. Fall back to the whole line when there is
-    /// nothing better to show - a truncated message is still a clue.
-    static func tidy(_ line: String) -> String {
-        var text = line
-        if let range = text.range(of: "NSLocalizedDescription=") {
-            text = String(text[range.upperBound...])
-        } else if text.hasPrefix("krd: ") {
-            text = String(text.dropFirst("krd: ".count))
-        }
-        text = text.trimmingCharacters(in: CharacterSet(charactersIn: " \"}\n\t"))
-        return text.isEmpty ? line : text
-    }
-
-    /// The last meaningful line of a child's stderr, cleaned for a one-line footer.
-    static func lastLine(of path: String) -> String? {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .last { !$0.isEmpty }
-        guard let line else { return nil }
-        return String(Desk.tidy(line).prefix(120))
+        execv(executable, argv)
     }
 
     // MARK: capture target
@@ -1463,6 +1483,9 @@ final class Desk {
         guard streamStopAttempts <= 5 else {
             frameWatchdog?.cancel()
             frameWatchdog = nil
+            // Never a frame at all: there is no last frame to keep, so "keeping" it means a blank
+            // pane that never comes back (and, under the wall, a wall stuck in `waitpid`).
+            guard framesSinceStreamStart > 0 else { failCapture(reason); return }
             warnRestartOnce("krd: \(reason) and 5 restarts did not help; "
                 + "the last frame stays on screen\n")
             return
@@ -1480,6 +1503,12 @@ final class Desk {
     /// attempts with 1, 2, 4, 8, 8 s are enough for a transient drop and bounded for a dead one.
     private func recoverFromStoppedStream(_ error: Error) {
         guard !cleanedUp else { return }
+        // A stream that dies before its first frame was never a stream: the filter names a window
+        // that closed or minimised away, a display that went to sleep, or Screen Recording was
+        // pulled. Every retry fails identically — five of them cost the reader 23 s of a frozen
+        // picture — and when this process is a wall's child the wall is blocked on `waitpid` for
+        // exactly that long with no way out but `Ctrl-\`. Say why and leave instead.
+        guard framesSinceStreamStart > 0 else { failCapture(Self.setupFailure(error)); return }
         streamStopAttempts += 1
         let attempt = streamStopAttempts
         guard attempt <= 5 else {
@@ -1507,6 +1536,37 @@ final class Desk {
         guard !restartFailureReported else { return }
         restartFailureReported = true
         Log.write(message)
+    }
+
+    /// A capture failure no retry can fix: say it where it can be read and leave with a non-zero
+    /// status.
+    ///
+    /// On stderr, because that is the channel whose reader knows what to do with it: the terminal
+    /// shows the sentence above the shell prompt after the session is torn down, and the wall (whose
+    /// child's stderr is a temp file) reads that file back and paints the line in its footer. The
+    /// log gets it too, so a `--log` run explains itself.
+    private func failCapture(_ message: String) {
+        Log.write("krd: \(message)\n")
+        FileHandle.standardError.write(Data("krd: \(message)\n".utf8))
+        failureSaid = message
+        exitStatus = 1
+        shutdown()
+    }
+
+    /// What a mirror that never showed a frame says before it exits, in the words of the same four
+    /// failure modes a wall's mask uses (`PanelCapture.classify`) — one vocabulary for both, so the
+    /// footer's sentence and a card's mask can never disagree about why.
+    static func setupFailure(_ error: Error) -> String {
+        switch PanelCapture.classify(error) {
+        case .windowGone:
+            return "the window closed before it could be shown"
+        case .denied:
+            return "Screen Recording is off for this terminal"
+        case .noPixelBuffer:
+            return "the capture produced no frames"
+        case .failed(let message):
+            return message
+        }
     }
 
     // MARK: replay
@@ -1916,6 +1976,9 @@ final class Desk {
         if captureRestarting { restartPending = true; pendingRestartReason = reason; return }
         captureRestarting = true
         restartStartedAt = Date()
+        // The budget and the frame count belong to one stream: a restart that does deliver frames
+        // must not be given up on because of the failures that came before it.
+        framesSinceStreamStart = 0
         let crop = cropForFilter()
         Task { [weak self] in
             guard let self else { return }
@@ -1925,6 +1988,16 @@ final class Desk {
                                               width: layout.pixelW, height: layout.pixelH,
                                               fps: self.options.fps)
             } catch {
+                // A restart that throws before any frame arrived is the setup failure again (the
+                // window is gone, the grant was pulled): one sentence beats a blank pane. Hopped to
+                // the main queue because `failCapture` tears the session down, and that is the
+                // queue every other teardown runs on.
+                guard self.framesSinceStreamStart > 0 else {
+                    let message = Desk.setupFailure(error)
+                    DispatchQueue.main.async { self.failCapture(message) }
+                    self.captureRestarting = false
+                    return
+                }
                 self.warnRestartOnce("krd: could not restart capture after \(reason): \(error); "
                     + "the last frame stays on screen\n")
             }
@@ -2535,18 +2608,31 @@ final class Desk {
         mock?.stop()
         mock = nil
         input?.restore()
+        // A mirror this pane was handed to becomes the wall again: `exec`, for the same reason the
+        // hand-over was an `exec` (one ScreenCaptureKit client per executable). No `endSession()`
+        // before it — the terminal stays on the alternate screen and the wall repaints into it, so
+        // the reader sees their shelf come back rather than a flash of the shell between two modes.
+        if let at = options.wallAt {
+            Self.execSelf(Self.wallArguments(at: at, exit: exitStatus, said: failureSaid))
+        }
         writer.endSession()
-        exit(0)
+        exit(exitStatus)
     }
 }
 
-enum DeskError: Error, CustomStringConvertible {
+enum DeskError: Error, LocalizedError, CustomStringConvertible {
     case message(String)
     var description: String {
         switch self {
         case .message(let text): return text
         }
     }
+
+    /// Our own sentence *is* the description. Without this, `localizedDescription` on a `DeskError`
+    /// is Foundation's "The operation couldn't be completed. (krd.DeskError error 0.)", and every
+    /// place that reports an error to the reader through `localizedDescription` (a restart's log
+    /// line, `PanelCapture.classify`'s last bucket) would lose the one thing that was said.
+    var errorDescription: String? { description }
 }
 
 // The headless face: `krd ax …` reads the accessibility tree and exits. It is dispatched
@@ -2572,6 +2658,11 @@ Task {
         try await desk.run()
     } catch {
         Log.write("krd: \(error)\n")
+        // A mirror that never started still owes the reader their wall back: same sentence, same
+        // footer, instead of an exit that leaves them looking at a terminal that is no longer krd's.
+        if let at = options.wallAt {
+            Desk.execSelf(Desk.wallArguments(at: at, exit: 1, said: "\(error)"))
+        }
         exit(1)
     }
 }

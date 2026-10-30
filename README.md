@@ -82,7 +82,8 @@ code — only the pixels are synthetic, so it needs no permission and never stop
 
 On the landing screen a click is the whole vocabulary: the right bar scrolls the stage and the shelf
 (one click = one page, the wheel = one item), and **clicking a picture opens that window's mirror** —
-krd hands the pane to a child `krd --window <id>` and takes the wall back when it exits (`Ctrl-\`).
+krd *becomes* `krd --window <id>` (it `exec`s itself, so there is never a second screen-capture client),
+and `Ctrl-\` inside that mirror brings the wall back on the page you left it on.
 
 Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a real machine.
 Flags, tuning knobs and the diagnostics switches: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and

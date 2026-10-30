@@ -375,7 +375,7 @@ which is why §7.6 exists.
 | `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand |
 | `--dev-panel` | `ChromeState.panel` set before the first layout, for screenshots and pty tests |
 | `--no-chrome` | forces the layer off, so `--dev` can live in a wrapper script |
-| `krd` (no flags) | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`: the landing screen, one display on stage and three recent windows below, as pictures. A click on one hands the pane to a child `krd --window <id>` (`Desk.mirrorInChild`, `posix_spawn`) and repaints the wall when it exits. `--mirror` selects the old whole-display path, `--window <q>` implies it |
+| `krd` (no flags) | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`: the landing screen, one display on stage and three recent windows below, as pictures. A click on one turns this process into `krd --window <id>` (`Desk.handOver`, `execv` — a second live process of one executable is not allowed to stream, see design §12 P3b) and `Ctrl-\` in that mirror `exec`s the wall back with its offsets in argv (`--wall-at`, `--said`). `--mirror` selects the old whole-display path, `--window <q>` implies it |
 | `--symbols <m>` | `WallSymbols`: `emoji` (default) or `ascii` glyphs for the wall |
 
 The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
