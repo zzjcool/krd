@@ -411,6 +411,10 @@ final class WallCanvasTests: XCTestCase {
     /// segment on the stage caption row and `╷` opens the card segment on the band header row, with
     /// `╷` above the display segment and `╵` under the cards. The band row used to draw nothing, so
     /// the two shafts read as one continuous bar down the pane.
+    ///
+    /// The lower cap closes the card *section*: it sits on the row under the lower segment, which is
+    /// the first card's caption row while a page is one row tall (both goldens) and the section's own
+    /// last row when the page has several (`testATwoRowPagePaintsBothRowsAndOneCaptionEach`).
     func testTheBarBreaksBetweenItsTwoSegments() {
         let model = model()
         for c in geometries {
@@ -422,12 +426,15 @@ final class WallCanvasTests: XCTestCase {
                 // The bar owns the last column, and every glyph in it is one cell wide, so the last
                 // character of a row is that row's bar cell (`lines` drops style; the goldens pin
                 // the `.dim` SGR).
+                XCTAssertEqual(layout.cardRowCount, 1, "\(c.cols)x\(c.rows): one row of cards here")
                 let caps: [(row: Int, glyph: String)] = [
                     (layout.headerRow, symbols.capTop),
                     (layout.stageCaption.row, symbols.capBottom),
                     (layout.bandRow, symbols.capTop),
                     (layout.cardCaptions[0].row, symbols.capBottom),
                 ]
+                XCTAssertEqual(layout.cardCaptions[0].row, layout.bar.cards.rect.maxRow + 1,
+                               "\(c.cols)x\(c.rows): the segment ends on the caption row")
                 for cap in caps {
                     XCTAssertEqual(lines[cap.row - 1].last, cap.glyph.first,
                                    "\(c.cols)x\(c.rows) \(symbols.rawValue): cell "
@@ -435,6 +442,87 @@ final class WallCanvasTests: XCTestCase {
                 }
             }
         }
+    }
+
+    // MARK: a band that holds more than one row of cards (issue #83)
+
+    /// The reporter's pane: 118x73, a 17x33 cell, a 16:10 display. The band holds two rows of three
+    /// previews, so a page is six windows and the state has to step by six - not by the row width.
+    func testAPageOfTwoRowsStepsBySix() {
+        let model = model()                                  // 7 windows, 3 displays
+        var state = fixtureState()
+        let layout = state.layout(cols: 118, rows: 73, displays: model.displays.count,
+                                  windows: model.windows.count,
+                                  stageAspect: 1.6, cellAspect: 33.0 / 17.0)
+        XCTAssertEqual(layout.per, 3, "the row width")
+        XCTAssertEqual(layout.cardRowCount, 2, "two rows of previews fit the band")
+        XCTAssertEqual(layout.capacity, 6, "so a page is six windows")
+        XCTAssertEqual(layout.cards.count, 6)
+        XCTAssertEqual(layout.bar.cards.visible, 6)
+        XCTAssertEqual(layout.bar.cards.maxStart, 1, "7 windows, 6 on a page")
+
+        // The bar's `▼` sends `.cardStep(capacity)`; the state accepts exactly that (clamped to the
+        // last page, which starts at `windowCount - capacity`).
+        XCTAssertEqual(layout.action(row: layout.bar.cards.rect.maxRow, col: layout.barCol),
+                       .cardStep(6))
+        XCTAssertEqual(layout.action(row: layout.bar.cards.rect.row, col: layout.barCol),
+                       .cardStep(-6))
+        state.apply(.cardStep(6), displays: model.displays.count, windows: model.windows.count,
+                    capacity: layout.capacity)
+        XCTAssertEqual(state.cardStart, 1, "a page forward lands on the last page")
+        state.apply(.cardStep(6), displays: model.displays.count, windows: model.windows.count,
+                    capacity: layout.capacity)
+        XCTAssertEqual(state.cardStart, 1, "and stays there")
+        state.apply(.cardStep(-6), displays: model.displays.count, windows: model.windows.count,
+                    capacity: layout.capacity)
+        XCTAssertEqual(state.cardStart, 0, "back to the landing page")
+    }
+
+    /// A page of two rows has to be painted as one: every card gets its box, every box its own
+    /// caption directly under it, the band header counts what the page holds (`1-6 / 7`) while still
+    /// printing the row width (`> 3`), and the bar's `╵` closes the section on its last row instead
+    /// of in the middle of it.
+    func testATwoRowPagePaintsBothRowsAndOneCaptionEach() {
+        let model = model()
+        let symbols = WallSymbols.ascii
+        let cols = 118, rows = 73
+        let state = fixtureState()
+        let layout = state.layout(cols: cols, rows: rows, displays: model.displays.count,
+                                  windows: model.windows.count,
+                                  stageAspect: 1.6, cellAspect: 33.0 / 17.0)
+        let lines = WallCanvas(symbols: symbols).lines(cols: cols, rows: rows, model: model,
+                                                      layout: layout, focus: nil)
+        XCTAssertEqual(layout.cards.count, 6)
+        XCTAssertEqual(layout.cardRowCount, 2)
+        for (i, card) in layout.cards.enumerated() {
+            XCTAssertEqual(cellAt(lines[card.row - 1], card.col), Character(symbols.boxTL),
+                           "card \(i): (row \(card.row), col \(card.col)) is not its top-left corner")
+            XCTAssertEqual(cellAt(lines[card.row - 1], card.maxCol), Character(symbols.boxTR),
+                           "card \(i): its top-right corner is not at its own last column")
+            XCTAssertEqual(cellAt(lines[card.maxRow - 1], card.col), Character(symbols.boxBL),
+                           "card \(i): its bottom border is not on its own last row")
+            // The caption sits on the row right under the picture, starting at its left column.
+            XCTAssertEqual(cellAt(lines[card.maxRow], card.col), Character(symbols.window),
+                           "card \(i): the caption is not directly under it")
+            XCTAssertTrue(lines[card.maxRow].contains("\(symbols.dash)"),
+                          "card \(i): the caption row is empty")
+        }
+        // Row two starts under row one's caption, not over it.
+        XCTAssertEqual(layout.cards[3].row, layout.cards[0].maxRow + 2)
+        // The band header: the row width on the right, what the page holds on the left.
+        XCTAssertTrue(lines[layout.bandRow - 1].contains("\(symbols.perButton) 3"),
+                      "the band header still prints the row width: \(lines[layout.bandRow - 1].debugDescription)")
+        XCTAssertTrue(lines[layout.bandRow - 1].contains("1-6 / 7"),
+                      "the range counts the page, not the row: \(lines[layout.bandRow - 1].debugDescription)")
+        // The bottom cap of the bar is on the section's last row (the row under the segment), which
+        // is two rows below the last caption - not on the first row's caption.
+        XCTAssertEqual(cellAt(lines[layout.bar.cards.rect.maxRow], layout.barCol),
+                       Character(symbols.capBottom),
+                       "the lower segment's cap is not at the bottom of the section")
+        XCTAssertGreaterThan(layout.bar.cards.rect.maxRow + 1, layout.cardCaptions[0].row,
+                             "and it is not on the first caption row")
+        XCTAssertEqual(layout.bar.cards.rect.maxRow + 1, layout.footerRow - 2,
+                       "the blank row and the footer are under the section")
     }
 
     /// The three lines are centred in the card's interior, because what phase 1 draws there is the
@@ -547,64 +635,64 @@ final class WallCanvasTests: XCTestCase {
 
     // MARK: the click state machine
 
-    /// `per:` is required, and it is `WallLayout.per` — the *effective* page size, i.e. exactly the
-    /// number the layout fits. In these three transitions the request and the effective page happen
-    /// to agree (3 is the default `WallState.per`, and the `.cardStep(3)` payloads below are the
-    /// same number), so `per: 3` is both; `testEveryWindowIsReachableOnANarrowPane` is the case
-    /// where they differ.
+    /// `capacity:` is required, and it is `WallLayout.capacity` — the page size, i.e. exactly the
+    /// number of cards the layout fits (`per` x the rows of them the band holds). In these
+    /// transitions the pages are one row tall, so `3` is both the row width and the page;
+    /// `testEveryWindowIsReachableOnANarrowPane` and `testAPageOfTwoRowsStepsBySix` are the cases
+    /// where the two differ.
     func testStateStepsClampAtBothEnds() {
         var state = fixtureState()
-        state.apply(.stageStep(-1), displays: 3, windows: 7, per: 3)
+        state.apply(.stageStep(-1), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.stageStart, 0, "a step back from the first display stops at 0")
-        state.apply(.stageStep(1), displays: 3, windows: 7, per: 3)
+        state.apply(.stageStep(1), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.stageStart, 1)
-        state.apply(.stageStep(5), displays: 3, windows: 7, per: 3)
+        state.apply(.stageStep(5), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.stageStart, 2, "the last display is displayCount - 1")
 
         XCTAssertEqual(state.cardStart, 0)
-        state.apply(.cardStep(-3), displays: 3, windows: 7, per: 3)
+        state.apply(.cardStep(-3), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.cardStart, 0, "a page back from the first page stops at 0")
-        state.apply(.cardStep(3), displays: 3, windows: 7, per: 3)
+        state.apply(.cardStep(3), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.cardStart, 3)
-        state.apply(.cardStep(3), displays: 3, windows: 7, per: 3)
+        state.apply(.cardStep(3), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.cardStart, 4, "one page past the end stops at windowCount - per")
-        state.apply(.cardStep(3), displays: 3, windows: 7, per: 3)
+        state.apply(.cardStep(3), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.cardStart, 4, "and stays there")
         // Fewer windows than one page: there is nothing to scroll in either direction.
-        state.apply(.cardStep(-3), displays: 3, windows: 2, per: 3)
+        state.apply(.cardStep(-3), displays: 3, windows: 2, capacity: 3)
         XCTAssertEqual(state.cardStart, 0)
-        state.apply(.cardStep(3), displays: 3, windows: 2, per: 3)
+        state.apply(.cardStep(3), displays: 3, windows: 2, capacity: 3)
         XCTAssertEqual(state.cardStart, 0)
     }
 
     func testStateJumpsSetTheStart() {
         var state = fixtureState()
-        state.apply(.stageJump(2), displays: 3, windows: 7, per: 3)
+        state.apply(.stageJump(2), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.stageStart, 2)
-        state.apply(.cardJump(4), displays: 3, windows: 7, per: 3)
+        state.apply(.cardJump(4), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.cardStart, 4)
         // A jump carries a proportion computed from the bar, so it is clamped, never trusted.
-        state.apply(.stageJump(99), displays: 3, windows: 7, per: 3)
+        state.apply(.stageJump(99), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.stageStart, 2)
-        state.apply(.cardJump(-5), displays: 3, windows: 7, per: 3)
+        state.apply(.cardJump(-5), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.cardStart, 0)
     }
 
     func testStateEnterSetsFocusAndBackClearsIt() {
         var state = fixtureState()
-        state.apply(.enterStage(2), displays: 3, windows: 7, per: 3)
+        state.apply(.enterStage(2), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.focus, WallState.Focus.display(2))
         XCTAssertEqual(state.stageStart, 2, "entering a display also brings it on stage")
-        state.apply(.enterCard(5), displays: 3, windows: 7, per: 3)
+        state.apply(.enterCard(5), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.focus, WallState.Focus.window(5))
         XCTAssertEqual(state.cardStart, 0, "entering a card must not move the shelf")
-        state.apply(.back, displays: 3, windows: 7, per: 3)
+        state.apply(.back, displays: 3, windows: 7, capacity: 3)
         XCTAssertNil(state.focus)
         XCTAssertEqual(state.cardStart, 0)
         // The payloads are indices into the whole list, and they are clamped to the model.
-        state.apply(.enterCard(99), displays: 3, windows: 7, per: 3)
+        state.apply(.enterCard(99), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.focus, WallState.Focus.window(6))
-        state.apply(.enterStage(99), displays: 3, windows: 7, per: 3)
+        state.apply(.enterStage(99), displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.focus, WallState.Focus.display(2))
         XCTAssertEqual(state.stageStart, 2)
     }
@@ -614,11 +702,11 @@ final class WallCanvasTests: XCTestCase {
         state.stageStart = 2
         state.cardStart = 4
         // A monitor unplugged and the windows closed while the wall was showing page two.
-        state.clamp(displays: 1, windows: 2, per: 3)
+        state.clamp(displays: 1, windows: 2, capacity: 3)
         XCTAssertEqual(state.stageStart, 0)
         XCTAssertEqual(state.cardStart, 0)
         // The rack grew again: the clamp never invents an offset past the end.
-        state.clamp(displays: 3, windows: 7, per: 3)
+        state.clamp(displays: 3, windows: 7, capacity: 3)
         XCTAssertEqual(state.stageStart, 0)
         XCTAssertEqual(state.cardStart, 0)
     }
@@ -652,21 +740,22 @@ final class WallCanvasTests: XCTestCase {
         for cols in 12...60 {
             var state = fixtureState()              // cardStart = 0: the landing page
             let layout = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
-            // `.cardStep(per)` is what the bar's `▼` sends (design §5: one page is one step).
+            // `.cardStep(capacity)` is what the bar's `▼` sends (design §5: one page is one step).
             for _ in 0..<64 {                        // the guard only keeps a broken clamp from spinning
                 let before = state.cardStart
-                state.apply(.cardStep(layout.per), displays: displays, windows: windows,
-                            per: layout.per)
+                state.apply(.cardStep(layout.capacity), displays: displays, windows: windows,
+                            capacity: layout.capacity)
                 if state.cardStart == before { break }
             }
             let lastPage = layout.bar.cards.maxStart
             XCTAssertEqual(state.cardStart, lastPage,
                            "\(cols)x\(rows): the shelf stops at \(state.cardStart), the layout's last "
-                           + "page is \(lastPage) (per \(layout.per) of \(windows))")
-            XCTAssertGreaterThan(state.cardStart + layout.per, windows - 1,
+                           + "page is \(lastPage) (capacity \(layout.capacity) of \(windows))")
+            XCTAssertGreaterThan(state.cardStart + layout.capacity, windows - 1,
                                  "\(cols)x\(rows): window \(windows) is not on the final page")
             var jumped = fixtureState()
-            jumped.apply(.cardJump(lastPage), displays: displays, windows: windows, per: layout.per)
+            jumped.apply(.cardJump(lastPage), displays: displays, windows: windows,
+                         capacity: layout.capacity)
             XCTAssertEqual(jumped.cardStart, state.cardStart,
                            "\(cols)x\(rows): a jump to the layout's maxStart must land there")
             // And through the real click route, shaft cell by shaft cell: what the layout's own hit
@@ -676,7 +765,8 @@ final class WallCanvasTests: XCTestCase {
             for row in (segment.rect.row + 1)..<segment.rect.maxRow {
                 guard let action = layout.action(row: row, col: layout.barCol) else { continue }
                 var clicked = fixtureState()
-                clicked.apply(action, displays: displays, windows: windows, per: layout.per)
+                clicked.apply(action, displays: displays, windows: windows,
+                              capacity: layout.capacity)
                 XCTAssertEqual(clicked.cardStart,
                                segment.jumpTarget(shaftOffset: row - segment.rect.row - 1),
                                "\(cols)x\(rows): shaft cell \(row) jumps where the state refuses to go")
@@ -727,6 +817,19 @@ final class WallCanvasTests: XCTestCase {
     /// keeps, i.e. exactly `rect.cols - 4` characters. The callers only ask this about card 0, which
     /// starts at column 1, so no wide glyph to its left can shift the character indexing (inside the
     /// frame there is either one block of text or nothing).
+    /// The cell at `col` of a `lines` row. Not `Array(line)[col - 1]`: a CJK title makes a Character
+    /// index shorter than the cell it sits at, and caption rows carry titles.
+    private func cellAt(_ line: String, _ col: Int) -> Character? {
+        var at = 1
+        for ch in line {
+            let width = DisplayWidth.of(ch)
+            if at == col { return ch }
+            at += width
+            if at > col { return " " }              // the second half of a wide glyph
+        }
+        return nil
+    }
+
     private func cardInterior(_ lines: [String], row: Int, _ rect: CellRect) -> String {
         let chars = Array(lines[row - 1])
         let lo = rect.col + 1, hi = rect.maxCol - 3

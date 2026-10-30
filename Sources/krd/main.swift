@@ -1270,12 +1270,12 @@ final class Desk {
         wallPane = pane
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
         // offsets still point past the end; clamping here is what keeps the shelf from going blank.
-        // The clamp takes the layout's *effective* page size: below 28 columns `WallLayout.make`
-        // shows fewer cards per page than `state.per` asks for, and clamping against the request
-        // would leave the last page unreachable (the bar jumps to the layout's `maxStart`, the clamp
-        // pulls it back). The layout is built from the state as it is now, then the state is
-        // clamped, then `drawWall()` builds it again — two pure calls on one number, no third
-        // definition of "how many cards fit".
+        // The clamp takes the layout's *effective page size*: below 28 columns `WallLayout.make`
+        // shows fewer cards per row than `state.per` asks for, and a tall band holds more than one
+        // row of them, so clamping against the request would leave the last page unreachable (the
+        // bar jumps to the layout's `maxStart`, the clamp pulls it back). The layout is built from
+        // the state as it is now, then the state is clamped, then `drawWall()` builds it again —
+        // two pure calls on one number, no third definition of "how many cards fit".
         if let state = wallState {
             let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                       displays: model.displays.count,
@@ -1283,7 +1283,7 @@ final class Desk {
                                       stageAspect: stageAspect(model, state),
                                       cellAspect: pane.cellAspect)
             wallState?.clamp(displays: model.displays.count, windows: model.windows.count,
-                             per: layout.per)
+                             capacity: layout.capacity)
         }
         drawWall()
     }
@@ -3321,7 +3321,7 @@ final class Desk {
         let action = wheel == 0 ? layout.action(row: row, col: col)
                                 : layout.wheelAction(row: row, col: col, direction: wheel)
         guard let action else { return }
-        state.apply(action, displays: displays, windows: windows, per: layout.per)
+        state.apply(action, displays: displays, windows: windows, capacity: layout.capacity)
         wallState = state
         switch action {
         case .enterStage(let index): enterFocus(.display(index))

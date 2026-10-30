@@ -194,6 +194,9 @@ enum WallInput {
 /// payloads are indices into the *whole* list, never page slots — `WallLayout.action` resolves the
 /// page arithmetic, so nothing downstream has to repeat it.
 struct WallState: Equatable {
+    /// Cards **per row** — the reader's number, the one the band header prints (`⤢ 3`). One page is
+    /// `per x cardRowCount` cards; the layout decides the rows, because the band's height is the
+    /// pane's business and not a setting.
     var per: Int = 3
     var stageStart: Int = 0
     var cardStart: Int = 0
@@ -224,28 +227,29 @@ struct WallState: Equatable {
     /// unplugged, a window closed). Called before every draw the model refresh triggers, so a
     /// stale `cardStart` cannot leave the shelf empty while six windows exist.
     ///
-    /// `per` is the **effective** page size — `WallLayout.per`, i.e. what the layout actually put on
-    /// one page — not the state's requested `per`. Below 28 columns the layout shrinks its page to
-    /// keep a card readable, and clamping against the request would then compute a wider page than
-    /// the one on screen: `maxStart` would be smaller here than in the layout, so the last window
-    /// (or the last two) could not be reached by any click — the bar's shaft cell jumps to the
-    /// layout's `maxStart`, this clamp drags it back, and nothing moves. `max(1, per)` also keeps a
-    /// hostile `per: 0` from producing a negative range.
-    mutating func clamp(displays: Int, windows: Int, per: Int) {
+    /// `capacity` is the **page size** — `WallLayout.capacity`, i.e. how many cards the layout
+    /// actually put on one page — not the state's requested `per`, which is a row width now.
+    /// Below 28 columns the layout shrinks its page to keep a card readable, and a tall band shows
+    /// two or three rows of them, so clamping against `per` would compute a wider page than the one
+    /// on screen: `maxStart` would be smaller here than in the layout, so the last window (or the
+    /// last five) could not be reached by any click — the bar's shaft cell jumps to the layout's
+    /// `maxStart`, this clamp drags it back, and nothing moves. `max(1, capacity)` also keeps a
+    /// hostile `capacity: 0` from producing a negative range.
+    mutating func clamp(displays: Int, windows: Int, capacity: Int) {
         stageStart = Self.clamp(stageStart, 0, max(0, displays - 1))
-        cardStart = Self.clamp(cardStart, 0, max(0, windows - max(1, per)))
+        cardStart = Self.clamp(cardStart, 0, max(0, windows - max(1, capacity)))
     }
 
     /// The click policy. Every payload is clamped again here even though `WallLayout` already
     /// clamped it: the state outlives the layout, and a pane resize between the click and the
     /// application must not be able to point the focus outside the model.
     ///
-    /// `per` is `WallLayout.per` (the effective page size), for the reason spelled out on `clamp`:
-    /// the last page is `windows - per`, and "per" here and "per" in the layout have to be the same
-    /// number or the two disagree about how many cards fit.
-    mutating func apply(_ action: WallAction, displays: Int, windows: Int, per: Int) {
+    /// `capacity` is `WallLayout.capacity` (the page size), for the reason spelled out on `clamp`:
+    /// the last page is `windows - capacity`, and "capacity" here and in the layout have to be the
+    /// same number or the two disagree about how many cards fit.
+    mutating func apply(_ action: WallAction, displays: Int, windows: Int, capacity: Int) {
         let lastDisplay = max(0, displays - 1)
-        let lastPage = max(0, windows - max(1, per))
+        let lastPage = max(0, windows - max(1, capacity))
         switch action {
         case .enterStage(let i):
             // Entering a display also brings it on stage: the footer's "back" then returns to a
@@ -548,6 +552,8 @@ final class WallCanvas {
 
     private func drawBand(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
         let content = min(layout.contentCols, grid.cols)
+        // `⤢ per` is the row width - the reader's number - while the range below it is what the
+        // page actually holds (`capacity`), so a tall band shows `1–6 / 7` under a `⤢ 3`.
         let budget = drawTail(&grid, row: layout.bandRow, content: content,
                               "\(symbols.perButton) \(layout.per)", .dim)
         let range: String
@@ -555,7 +561,7 @@ final class WallCanvas {
             range = "no windows"
         } else {
             let first = layout.cardStart + 1
-            let last = min(layout.cardStart + layout.per, layout.windowCount)
+            let last = min(layout.cardStart + layout.capacity, layout.windowCount)
             range = "\(first)\(symbols.enDash)\(last) / \(layout.windowCount)"
         }
         let used = grid.text("\(symbols.window) recent", row: layout.bandRow, col: 1, .plain,
@@ -693,7 +699,7 @@ final class WallCanvas {
     ///
     /// The caps are the four positions the design asks for: above the display segment (header row),
     /// below it (stage caption row), above the card segment (band header row) and below that one
-    /// (card caption row; no card band → nothing there, the grid never writes row 0).
+    /// (the card section's last row; no card band → nothing there, the grid never writes row 0).
     ///
     /// The band-row cap is what makes the two segments *two*: §6 breaks them with `╵` / `╷`, and
     /// with only the stage's bottom cap the shafts would read as one bar running from the header to
@@ -703,8 +709,12 @@ final class WallCanvas {
         grid.set(row: layout.headerRow, col: col, glyph(symbols.capTop), .dim)
         grid.set(row: layout.stageCaption.row, col: col, glyph(symbols.capBottom), .dim)
         grid.set(row: layout.bandRow, col: col, glyph(symbols.capTop), .dim)
-        if let first = layout.cardCaptions.first {
-            grid.set(row: first.row, col: col, glyph(symbols.capBottom), .dim)
+        // The bottom cap closes the card *section*, not the first row of cards: with two or three
+        // rows of them the caption the bar ends beside is the last row's, and the section's own last
+        // row is the one under the segment (`cardCaptions.first` was that row while a page was one
+        // row tall).
+        if !layout.bar.cards.rect.isEmpty {
+            grid.set(row: layout.bar.cards.rect.maxRow + 1, col: col, glyph(symbols.capBottom), .dim)
         }
         drawSegment(&grid, layout.bar.stage, barCol: col)
         drawSegment(&grid, layout.bar.cards, barCol: col)
