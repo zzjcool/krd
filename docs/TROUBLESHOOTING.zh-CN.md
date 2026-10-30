@@ -281,8 +281,12 @@ Alt-`G`，后面全变成文字。
 在**同一个面板**里跑，所以镜像放下的每一块瓦片都还在终端的图库��。墙的会话只清了**字符**
 （`beginSession` 里的 `ESC[2J`），没清图，于是墙的标题、卡片、说明全画在一张过期镜像画面**下面**——
 看起来就像"分辨率变了"或者"墙没填满"，取决于那个镜像当时在显示什么。
-**解决。** 现在两边都会在开场先删掉面板里所有图（`ScreenWriter.clear()`，即 `ESC_Ga=d,d=a`）：
-`runWall`、`resumeWall`、镜像的实时会话、以及墙的交接。`WallProcessTests.testTheWallDropsWhateverImagesThePaneHeld` 钉住墙这一半。
+**解决。** 一共三处，因为只做一个不够：两边都会在开场先删掉面板里所有图（`ScreenWriter.clear()`，即
+`ESC_Ga=d,d=a`）——`runWall`、`resumeWall`、镜像的实时会话、以及墙的交接；并且镜像在回墙之前**先离开
+备用屏**再 `exec`，让墙新建一块屏，而不是继承瓦片当初所在的那块。有些终端会把图挂在屏上，删除命令
+应答之后照样继续画（Rex 会，Ghostty 不会），这就是只删图时画面还在的原因。
+`WallProcessTests.testTheWallDropsWhateverImagesThePaneHeld` 钉住删除，
+`testAReturningMirrorLeavesTheAlternateScreenBeforeTheWallTakesIt` 钉住顺序。
 
 ### 23c. 用上墙之后，所有东西都报 `-3805`
 

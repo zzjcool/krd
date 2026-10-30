@@ -315,9 +315,13 @@ every tile the mirror placed is still in the terminal's image store. The wall's 
 *characters* (`ESC[2J` in `beginSession`) and nothing else, so its header, cards and captions were
 painted underneath a stale mirror picture - which reads as "the resolution changed" or "the wall is
 not filling its pane", depending on what the mirror happened to be showing.
-**Fix.** Both sides now start by deleting every image in the pane (`ScreenWriter.clear()`, i.e.
-`ESC_Ga=d,d=a`): `runWall`, `resumeWall`, the live mirror session and the wall's hand-over; `WallProcessTests.testTheWallDropsWhateverImagesThePaneHeld`
-pins the wall's half.
+**Fix.** Three things, because one was not enough: both sides start by deleting every image in the pane
+(`ScreenWriter.clear()`, i.e. `ESC_Ga=d,d=a`) - `runWall`, `resumeWall`, the live mirror session and the
+wall's hand-over; and a mirror on its way back **leaves the alternate screen** before the `exec`, so the
+wall builds a new screen instead of inheriting the one the tiles were placed on. Some terminals keep
+images keyed to a screen and go on drawing them after the delete has been answered (Rex did; Ghostty did
+not), which is why the delete alone left the picture in place. `WallProcessTests.testTheWallDropsWhateverImagesThePaneHeld`
+pins the delete, `testAReturningMirrorLeavesTheAlternateScreenBeforeTheWallTakesIt` pins the ordering.
 
 ### 23c. `-3805` on everything, once the wall has been used
 

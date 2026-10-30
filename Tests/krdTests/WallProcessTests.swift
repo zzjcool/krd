@@ -151,14 +151,95 @@ final class WallProcessTests: XCTestCase {
                           + "may still be on the main screen when the delete arrives")
     }
 
+    /// A mirror on its way back must *leave* the alternate screen before the wall takes it.
+    ///
+    /// WHY: the mirror's tiles are kitty placements inside the alternate screen it drew in. A
+    /// terminal may keep pictures keyed to that screen and keep painting them after the wall's
+    /// `a=d,d=a` has been answered — measured in Rex: after `[ - ]` the shelf painted correctly and
+    /// the mirror's last picture still floated on top of the cards, for good. Leaving the alternate
+    /// screen (which the returning mirror can do, since the exec happens after it) tears down the
+    /// screen the pictures were attached to; the wall's `beginSession()` then builds a new one. The
+    /// test watches the bytes, because that is the only place the ordering exists.
+    func testAReturningMirrorLeavesTheAlternateScreenBeforeTheWallTakesIt() throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        // A mirror that knows where it came from: the `[ - ]` button and `Ctrl-\` both end here.
+        // `--cell` because a pty reports no pixel size, and the query path would spend the test's
+        // first seconds waiting for a reply that never comes.
+        child.arguments = ["--mirror", "--wall-at", "0:0", "--pane", "60x24", "--cell", "8x20"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+
+        // The mirror owns the alternate screen before the return can be tested. Screen Recording may
+        // be denied inside a test bundle; that path exits as a mirror too (`--said`), so the shape
+        // this test is about does not depend on a frame ever arriving.
+        guard pump(master, into: &stream, timeoutMs: 5_000, until: { bytes in
+            bytes.firstRange(of: Array("\u{1B}[?1049h".utf8)) != nil
+        }) else {
+            XCTFail("the mirror never entered the alternate screen (\(stream.count) B)")
+            return
+        }
+        writeAll(master, [0x1C])
+        let enter = Array("\u{1B}[?1049h".utf8)
+        let clear = Array("\u{1B}_Ga=d,d=a\u{1B}\\".utf8)
+        // Wait for the *whole* return: the wall's fresh screen, the image delete, and text on it.
+        // Breaking on the screen switch alone would read the bytes before the wall wrote them.
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+            guard let back = stream.lastRange(of: enter), let left = stream.lastRange(of: Array("\u{1B}[?1049l".utf8)),
+                  left.lowerBound < back.lowerBound else { continue }
+            let since = stream[back.lowerBound...]
+            if since.firstRange(of: clear) != nil,
+               String(decoding: since, as: UTF8.self).contains(" windows") { break }
+        }
+        if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+
+        let leave = Array("\u{1B}[?1049l".utf8)
+        guard let left = stream.lastRange(of: leave),
+              let back = stream.lastRange(of: enter), left.lowerBound < back.lowerBound else {
+            XCTFail("the mirror never left the alternate screen before the wall re-entered it")
+            return
+        }
+        guard let cleared = stream[back.lowerBound...].firstRange(of: clear) else {
+            XCTFail("the returning wall did not delete the pane's images")
+            return
+        }
+        XCTAssertLessThan(back.lowerBound, cleared.lowerBound)
+        // The wall's own screen must not carry the mirror's frames: the tiles belong before the
+        // leave, and the panels after it are the wall's (ids 5000+/9000+, never the mirror's).
+    }
+
     // MARK: pty plumbing
 
     /// A pty with a real window size, already raw on our side: the child sets its own termios when
     /// input starts, but the pty must not echo or cook what the test writes before/after that.
+    ///
+    /// The pixel size is real (`8x20` per cell) and not zero: a zero one sends krd down the
+    /// `CSI 16t` query path, where it waits for a reply this harness will never write, and every
+    /// test that starts a session would spend its first seconds there.
     private func openPTY(cols: Int, rows: Int) throws -> (master: Int32, slave: Int32) {
         var master: Int32 = 0
         var slave: Int32 = 0
-        var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+        var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols),
+                           ws_xpixel: UInt16(cols * 8), ws_ypixel: UInt16(rows * 20))
         guard openpty(&master, &slave, nil, nil, &size) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno),
                           userInfo: [NSLocalizedDescriptionKey: "openpty failed"])

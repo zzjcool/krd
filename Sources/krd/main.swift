@@ -1268,7 +1268,9 @@ final class Desk {
     /// `writer.clear()` is not cleanup, it is the picture: the wall's kitty placements belong to this
     /// terminal and would stay on screen under the mirror's tiles. The alternate screen itself is
     /// left *entered* — the mirror starts with `beginSession()` a moment later, and bouncing through
-    /// the main screen in between is a flash of the shell for no reason.
+    /// the main screen in between is a flash of the shell for no reason. The way *back* does leave it
+    /// (`shutdown`): a terminal that keeps pictures keyed to a screen has to lose that screen, and the
+    /// direction that was measured to need it is the return (TROUBLESHOOTING 23d).
     private func handOver(_ arguments: [String]) {
         guard !mirroring else { return }
         mirroring = true
@@ -2718,10 +2720,17 @@ final class Desk {
         mock = nil
         input?.restore()
         // A mirror this pane was handed to becomes the wall again: `exec`, for the same reason the
-        // hand-over was an `exec` (one ScreenCaptureKit client per executable). No `endSession()`
-        // before it — the terminal stays on the alternate screen and the wall repaints into it, so
-        // the reader sees their shelf come back rather than a flash of the shell between two modes.
+        // hand-over was an `exec` (one ScreenCaptureKit client per executable).
+        //
+        // `endSession()` still runs first, and that is the fix for a measured bug, not politeness:
+        // the mirror's tiles are kitty placements in *this* alternate screen, and a terminal may key
+        // them to that screen and keep showing them after the wall's `a=d,d=a` has been answered
+        // (Rex did: the shelf painted, the mirror's last picture floated on top of the cards for
+        // good). Leaving the alternate screen before the exec tears down the screen the pictures
+        // were attached to; the wall builds a new one. The price is one frame of the shell between
+        // the two modes — the alternative was a picture no delete could remove.
         if let at = options.wallAt {
+            writer.endSession()
             Self.execSelf(Self.wallArguments(at: at, exit: exitStatus, said: failureSaid))
         }
         writer.endSession()

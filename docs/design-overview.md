@@ -372,10 +372,13 @@ Restart-path facts already hit once (do not relearn them):
   replaced process — and the wall a reader returns to shows the reason in its footer instead of a silent
   gap. A stream that dies *before its first frame* exits at once with that sentence (it names a target that
   will never open) rather than spending five retries behind a frozen pane.
-  A kitty placement also outlives the process that made it, and the two modes share one pane without
-  ever leaving the alternate screen, so **every session starts by deleting every image in it**
-  (`ScreenWriter.clear()`): the mirror's last picture would otherwise sit on top of the wall's cards,
-  which the reader reports as "the resolution changed" (TROUBLESHOOTING 23d).
+  A kitty placement also outlives the process that made it, so **every session starts by deleting every
+  image in it** (`ScreenWriter.clear()`) - and a mirror on its way back *leaves* the alternate screen before
+  the exec, because a terminal may keep pictures keyed to the screen they were placed on and go on drawing
+  them after the delete has been answered (measured in Rex; Ghostty does not). Leaving costs one frame of
+  the shell between the two modes and is the only thing that was observed to work: the wall then builds a
+  fresh screen. Without this the mirror's last picture sat on top of the wall's cards, which the reader
+  reports as "the resolution changed" (TROUBLESHOOTING 23d).
 - **P4 done (2026-10-30)**: plain `krd` opens the wall. `--mirror` (or `--window <query>`, which asks for one
   window and so cannot mean the wall) takes the old default back; `wall` stays a symlink and `--wall` still
   parses, because scripts spell it. `--list`, `--selftest`, `--bench`, `--mock` keep their own paths - they are
