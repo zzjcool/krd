@@ -237,18 +237,19 @@ def png_grey(grey, w, h):
 
 
 def pack_bits(indices, bits):
+    """Gather `8//bits` index bytes into one output byte without a Python loop over pixels.
+
+    Each lane is one pixel position within a group; shifting a lane by its bit offset and OR-ing
+    the big integers combines them byte by byte, because OR cannot carry between bytes.
+    """
     per = 8 // bits
-    out = bytearray((len(indices) + per - 1) // per)
-    acc = n = 0
-    for i, v in enumerate(indices):
-        acc = (acc << bits) | v
-        n += 1
-        if n == per:
-            out[i // per] = acc
-            acc = n = 0
-    if n:
-        out[len(indices) // per] = acc << (bits * (per - n))
-    return bytes(out)
+    n = (len(indices) + per - 1) // per
+    # every lane pads to n bytes: a short lane would shift every later group by one byte
+    lanes = [indices[k::per] + bytes(n - len(indices[k::per])) for k in range(per)]
+    acc = 0
+    for k, lane in enumerate(lanes):
+        acc |= int.from_bytes(lane, 'big') << (bits * (per - 1 - k))
+    return acc.to_bytes(n, 'big')
 
 
 def png_palette(grey, w, h, bits):
