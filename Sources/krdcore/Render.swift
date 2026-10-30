@@ -288,11 +288,43 @@ public final class ScreenWriter {
         framesEmitted += 1
         lastCompressedTiles += 1
 
-        // Two `now` calls per tile, and only when a benchmark asked for the split: the live
-        // path pays one nil check per tile, nothing else.
+        emitImage(id: iid, placementID: pid, row: r.row, col: r.col, cols: r.cols, rows: r.rows,
+                  width: r.w, height: r.h, payload: tile.payload, sync: sync, timing: timing)
+    }
+
+    /// One picture at one rect: the wall's panel.
+    ///
+    /// Same wire shape as a tile (`a=t` in 4096-char chunks, then `a=p` at the cursor), but the
+    /// ids, the cell rect and the pixel size all come from the caller - the wall places several
+    /// pictures at arbitrary rects, which `TileGrid.rect` cannot express (its origin is 1,1 and its
+    /// id is the tile index). Returns the payload size, which is what went over the wire.
+    @discardableResult
+    public func emitPanel(id: Int, placementID: Int, row: Int, col: Int, cols: Int, rows: Int,
+                          pixels: [UInt8], width: Int, height: Int, level: Int,
+                          sync: Bool = true) -> Int {
+        guard width > 0, height > 0, cols > 0, rows > 0,
+              let payload = zlibCompress(pixels, level: level), !payload.isEmpty else { return 0 }
+        lastFrameBytes += payload.count
+        totalBytes += payload.count
+        framesEmitted += 1
+        lastCompressedTiles += 1
+        emitImage(id: id, placementID: placementID, row: row, col: col, cols: cols, rows: rows,
+                  width: width, height: height, payload: payload, sync: sync, timing: nil)
+        return payload.count
+    }
+
+    /// The escapes both a tile and a panel need. Kept in one place so a terminal that draws tiles
+    /// draws panels: any difference between the two would show up as "the mirror works, the wall
+    /// does not", which is the hardest kind of bug to read.
+    private func emitImage(id iid: Int, placementID pid: Int, row: Int, col: Int,
+                           cols: Int, rows: Int, width: Int, height: Int,
+                           payload: [UInt8], sync: Bool,
+                           timing: UnsafeMutablePointer<EmitTiming>?) {
+        // Two `now` calls per picture, and only when a benchmark asked for the split: the live
+        // path pays one nil check per picture, nothing else.
         var mark = 0.0
         if timing != nil { mark = benchNowMs() }
-        let b64 = Data(tile.payload).base64EncodedString()
+        let b64 = Data(payload).base64EncodedString()
         let chars = Array(b64.utf8)
         if let timing {
             let now = benchNowMs()
@@ -301,10 +333,10 @@ public final class ScreenWriter {
         }
 
         if sync { append("\u{1B}[?2026h") }
-        append("\u{1B}[\(r.row);\(r.col)H")
+        append("\u{1B}[\(row);\(col)H")
         var i = 0
         var first = true
-        let control = "Gf=\(format.protocolChannels),s=\(r.w),v=\(r.h),a=t,o=z,q=\(quiet),i=\(iid)"
+        let control = "Gf=\(format.protocolChannels),s=\(width),v=\(height),a=t,o=z,q=\(quiet),i=\(iid)"
         while i < chars.count {
             let end = min(i + 4096, chars.count)
             let more = end == chars.count ? 0 : 1
@@ -315,7 +347,7 @@ public final class ScreenWriter {
             i = end
             first = false
         }
-        append("\u{1B}_Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(r.cols),r=\(r.rows)\u{1B}\\")
+        append("\u{1B}_Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)\u{1B}\\")
         if sync { append("\u{1B}[?2026l") }
         if let timing { timing.pointee.assembleMs += benchNowMs() - mark }
     }

@@ -49,18 +49,23 @@ enum WallSource {
     /// what a mirror would be described in — pixels would only say how dense the panel is).
     static func displays() -> [WallDisplay] {
         let screens = NSScreen.screens
-        let entries = screens.map { screen -> (name: String, minX: Double, main: Bool) in
-            let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
-                .map { CGDirectDisplayID($0.uint32Value) }
-            return (name: screen.localizedName,
-                    minX: screen.frame.minX,
-                    main: id.map { CGDisplayIsMain($0) != 0 } ?? false)
+        // Kept beside `entries` rather than inside it: the ordering policy takes the plain tuple,
+        // and its test drives it with hand-written values that have no display id to give.
+        let ids = screens.map { screen -> UInt32 in
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+                .map { CGDirectDisplayID($0.uint32Value) } ?? 0
+        }
+        let entries = screens.enumerated().map { index, screen -> (name: String, minX: Double, main: Bool) in
+            (name: screen.localizedName,
+             minX: screen.frame.minX,
+             main: ids[index] != 0 && CGDisplayIsMain(ids[index]) != 0)
         }
         return ordered(entries).map { index in
             let screen = screens[index]
             return WallDisplay(name: entries[index].name,
                                width: points(screen.frame.size.width),
                                height: points(screen.frame.size.height),
+                               id: ids[index],
                                main: entries[index].main)
         }
     }

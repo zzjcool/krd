@@ -63,6 +63,9 @@ struct WallDisplay: Equatable {
     var name: String
     var width: Int
     var height: Int
+    /// `CGDirectDisplayID`, the id a capture addresses this display by. 0 when nobody filled it in
+    /// (a mock, a test): the wall still draws, it just cannot take a picture of that panel.
+    var id: UInt32 = 0
     /// The menu-bar display (design §6.6: it comes first and its caption says so).
     var main: Bool
 }
@@ -76,6 +79,39 @@ struct WallDisplay: Equatable {
 struct WallModel: Equatable {
     var displays: [WallDisplay] = []
     var windows: [OrderedWindow] = []
+}
+
+/// What the text layer draws in a slot that a picture may cover.
+///
+/// Three states, one rectangle: phase 1's placeholder, nothing at all (a real picture lands there),
+/// or the mask (the capture failed). Keeping the rectangle identical in all three is what lets a
+/// picture replace a placeholder without the wall moving a cell (design §4).
+enum WallSlotPaint: Equatable {
+    case placeholder
+    case picture
+    case mask
+}
+
+/// The paint state of every slot of one frame: the stage, then the cards of the current page.
+///
+/// A missing entry means `.placeholder`, so a caller that knows nothing about pictures gets exactly
+/// the phase-1 wall.
+struct WallSlotPaints: Equatable {
+    var stage: WallSlotPaint = .placeholder
+    var cards: [WallSlotPaint] = []
+
+    func card(_ slot: Int) -> WallSlotPaint {
+        cards.indices.contains(slot) ? cards[slot] : .placeholder
+    }
+
+    mutating func mark(slot: Int, _ paint: WallSlotPaint) {
+        if slot == 0 {
+            stage = paint
+        } else {
+            while cards.count < slot { cards.append(.placeholder) }
+            cards[slot - 1] = paint
+        }
+    }
 }
 
 /// The wall's whole keyboard policy, in one named place: it is a *policy* (`--wall` has no
@@ -288,9 +324,10 @@ final class WallCanvas {
     /// The paint, as bytes ready for `ScreenWriter.writeChrome`. Never contains `\n`, never ends a
     /// run on `(rows, cols)`, and is empty when nothing changed since the last call.
     func draw(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
-              focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20) -> [UInt8] {
+              focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
+              paints: WallSlotPaints = WallSlotPaints()) -> [UInt8] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH)
+                          cellW: cellW, cellH: cellH, paints: paints)
         return render(cells, cols: cols, rows: rows)
     }
 
@@ -301,9 +338,10 @@ final class WallCanvas {
     /// painter does not draw. It does not touch the diff state: calling it between two draws must
     /// not turn the second draw into a full repaint.
     func lines(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
-               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20) -> [String] {
+               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
+               paints: WallSlotPaints = WallSlotPaints()) -> [String] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH)
+                          cellW: cellW, cellH: cellH, paints: paints)
         var out: [String] = []
         out.reserveCapacity(max(0, rows))
         for y in 0..<max(0, rows) {
@@ -314,42 +352,31 @@ final class WallCanvas {
 
     /// The largest rect inside `rect` whose pixel aspect is `aspect` (design §6.6): the picture is
     /// **fitted, never cropped**, and the cells it does not cover keep the picture's dominant colour
-    /// once the capture phase lands. Pure, and shared with the capture path so the picture cannot
-    /// drift away from the placeholder that was drawn before it arrived.
+    /// once the capture lands.
+    ///
+    /// One implementation, in `krdcore`: the capture path asks ScreenCaptureKit for exactly
+    /// `PanelImage.fit`'s pixel box, so the placeholder drawn here and the picture that replaces it
+    /// are the same rectangle by construction.
     static func fittedRect(aspect: Double, inside rect: CellRect,
                            cellW: Double, cellH: Double) -> CellRect {
-        guard !rect.isEmpty, aspect > 0, cellW > 0, cellH > 0 else { return rect }
-        let availW = Double(rect.cols) * cellW
-        let availH = Double(rect.rows) * cellH
-        var w = rect.cols
-        var h = rect.rows
-        if availW / availH > aspect {
-            // The band is wider than the picture: height is the constraint (a rotated display).
-            w = Int((availH * aspect / cellW).rounded())
-        } else {
-            h = Int((availW / aspect / cellH).rounded())
-        }
-        w = max(1, min(rect.cols, w))
-        h = max(1, min(rect.rows, h))
-        return CellRect(col: rect.col + (rect.cols - w) / 2,
-                        row: rect.row + (rect.rows - h) / 2,
-                        cols: w, rows: h)
+        PanelImage.fit(aspect: aspect, in: rect, cellW: cellW, cellH: cellH).cellRect
     }
 
     // MARK: painting
 
     private func build(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
-                       focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20) -> [Cell] {
+                       focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
+                       paints: WallSlotPaints = WallSlotPaints()) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
         // Order matters only where two elements share a row: the footer and the band header draw
         // their left-hand text first and the right-aligned tail second, so the tail always wins the
         // cells it needs if a degenerate pane makes them collide.
         drawHeader(&grid, model: model, layout: layout)
-        drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH)
+        drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints)
         drawStageCaption(&grid, model: model, layout: layout)
         drawBand(&grid, model: model, layout: layout)
-        drawCards(&grid, model: model, layout: layout)
+        drawCards(&grid, model: model, layout: layout, paints: paints)
         drawCardCaptions(&grid, model: model, layout: layout)
         drawFooter(&grid, model: model, layout: layout, focus: focus)
         drawBar(&grid, layout: layout)
@@ -373,8 +400,19 @@ final class WallCanvas {
     /// centred in it — the contract's stand-in for the §4 mask, deliberately occupying exactly the
     /// rect the picture will occupy in P2, so nothing moves when it appears.
     private func drawStage(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                           cellW: Double, cellH: Double) {
+                           cellW: Double, cellH: Double, paints: WallSlotPaints) {
         guard !layout.stage.isEmpty else { return }
+        switch paints.stage {
+        case .picture:
+            // A picture fills the whole rect: text under a placement is not allowed to exist at
+            // all (Chrome.swift:11-14) - the caption row below already says which display this is.
+            return
+        case .mask:
+            drawMask(&grid, rect: layout.stage)
+            return
+        case .placeholder:
+            break
+        }
         let shown = model.displays.indices.contains(layout.stageStart)
             ? model.displays[layout.stageStart] : nil
         // Keep the display's own proportions: a 16:10 panel drawn into a 2.8:1 band was the
@@ -452,9 +490,20 @@ final class WallCanvas {
     /// (`max(0, …)`), and `cardH < 3` is no card at all: the frame itself needs three rows, so such
     /// a rect never reaches here. A squeezed box still keeps its first lines and never overwrites a
     /// border.
-    private func drawCards(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
+    private func drawCards(_ grid: inout Grid, model: WallModel, layout: WallLayout,
+                           paints: WallSlotPaints) {
         for (slot, rect) in layout.cards.enumerated() {
-            guard !rect.isEmpty, rect.rows >= 3, rect.cols >= 2 else { continue }
+            guard !rect.isEmpty else { continue }
+            switch paints.card(slot) {
+            case .picture:
+                continue                    // the picture fills the card; nothing may sit under it
+            case .mask:
+                drawMask(&grid, rect: rect)
+                continue
+            case .placeholder:
+                break
+            }
+            guard rect.rows >= 3, rect.cols >= 2 else { continue }
             let index = layout.cardStart + slot
             guard model.windows.indices.contains(index) else { continue }
             let window = model.windows[index]
@@ -583,6 +632,28 @@ final class WallCanvas {
 
     /// A dim frame filling `rect`. The caller guarantees `rows >= 3 && cols >= 2` (the corners are
     /// the only thing that needs two columns; with exactly two there is no horizontal run).
+    /// The fallback for a slot whose capture failed (window closed, permission denied, no pixel
+    /// buffer): a box on the same rect with one dim line in the middle.
+    ///
+    /// Deliberately not an error message and not a hatch: the wall is a picture of a desk, and "no
+    /// picture here" is a state of the desk, not a problem to report. The caption row still names
+    /// the window or display, so nothing is lost but the pixels.
+    private func drawMask(_ grid: inout Grid, rect: CellRect) {
+        guard !rect.isEmpty else { return }
+        guard rect.rows >= 3, rect.cols >= 2 else {
+            let label = DisplayWidth.truncate(symbols.dash, to: rect.cols)
+            grid.text(label, row: rect.row + (rect.rows - 1) / 2, col: rect.col, .dim,
+                      limit: rect.cols)
+            return
+        }
+        drawBox(&grid, rect: rect)
+        let inner = max(0, rect.cols - 2)
+        let body = DisplayWidth.truncate("no picture", to: inner)
+        let offset = max(0, (inner - DisplayWidth.of(body)) / 2)
+        grid.text(body, row: rect.row + (rect.rows - 1) / 2, col: rect.col + 1 + offset, .dim,
+                  limit: max(0, inner - offset))
+    }
+
     private func drawBox(_ grid: inout Grid, rect: CellRect) {
         guard rect.rows >= 3, rect.cols >= 2 else { return }
         let run = String(repeating: symbols.boxH, count: rect.cols - 2)

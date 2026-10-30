@@ -436,6 +436,14 @@ final class Desk {
     /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
     /// answer to "would the wall look different?" — the 1 s tick emits nothing while both match.
     private var wallPane: (cols: Int, rows: Int, cellW: Double, cellH: Double)?
+    /// The repaint in flight, if any. The wall captures before it paints (a slot is either a
+    /// picture or a mask, and that decides what the text layer may draw), so a tick that arrives
+    /// mid-capture is remembered rather than raced.
+    private var wallPaintTask: Task<Void, Never>?
+    private var wallDirtyWhilePainting = false
+    /// zlib level for a wall panel. Level 6 would spend ~3x the CPU to save a few percent on a
+    /// picture that is only encoded when the desk changes (design §12: no frame loop to pay for).
+    private static let wallPanelLevel = 3
     private var pipeSamples: [Double] = []
     private var targetLabel = "-"
     private var shareable: SCShareableContent?
@@ -826,13 +834,95 @@ final class Desk {
     /// a click has to be drawn against the list it was made on, and re-enumerating every window
     /// dictionary inside a click handler is not a thing to do.
     private func drawWall() {
-        guard let canvas = wallCanvas, let state = wallState, let pane = wallPane else { return }
+        guard let state = wallState, let pane = wallPane else { return }
         let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                   displays: wallModel.displays.count,
                                   windows: wallModel.windows.count)
-        writer.writeChrome(canvas.draw(cols: pane.cols, rows: pane.rows, model: wallModel,
+        let model = wallModel
+        let panels = wallPanels(layout: layout, model: model, pane: pane)
+        guard !panels.isEmpty else {
+            // Nothing to photograph (a mock, a display whose id nobody filled in): the phase-1
+            // wall, placeholders and all.
+            paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:])
+            return
+        }
+        // One repaint at a time: a second capture while the first is in flight would put pictures
+        // from two different models on one screen.
+        guard wallPaintTask == nil else {
+            wallDirtyWhilePainting = true
+            return
+        }
+        wallPaintTask = Task { [weak self] in
+            let result = await WallPictures.capture(panels)
+            // A plain `let` before the hop: capturing the weak binding itself into the main-actor
+            // closure is what the compiler warns about, and a race here would be a wall painted
+            // from a freed Desk.
+            guard let desk = self else { return }
+            await MainActor.run {
+                desk.wallPaintTask = nil
+                desk.paintWall(layout: layout, model: model, panels: panels,
+                               pictures: result.pictures, failures: result.failures)
+                if desk.wallDirtyWhilePainting, !desk.cleanedUp {
+                    desk.wallDirtyWhilePainting = false
+                    desk.refreshWall(force: true)
+                }
+            }
+        }
+    }
+
+    /// Which panels this frame wants a picture for, from the layout and the world.
+    ///
+    /// Pure plumbing: the decisions (which display, which page, how big) were all made by
+    /// `WallLayout` and `WallPanels`; this only supplies ids and aspects.
+    private func wallPanels(layout: WallLayout, model: WallModel,
+                            pane: (cols: Int, rows: Int, cellW: Double, cellH: Double)) -> [WallPanel] {
+        var stage: PanelSource?
+        if model.displays.indices.contains(layout.stageStart) {
+            let display = model.displays[layout.stageStart]
+            // A display with no id cannot be captured; asking for id 0 would only produce a mask.
+            if display.id != 0, display.width > 0, display.height > 0 {
+                stage = PanelSource(kind: .display(display.id),
+                                    aspect: Double(display.width) / Double(display.height))
+            }
+        }
+        let cards: [PanelSource?] = layout.cards.indices.map { slot in
+            let index = layout.cardStart + slot
+            guard model.windows.indices.contains(index) else { return nil }
+            let window = model.windows[index]
+            let width = window.bounds.width, height = window.bounds.height
+            guard width >= 1, height >= 1 else { return nil }
+            return PanelSource(kind: .window(window.windowID),
+                               aspect: Double(width) / Double(height))
+        }
+        return WallPanels.plan(layout: layout, cellW: pane.cellW, cellH: pane.cellH,
+                               stageSource: stage, cardSources: cards)
+    }
+
+    /// Paint the text, then the pictures on the cells the text was told to leave alone.
+    private func paintWall(layout: WallLayout, model: WallModel, panels: [WallPanel],
+                           pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError]) {
+        guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else { return }
+        var paints = WallSlotPaints()
+        for panel in panels {
+            paints.mark(slot: panel.slot, failures[panel.slot] == nil ? .picture : .mask)
+        }
+        writer.writeChrome(canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
                                        layout: layout, focus: state.focus,
-                                       cellW: pane.cellW, cellH: pane.cellH))
+                                       cellW: pane.cellW, cellH: pane.cellH, paints: paints))
+        guard !pictures.isEmpty else { return }
+        // The same frame contract the tile path uses: `emitPanel` only appends, `endFrame`
+        // flushes. Without the pair the pictures would sit in the writer's buffer forever - which
+        // is exactly what the first live run looked like: blank panels and no bytes on the wire.
+        writer.beginFrame()
+        for picture in pictures {
+            writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
+                             row: picture.panel.rect.row, col: picture.panel.rect.col,
+                             cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
+                             pixels: picture.pixels, width: picture.panel.pixelWidth,
+                             height: picture.panel.pixelHeight, level: Self.wallPanelLevel,
+                             sync: writer.perTileSync)
+        }
+        writer.endFrame()
     }
 
     /// The one seam the capture phase replaces (contract §5.1, design §8).
