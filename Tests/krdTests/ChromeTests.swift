@@ -371,9 +371,12 @@ final class ClockTests: XCTestCase {
         XCTAssertFalse(bar(cols: 40).contains("12:34:56"))
     }
 
-    /// The bar names the in-process number for what it is: `pipe`, not "e2e".
-    func testPipeIsLabelledAsOurs() {
-        XCTAssertTrue(bar(cols: 120).contains("pipe 54 ms"))
+    /// The bar names the number for what it is. Since #52 it is `cap + pipe` — the capture half can
+    /// be ~50 ms at 10 fps — so calling it `pipe` (as it did before the split existed) would blame
+    /// our encoder for the compositor's interval.
+    func testTheFrameNumberIsLabelledAsTheWholeFrame() {
+        XCTAssertTrue(bar(cols: 120).contains("frame 54 ms"))
+        XCTAssertFalse(bar(cols: 120).contains("pipe 54 ms"))
     }
 }
 

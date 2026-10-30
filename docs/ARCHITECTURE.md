@@ -135,7 +135,7 @@ Desk.run():
   applyLayout(geometry)                   → Viewport.crop(full, zoom, focus) → TileGrid + Viewport
   writer.beginSession()                   → heal, alt screen, home, hide cursor
   installSignalCleanup(); installResizeHandler(); installDisplayChangeHandler()
-  if --debug startStats()
+  if --debug startDiagnostics()
   capturer.start(filter:sourceRect:width:height:fps:)  (width/height = layout, sourceRect = the crop)
   if !--no-input: InputReader.start()     → raw tty, ?1003h ?1002h ?1006h ?1016h
   while true { sleep 1 s }
@@ -361,7 +361,7 @@ which is why §7.6 exists.
 
 | Switch | Code path |
 |---|---|
-| `--debug` | `Log.configure` + `startStats()` + `reader.trace` + geometry/accessibility lines |
+| `--debug` | `Log.configure` + `startDiagnostics()` + `reader.trace` + geometry/accessibility lines |
 | `--log <path>` | `Log.configure` only (no stats, no input trace) |
 | `--dry-run` | `InputReader(dryRun:)`: parse and log, never call `CGEvent.post` |
 | `--zoom <f>` | `applyLayout` → `Viewport.crop`; `Capturer.start(sourceRect:)` crops on the capture side |
@@ -372,7 +372,7 @@ which is why §7.6 exists.
 | `--bench-wire` | `Bench.runWire`: one case at `--fps` through the real `handleFrame`, per-frame JSON on stderr |
 | `--record` | `FrameRecorder` in `handleFrame`: writes raw frames + a manifest header (layout included) |
 | `--replay` | `runReplay`: recorded frames through the real pipeline, at the recorded pace |
-| `--stats-json` | `StatsJSONWriter` in `startStats`: one NDJSON line per second |
+| `--stats-json` | `StatsJSONWriter` in `startDiagnostics`: one NDJSON line per second, from the panel's own `ChromeMetrics` |
 | `KRD_DUMP` | `ScreenWriter.flush` tees every flushed buffer to a file |
 | `KRD_Q` | the `q=` field of every escape (default `2` = silent) |
 | `KRD_FORMAT` | `rgb` (default, `f=24`) or `rgba` (`f=32`) |
@@ -387,19 +387,61 @@ which is why §7.6 exists.
 | `krd` (no flags) | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`: the landing screen, one display on stage and three recent windows below, as pictures. A click on one turns this process into `krd --window <id>` (`Desk.handOver`, `execv` — a second live process of one executable is not allowed to stream, see design §12 P3b) and `Ctrl-\` in that mirror `exec`s the wall back with its offsets in argv (`--wall-at`, `--said`). `--mirror` selects the old whole-display path, `--window <q>` implies it |
 | `--symbols <m>` | `WallSymbols`: `emoji` (default) or `ascii` glyphs for the wall |
 
-The 1 Hz stats line is one `String(format:)` in `Desk.startStats()`:
+One 1 Hz tick samples everything (`Desk.startDiagnostics()`), and three renderers read that one
+snapshot: the `--debug` line, the `--dev` panel and `--stats-json`. One tick rather than one per
+renderer because rates are *deltas over an interval* — two timers over the same counters halve the
+interval and print half the rate (issue #52).
 
 ```
-stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  cap=<d>/<s>/<c> idle=<n> bad=<n> pipe=<ms>
+stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[cap=<ms> pipe=<ms>(p99 <ms>) zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  delivered=<n>/s skipped=<n>/s idle=<n>/s bad=<n>  input=<ms> late=<n>/<n>
 ```
 
 `tiles/s` is the delta of `framesEmitted` (tiles, not frames), `KB` is the last frame's compressed
-payload, `MB/s` is bytes written in the last second, `cap` is ScreenCaptureKit's
-delivered/skipped/callback counts, `idle`/`bad` are frames without a pixel buffer split by the
-status from the sample attachments (`idle` = the status says so or is absent, `bad` = it claims
-`complete`), `write max`/`over5` are the worst `write(2)` block of the second and how many
-frames exceeded 5 ms, and `pipe` is capture callback → last byte out. `--stats-json <path>` writes
-the same numbers as one NDJSON object per second (`bench/soak-report.py` reads them).
+payload, `MB/s` is bytes written in the last second, `delivered`/`skipped`/`idle` are per second and
+come from ScreenCaptureKit's own frames (`idle` = no pixel buffer and the status says so, `bad` =
+it claims `complete` but has no pixels), `write max`/`over5` are the worst `write(2)` block of the
+second and how many frames exceeded 5 ms, and `late` counts frames the loop declined because
+`--quality auto` had lowered the target rate.
+
+`cap` and `pipe` are the split that answers "was it the capture or the write":
+
+- `cap = ScreenCaptureKit callback − PTS`: how old the frame's *content* already was when it reached
+  us, measured in host time (`CMSampleBufferGetPresentationTimeStamp` and `benchNowMs()` share a
+  clock base). Measured on real frames it is usually ~0–10 ms — the compositor is prompt — and it
+  grows only when ScreenCaptureKit coalesces updates. It is slightly *negative* for frames presented
+  ahead of the callback (−10…+10 ms at 20 fps), which clamps to 0: those are timely frames, not
+  unmeasured ones.
+- `pipe = callback → last byte written`: everything we do with the frame.
+- `e2e = cap + pipe` is the number the status bar prints as `frame`.
+
+`cap` is `—` (and `-1` in JSON) when there is no timestamp to measure against: `--mock` and
+`--replay` have none, and a zero there would read as "a very fast capture" rather than "not
+measured".
+
+`--stats-json <path>` writes the same numbers as one NDJSON object per second
+(`bench/soak-report.py` reads them); the writer takes the panel's `ChromeMetrics` struct, so the
+two cannot drift.
+
+**The round trip (`CSI 5n`).** `write(2)` blocking only fires after sshd's userspace buffer is full,
+so a slow link stays invisible until seconds of picture have piled up. The probe writes 4 bytes
+(`RTTProbe`, `Sources/krdcore/RTTProbe.swift`) every couple of seconds; a VT terminal answers
+`CSI 0n`, `InputParser` emits `.statusReport`, and `InputReader` timestamps the arrival — so the round
+trip is measured to the input thread's clock rather than to the 1 Hz tick. The answer queues behind
+the picture, which is the point: the number includes the backlog a person feels.
+
+Both signals feed the quality governor, and they are not interchangeable: `writeMs` says "our writes
+are blocking now" (free, per frame, late), the round trip says "the far end is this far behind"
+(4 bytes per probe, includes queueing, early). Downgrade needs either; upgrade needs both quiet. A
+terminal that never answers switches the probe off after three misses and the governor keeps working
+on write latency alone — the numbers stay `—`, never `0`. `KRD_RTT_BUDGET_MS` (default 250) is the
+threshold, `KRD_NO_RTT=1` disables the probe.
+
+**The report bundle.** `kill -USR2 <krd>` writes `$TMPDIR/krd-report.txt`: a one-line verdict naming
+the bigger half of the delay, the current numbers, the last 300 samples of every series (cap, pipe,
+zlib, write, input), the active `KRD_*` switches, the geometry and the last 200 log lines. The point
+is that a session which is too slow to read is still diagnosable from another terminal — the whole
+workflow is `ssh host pkill -USR2 krd` and then read the file it names in the log. `kill -USR1`
+cycles the panel, for the same reason.
 
 ### The TUI layer (`--dev`)
 

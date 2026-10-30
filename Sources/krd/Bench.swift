@@ -678,20 +678,45 @@ final class StatsJSONWriter {
         self.handle = handle
     }
 
-    func write(tiles: Int, dirty: Int, kb: Int, mbps: Double, zlibMs: Double, writeMs: Double,
-               writeMaxMs: Double, writeOver5: Int, px: (Int, Int), cells: (Int, Int),
-               delivered: Int, skipped: Int, callbacks: Int, idle: Int, bad: Int,
-               pipeMs: Double, late: Int = 0, frames: Int = 0, scale: Double = 1) {
+    /// One line per second, from the **same** `ChromeMetrics` the panel renders: the panel and this
+    /// file disagreeing about what `tiles` or `pipe_ms` means was the bug this signature removes
+    /// (issue #52).
+    func write(_ m: ChromeMetrics, late: Int = 0, frames: Int = 0) {
         guard let handle else { return }
+        // Typed on its own line: passing `m.capMs < 0 ? -1 : m.capMs` straight into a `%f` vararg
+        // makes Swift pick `Int` for the literal branch and the value comes out as `nan`
+        // (reproduced: `String(format: "%.2f", x < 0 ? -1 : x)` prints nan for any x < 0).
+        let capMs: Double = m.capMs < 0 ? -1 : m.capMs
+        // Same trap as `capMs` above: a `? x : -1` passed straight into `%f` compiles into an Int
+        // and prints `nan`. Typed here, once.
+        let rttMs: Double = m.rttAvailable ? m.rttMs : -1
+        let rttP99: Double = m.rttAvailable ? m.rttP99Ms : -1
+        // `nan` is not JSON. A series that has no samples yet (the first second of a session) must
+        // still produce a line `jq` can read, so anything non-finite becomes -1 = "not measured".
+        func n(_ value: Double) -> Double { value.isFinite ? value : -1 }
         let line = String(
-            format: "{\"t\":%.2f,\"tiles\":%d,\"dirty\":%d,\"kb\":%d,\"mbps\":%.3f,"
-                + "\"zlib_ms\":%.2f,\"write_ms\":%.2f,\"write_max_ms\":%.2f,\"write_over5\":%d,"
+            format: "{\"t\":%.2f,\"tiles\":%d,\"tiles_total\":%d,\"dirty\":%d,\"kb\":%d,"
+                + "\"mbps\":%.3f,\"fps\":%.2f,\"capture_fps\":%.2f,\"tiles_per_s\":%.1f,"
+                + "\"skipped_per_s\":%.1f,\"idle_per_s\":%.1f,"
+                + "\"zlib_ms\":%.2f,\"zlib_p99_ms\":%.2f,\"write_ms\":%.2f,\"write_max_ms\":%.2f,"
+                + "\"write_over5\":%d,\"cap_ms\":%.2f,\"cap_p99_ms\":%.2f,"
+                + "\"pipe_ms\":%.2f,\"pipe_p99_ms\":%.2f,\"e2e_ms\":%.2f,"
+                + "\"input_ms\":%.2f,\"input_p99_ms\":%.2f,"
+                + "\"rtt_ms\":%.2f,\"rtt_p99_ms\":%.2f,"
                 + "\"px\":[%d,%d],\"cells\":[%d,%d],"
                 + "\"delivered\":%d,\"skipped\":%d,\"callbacks\":%d,\"idle\":%d,\"bad\":%d,"
-                + "\"pipe_ms\":%.2f,\"late\":%d,\"frames\":%d,\"scale\":%.3f}\n",
-            (benchNowMs() - started) / 1000.0, tiles, dirty, kb, mbps, zlibMs, writeMs,
-            writeMaxMs, writeOver5, px.0, px.1, cells.0, cells.1,
-            delivered, skipped, callbacks, idle, bad, pipeMs, late, frames, scale)
+                + "\"late\":%d,\"frames\":%d,\"scale\":%.3f,\"quality\":%d}\n",
+            (benchNowMs() - started) / 1000.0, m.tilesPerSec, m.framesTotal, m.dirty, m.kbPerFrame,
+            n(m.mbps), m.fps, m.captureFps, Double(m.tilesPerSec),
+            n(m.skippedPerSec), n(m.idlePerSec),
+            n(m.zlibMs), n(m.zlibP99Ms), n(m.writeMs), n(m.writeMaxMs), m.writeOver5,
+            capMs, n(m.capP99Ms),
+            n(m.pipeMs), n(m.pipeP99Ms), n(m.e2eMs),
+            n(m.inputMs), n(m.inputP99Ms),
+            n(rttMs), n(rttP99),
+            m.pxW, m.pxH, m.cellsW, m.cellsH,
+            m.delivered, m.skipped, m.callbacks, m.idle, m.bad,
+            late, frames, n(m.scale), m.quality)
         handle.write(Data(line.utf8))
     }
 }

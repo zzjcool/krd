@@ -24,6 +24,9 @@ public enum Event: Equatable {
     case osc(String)
     /// The terminal's answer to `CSI ? u` — which keyboard enhancements it accepted.
     case keyboardFlags(Int?)
+    /// The terminal's answer to `CSI 5n`: the device status report the round-trip probe measures
+    /// (issue #52). Not input — nothing is injected for it.
+    case statusReport
     /// A parse-level diagnostic for `--debug` (e.g. an OSC that grew past the cap).
     case notice(String)
 }
@@ -174,6 +177,12 @@ public final class InputParser {
     }
 
     private func handleCSI(params: String, final: UInt8) {
+        if final == 0x6E {                                  // 'n': device status report
+            // `CSI 0n` is the terminal telling us it is alive; the probe in `Desk` measures the
+            // round trip. Emitted rather than swallowed so the timing lives in one place.
+            emit(.statusReport)
+            return
+        }
         if final == 0x75 {                                  // 'u': kitty keyboard protocol
             handleKeyProtocol(params)
             return
@@ -282,6 +291,8 @@ extension Event {
             return "osc \(body.prefix(3)) \(body.utf8.count) B"
         case let .keyboardFlags(flags):
             return "keyboardFlags \(flags.map(String.init) ?? "?")"
+        case .statusReport:
+            return "statusReport"
         case let .notice(text):
             return "notice \(text)"
         }

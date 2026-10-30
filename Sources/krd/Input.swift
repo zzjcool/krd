@@ -11,6 +11,21 @@ final class InputReader {
     private let currentViewport: () -> Viewport
     private let onQuit: () -> Void
     private let dryRun: Bool
+
+    /// When the bytes that are being handled arrived: `parse start`, for the input half of issue
+    /// #52. Zero means "no read in flight", which is the honest state for events posted by the
+    /// clipboard bridge or a paste loop rather than by a key.
+    private var readAt = Double(0)
+    private var inputSeries = Series()
+    /// `parse → CGEvent.post` for the most recent event, and the p99 over the last 300.
+    private(set) var lastInputMs = Double(0)
+    /// When the terminal's last `CSI 0n` arrived (seconds, `benchNowMs()` base), and how many there
+    /// have been. Read by the diagnostics tick, which owns the probe's send time.
+    private(set) var lastStatusReplyAt = Double(0)
+    private(set) var statusReplies = 0
+    var inputP99Ms: Double { inputSeries.percentile(0.99) }
+    /// A copy of the recent samples, for the `SIGUSR2` report bundle.
+    var inputSamples: Series { inputSeries }
     /// `false` = parse everything, inject nothing, and — unlike `--dry-run` — say nothing about it
     /// either. The wall (`--wall`) is the one mode with no remote desktop behind it, and the dry-run
     /// log has nowhere to go but the terminal that *is* the wall: `Log`'s sink is stderr until a
@@ -185,6 +200,7 @@ final class InputReader {
                 let hex = chunk[0..<n].map { String(format: "%02x", $0) }.joined(separator: " ")
                 log("raw \(n) bytes: \(hex)")
             }
+            readAt = benchNowMs()
             parser.feed(chunk[0..<n])
         }
     }
@@ -201,6 +217,11 @@ final class InputReader {
             postKey(code, cg(mods), phase: phase)
         case let .text(ch, mods):
             handleKey(ch, flags: cg(mods))
+        case .statusReport:
+            // The round-trip probe's answer (issue #52). Timestamped here, on the input thread, so
+            // the 1 Hz diagnostics tick can compute an accurate round trip from it.
+            lastStatusReplyAt = benchNowMs() / 1000
+            statusReplies += 1
         case let .control(byte):
             handleControl(byte)
         case let .mouse(report):
@@ -622,6 +643,7 @@ final class InputReader {
     /// A window that closed mid-session has no pid: fall back to the global tap and say so once,
     /// because a silent fallback means clicks quietly start going to the desktop.
     private func post(_ event: CGEvent, describe: String? = nil) {
+        defer { noteInputLatency() }
         if let targetPid, let pid = targetPid(), pid > 0 {
             // macOS 26 drops *mouse* events posted to a pid -- Safari and TextEdit both ignore them
             // without a word, while keys still arrive -- so a mirrored window could not be clicked
@@ -648,6 +670,16 @@ final class InputReader {
                       + "         clicks and keys now go to whatever is in front. Restart with --window <id> to re-attach.\n")
         }
         event.post(tap: .cghidEventTap)
+    }
+
+    /// `parse → post` for the event just sent. Measured here rather than at the call sites because
+    /// this is the only funnel every path (keys, text, clicks, scroll) goes through.
+    private func noteInputLatency() {
+        guard readAt > 0 else { return }
+        let ms = benchNowMs() - readAt
+        guard ms >= 0, ms < 5_000 else { return }
+        lastInputMs = ms
+        inputSeries.add(ms)
     }
 
     /// Appended to a trace line so `--debug` shows which process an event was aimed at.

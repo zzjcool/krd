@@ -120,7 +120,7 @@ Desk.run():
   applyLayout(geometry)                   → Viewport.crop(full, zoom, focus) → TileGrid + Viewport，previousFrame = []
   writer.beginSession()                   → 自愈、备用屏、归位、隐藏光标
   installSignalCleanup(); installResizeHandler(); installDisplayChangeHandler()
-  if --debug startStats()
+  if --debug startDiagnostics()
   capturer.start(filter:sourceRect:width:height:fps:)  （width/height 来自布局，sourceRect = 裁剪区）
   if !--no-input: InputReader.start()     → raw tty、?1003h ?1002h ?1006h ?1016h
   while true { sleep 1 s }
@@ -323,7 +323,7 @@ pane    137 × 73 格               单元格 17 × 33 px
 
 | 开关 | 代码路径 |
 |---|---|
-| `--debug` | `Log.configure` + `startStats()` + `reader.trace` + 几何/辅助功能那几行日志 |
+| `--debug` | `Log.configure` + `startDiagnostics()` + `reader.trace` + 几何/辅助功能那几行日志 |
 | `--log <path>` | 只有 `Log.configure`（没有统计，没有输入轨迹） |
 | `--dry-run` | `InputReader(dryRun:)`：解析并记日志，绝不调用 `CGEvent.post` |
 | `--zoom <f>` | `applyLayout` → `Viewport.crop`；`Capturer.start(sourceRect:)` 在采集端裁剪 |
@@ -343,15 +343,45 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `KRD_REAP` | 每 n 帧整屏重绘（0 = 关闭，默认） |
 | `KRD_BENCH_BUDGET_SCALE` | 只给 `bench/bench.py` 用（krd 本身不读）：按机器速度倍数放大 `ms.*` / `write_ms.*` 预算，bytes 永不放宽（见 [BENCHMARK](BENCHMARK.md) §6） |
 
-1 Hz 的统计行就是 `Desk.startStats()` 里一次 `String(format:)`：
+1 Hz 的采样只有一处（`Desk.startDiagnostics()`），三个渲染器读同一份快照：`--debug` 那一行、
+`--dev` 面板、`--stats-json`。只用一个定时器的原因是速率本身是「一个区间内的增量」——两个定时器平分
+同一批计数器，各自的间隔就短了一半，打印出来的速率也就只有一半（issue #52）。
 
 ```
-stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[zlib=<ms> write=<ms>]  <WxH> px <CxR> cells  cap=<delivered>/<skipped>/<callbacks> idle=<n> bad=<n>
+stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[cap=<ms> pipe=<ms>(p99 <ms>) zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  delivered=<n>/s skipped=<n>/s idle=<n>/s bad=<n>  input=<ms> late=<n>/<n>
 ```
 
 `tiles/s` 是 `framesEmitted` 的增量（数的是瓦片，不是帧）；`KB` 是最近一帧压缩后的负载；`MB/s` 是最近
-一秒写出的字节；`idle`/`bad` 是没有像素缓冲的 ScreenCaptureKit 帧，按 sample attachments 里的
-status 区分（`idle` = 状态这么说或者根本没有状态，`bad` = 它声称 `complete`）。
+一秒写出的字节；`delivered`/`skipped`/`idle` 都换算成每秒；`idle`/`bad` 是没有像素缓冲的
+ScreenCaptureKit 帧，按 sample attachments 里的 status 区分（`idle` = 状态这么说或者根本没有状态，
+`bad` = 它声称 `complete`）；`late` 是 `--quality auto` 降速后帧循环主动丢掉的帧数。
+
+`cap` 与 `pipe` 是回答「慢在采集还是慢在我们」的那一刀：
+
+- `cap = ScreenCaptureKit 回调 − PTS`，在 sample handler 最前面测（`CMSampleBufferGetPresentationTimeStamp`
+  和 `benchNowMs()` 同一个时钟基准）。10 fps 下它本身就有约 50 ms，所以「画面卡」通常不是编码器的锅。
+- `pipe = 回调 → 最后一个字节写出`，即我们对这一帧做的全部事情。
+- `e2e = cap + pipe`，就是状态栏上那个 `frame`。
+
+`--mock` / `--replay` 没有 PTS，`cap` 显示 `—`（JSON 里是 `-1`）而不是 0：0 会被读成「采集极快」，
+而不是「没测」。
+
+`--stats-json <path>` 每秒写一行 NDJSON，内容与面板同源（写入函数直接收 `ChromeMetrics`，两边没法走偏）。
+
+**往返延迟（`CSI 5n`）。** `write(2)` 阻塞只有在 sshd 的 userspace 缓冲填满之后才会发生，所以链路慢在
+画面堆积几秒之前是看不见的。探针每两秒写 4 个字节（`RTTProbe`），VT 终端回 `CSI 0n`，`InputParser` 发出
+`.statusReport`，`InputReader` 记录到达时刻——所以往返时间用的是输入线程的时钟，而不是 1 Hz 的 tick。应答
+本身就排在画面后面，这正是重点：它测到的数字包含用户能感受到的积压。
+
+两个信号都喂给质量 governor，但不能互相替代：`writeMs` 说明"我们的写现在被挡住了"（免费、每帧、偏晚），
+往返说明"远端落后多远"（每探测 4 字节、含排队、偏早）。降档任一成立即可，升档必须两者都安静。终端始终
+不回应答时，连续三次就自动关掉探针，governor 退回只看写延迟——数字保持 `—`，绝不显示 `0`。
+阈值是 `KRD_RTT_BUDGET_MS`（默认 250），`KRD_NO_RTT=1` 可完全关闭。
+
+**报告包。** `kill -USR2 <krd>` 会写 `$TMPDIR/krd-report.txt`：一句判定（告诉我们哪一半更大）、当前所有
+数字、每条序列最近 300 个采样（cap / pipe / zlib / write / input）、生效的 `KRD_*` 开关、几何信息，以及
+最近 200 行日志。它的意义是——**慢到没法在终端里读的会话，依然能从另一个终端诊断**：整个流程就是
+`ssh host pkill -USR2 krd`，然后按日志里写的路径去读。`kill -USR1` 则循环切换面板。
 
 ## 10. 扩展点
 
