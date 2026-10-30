@@ -135,12 +135,14 @@ def draw_bars(screen, bars, top, width, current):
         screen.at(row, 1, f'{mark} {bar.name:<7s} {bar.text(width)}  {bar.flag} {bar.fmt(bar.value)}')
 
 
-def draw_stats(screen, row, sent, seconds, baseline, bars, width):
-    rate = sum(sent[-90:]) / max(0.2, sum(seconds[-90:]))
+def draw_stats(screen, row, sent, seconds, write_ms, baseline):
+    rate = sum(sent[-60:]) / max(0.2, sum(seconds[-60:]))
     frame = sent[-1] if sent else 0
     ratio = baseline / rate if rate > 1 else 0
+    blocked = sum(write_ms[-60:]) / max(1, len(write_ms[-60:]))
     screen.at(row, 1, f'  {human(frame):>9s}/frame   {human(int(rate)):>10s}/s   '
-                      f'{ratio:5.2f}x smaller than 100 / 1.0 / 30 fps')
+                      f'{ratio:5.2f}x smaller than 100 / 1.0 / 30 fps   '
+                      f'write {blocked:4.1f} ms')
 
 
 def human(n):
@@ -163,13 +165,18 @@ class Screen:
 
 def main():
     argv = sys.argv[1:]
-    flags = {'--cells', '--still'}
+    flags = {'--cells', '--start'}
     positional = [a for i, a in enumerate(argv)
                   if not a.startswith('-') and not (i and argv[i - 1] in flags)]
     clip = os.path.abspath(positional[0]) if positional else os.path.abspath(DEFAULT_CLIP)
     if not os.path.exists(clip):
         raise SystemExit(f'{clip}: no such file')
     cells = argv[argv.index('--cells') + 1] if '--cells' in argv else None
+    start = argv[argv.index('--start') + 1] if '--start' in argv else '60,2,15'
+    try:
+        start_quality, start_space, start_fps = (float(v) for v in start.split(','))
+    except ValueError:
+        raise SystemExit('--start takes quality,space,fps -- e.g. --start 100,1,30')
 
     global out
     out = sys.stdout
@@ -188,6 +195,11 @@ def main():
                 lambda v: f'{("%.2f" % (1 / v)).rstrip("0").rstrip("."):>4s}  '
                           f'{src_w // v}x{src_h // v} px'),
             Bar('time', '--fps', FPS, lambda v: f'{v:>3d}')]
+    # start where a slow link can actually keep up; drag right if yours can. 100/1.0/30 is ~325 KB/s
+    # of base64, which an ssh pty takes but the far end buffers for seconds.
+    for bar, want in zip(bars, (start_quality, start_space, start_fps)):
+        bar.index = min(range(len(bar.steps)),
+                        key=lambda i: abs(bar.steps[i] - (want if bar is not bars[2] else want)))
 
     bar_top = 4 + box_h
     bar_width = max(8, min(36, cols - 40))
@@ -202,7 +214,7 @@ def main():
     out.flush()
 
     frames = source(clip, src_w, src_h, fps=30)
-    sent, seconds = [], []
+    sent, seconds, write_ms = [], [], []
     first_frame = next(frames)
     baseline_rate = len(encode(first_frame, src_w, src_h, 100)[0]) * 30
     current = 1                       # start on colour, the least destructive axis
@@ -288,8 +300,10 @@ def main():
                     rows, tw, th = resample(rows, src_w, src_h, bars[1].value)
                     payload, kind, dims = encode(rows, tw, th, bars[0].value)
                     out.write('\033[3;2H')
+                    wrote = time.time()
                     transmit(kind, payload, box_w, box_h, dims)
                     out.flush()
+                    write_ms.append((time.time() - wrote) * 1000)
                     sent.append(len(payload))
                     seconds.append(1.0 / bars[2].value)
                     last_send = now
@@ -300,7 +314,7 @@ def main():
             if now - last_draw > 0.2:
                 last_draw = now
                 draw_bars(screen, bars, bar_top + 1, bar_width, current)
-                draw_stats(screen, bar_top + 5, sent, seconds, baseline_rate or 1, bars, bar_width)
+                draw_stats(screen, bar_top + 5, sent, seconds, write_ms, baseline_rate or 1)
                 screen.at(bar_top + 6, 1, f'  {len(sent)} frames sent · '
                                           f'{"paused" if paused else "playing"}')
                 out.flush()
