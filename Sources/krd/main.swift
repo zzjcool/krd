@@ -381,6 +381,7 @@ final class Desk {
     private var chromeTimer: DispatchSourceTimer?
     private var chromeDirty = true
     private var chromeSampleBytes = 0
+    private var chromeSampleQueue = 0
     private var chromeSampleTiles = 0
     private var chromeSampleTime = Date()
     private var chromeToastUntil = Date()
@@ -1551,6 +1552,16 @@ final class Desk {
         m.tilesPerSec = Int(Double(dTiles) / elapsed)
         m.dirty = lastDirtyCount
         m.tilesTotal = layout?.count ?? 0
+        m.clock = krdClock.string(from: now)
+        let queue = ptyQueueBytes()
+        m.queueBytes = queue
+        if queue >= 0 {
+            // Bytes written minus bytes that piled up = bytes the pty actually drained.
+            let drained = max(0, dBytes - (queue - chromeSampleQueue))
+            m.drainMbps = Double(drained) / 1_048_576.0 / elapsed
+            chromeSampleQueue = queue
+        }
+        m.queueMs = queue > 0 && m.mbps > 0.01 ? Double(queue) / (m.mbps * 1_048_576) * 1000 : 0
         m.pipeMs = lastPipeMs
         pipeSamples.append(lastPipeMs)
         if pipeSamples.count > 300 { pipeSamples.removeFirst(pipeSamples.count - 300) }
@@ -1595,6 +1606,26 @@ final class Desk {
         writer.resetWriteStats()
         chromeDirty = true
     }
+
+    /// Bytes sitting in the pty's output buffer. sshd normally drains it at once and buffers in
+    /// userspace, so this stays 0 while the picture is seconds behind — which is exactly why the
+    /// status line carries a wall clock instead of pretending this is a lag meter.
+    private func ptyQueueBytes() -> Int {
+        var pending: Int32 = 0
+        // TIOCOUTQ = _IOR('t', 115, int) = 0x40047473; the macro is not imported into Swift.
+        let request: UInt = 0x4004_7473
+        guard ioctl(STDOUT_FILENO, request, &pending) == 0 else { return -1 }
+        return max(0, Int(pending))
+    }
+
+    private static let krdClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    private var krdClock: DateFormatter { Desk.krdClock }
 
     /// Displays first (the active one starred), then windows: the same information `--list`
     /// prints, refreshed once a second.

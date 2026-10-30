@@ -298,3 +298,56 @@ final class DisplayWidthTests: XCTestCase {
         }
     }
 }
+
+/// Over ssh the interesting part of the path is past `write()`, so the bar carries a wall clock
+/// the user can compare against their own — and it must not appear in a pane too narrow for it.
+final class ClockTests: XCTestCase {
+    private func bar(cols: Int) -> String {
+        var m = ChromeMetrics()
+        m.target = "display 0"
+        m.fpsTarget = 20
+        m.fps = 19.4
+        m.e2eMs = 54
+        m.cellsW = cols
+        m.clock = "12:34:56"
+        let geo = Chrome.layout(paneCols: cols, paneRows: 20, imageCols: cols, imageRows: 19, panel: nil)
+        let bytes = Chrome().draw(geometry: geo, metrics: m, state: ChromeState())
+        var text = ""
+        var onRow = false
+        var i = 0
+        let chars = Array(String(decoding: bytes, as: UTF8.self))
+        while i < chars.count {
+            if chars[i] == "\u{1B}" {
+                var j = i + 1
+                var digits = ""
+                if j < chars.count, chars[j] == "[" {
+                    j += 1
+                    while j < chars.count, chars[j].isNumber || chars[j] == ";" { digits.append(chars[j]); j += 1 }
+                    if j < chars.count, chars[j] == "H", digits == "20;1" { onRow = true } else if j < chars.count, chars[j] == "H" { }
+                    while j < chars.count, !chars[j].isLetter { j += 1 }
+                    i = j + 1
+                    continue
+                }
+                i += 1
+                continue
+            }
+            if onRow { text.append(chars[i]) }
+            i += 1
+        }
+        return text
+    }
+
+    func testClockAppearsAtTheRightEdge() {
+        let text = bar(cols: 120)
+        XCTAssertTrue(text.contains("12:34:56"))
+    }
+
+    func testClockIsDroppedInANarrowPane() {
+        XCTAssertFalse(bar(cols: 40).contains("12:34:56"))
+    }
+
+    /// The bar names the in-process number for what it is: `pipe`, not "e2e".
+    func testPipeIsLabelledAsOurs() {
+        XCTAssertTrue(bar(cols: 120).contains("pipe 54 ms"))
+    }
+}

@@ -75,6 +75,21 @@ struct ChromeMetrics {
     var tilesTotal = 0
     var capMs = 0.0
     var pipeMs = 0.0
+    /// Bytes sitting in the pty's own output buffer (`TIOCOUTQ`), -1 = not available.
+    ///
+    /// Not a lag meter: the buffer is ~1 KB and sshd drains it immediately into its *userspace*
+    /// buffer, which is where megabytes of un-sent picture actually accumulate. So a healthy
+    /// link shows 0 here; sustained non-zero means sshd has stopped reading. The honest signal
+    /// for "the link is the bottleneck" is `write` blocking, not this.
+    var queueBytes = -1
+    var queueMs = 0.0
+    /// `MB/s` minus the bytes that piled up in the pty buffer: bytes sshd actually took off our
+    /// hands. Equals `MB/s` unless sshd stalls, which is the point — it separates "we sent it"
+    /// from "the pty would not take it".
+    var drainMbps = 0.0
+    /// Wall clock, printed so the *user* can measure the real end-to-end delay by comparing it
+    /// with their own clock. Over ssh nothing on this side can see the other end.
+    var clock = ""
     var pipeP99Ms = 0.0
     var e2eMs = 0.0
     var zlibMs = 0.0
@@ -264,7 +279,7 @@ final class Chrome {
         let target: Seg = (" \(m.target) ", .bright, "target")
         let fps: Seg = ("\(String(format: "%.1f", m.fps))/\(m.fpsTarget) fps", fpsStyle, "fps")
         let bw: Seg = ("\(String(format: "%.1f", m.mbps)) MB/s", .plain, "stats")
-        let lat: Seg = ("\(Int(m.e2eMs)) ms", latStyle, "stats")
+        let lat: Seg = (cols >= 84 ? "pipe \(Int(m.e2eMs)) ms" : "\(Int(m.e2eMs)) ms", latStyle, "stats")
         let menu: Seg = (prefix ? "^\\ … " : "^\\ menu ", .dim, "help")
         switch cols {
         case 84...: return [target, sep, fps, sep, bw, sep, lat, sep, menu]
@@ -286,8 +301,17 @@ final class Chrome {
             text(x, y, body, style, hit: hit)
             x += DisplayWidth.of(body)
         }
-        if let toast = state.toast, x + DisplayWidth.of(toast) + 2 < cols {
-            text(DisplayWidth.rightAlignedStart(toast, cells: cols - 1), y, toast, .dim)
+        // The clock is the end-to-end instrument: compare it with your own and you are looking at
+        // capture -> encode -> write -> ssh -> terminal, sshd's buffering included. Nothing
+        // measurable from this side covers that last part.
+        var right = cols - 1
+        if !m.clock.isEmpty, cols >= 60 {
+            right = DisplayWidth.rightAlignedStart(m.clock, cells: cols - 1)
+            text(right, y, m.clock, .dim)
+            right -= 2
+        }
+        if let toast = state.toast, x + DisplayWidth.of(toast) + 2 < right {
+            text(max(x + 1, right - DisplayWidth.of(toast)), y, toast, .dim)
         }
     }
 
@@ -316,8 +340,8 @@ final class Chrome {
                  String(format: "capture %.1f/s · dirty %d/%d tiles", m.captureFps, m.dirty, m.tilesTotal),
                  m.fpsTarget > 0 && m.fps < Double(m.fpsTarget) * 0.85 ? .warn : .plain)
             let cap = m.capMs < 0 ? "cap —" : String(format: "cap %.0f", m.capMs)
-            line(2, "latency e2e", "\(Int(m.e2eMs)) ms",
-                 String(format: "%@ + pipe %.0f · max %.0f", cap, m.pipeMs, m.pipeP99Ms))
+            line(2, "pipe (ours)", "\(Int(m.e2eMs)) ms",
+                 String(format: "%@ · max %.0f · capture→write, no network", cap, m.pipeP99Ms))
             line(3, "encoder", String(format: "zlib %.1f ms", m.zlibMs),
                  String(format: "write %.1f max %.1f over5 %d", m.writeMs, m.writeMaxMs, m.writeOver5))
             line(4, "capture", "\(m.callbacks)/s callbacks",
@@ -325,13 +349,19 @@ final class Chrome {
             line(5, "geometry", "\(m.pxW)×\(m.pxH) px",
                  "\(m.cellsW)×\(m.cellsH) cells · cell \(Int(m.cellW))×\(Int(m.cellH)) · \(m.geometrySource)")
             line(6, "wire", m.format, "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells")
-            if inside > 8 {
-                text(2, y + 8, "MB/s".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
-                text(17, y + 8, spark(m.mbpsHistory, width: max(8, w - 20)), .accent)
+            if m.queueBytes >= 0 {
+                line(7, "pty buffer", "\(m.queueBytes) B",
+                     String(format: "%.0f ms at this rate · sshd took %.1f MB/s", m.queueMs, m.drainMbps))
+            } else {
+                line(7, "pty buffer", "—", "TIOCOUTQ unavailable on this tty")
             }
             if inside > 9 {
-                text(2, y + 9, "e2e".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
-                text(17, y + 9, spark(m.latencyHistory, width: max(8, w - 20)), .warn)
+                text(2, y + 9, "MB/s".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
+                text(17, y + 9, spark(m.mbpsHistory, width: max(8, w - 20)), .accent)
+            }
+            if inside > 10 {
+                text(2, y + 10, "pipe".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
+                text(17, y + 10, spark(m.latencyHistory, width: max(8, w - 20)), .warn)
             }
             if inside > 11 {
                 line(11, "input", m.inputActive ? "active" : "off",
@@ -384,6 +414,7 @@ final class Chrome {
                 ("^\\ then ?", "this list"),
                 ("click", "a status segment"),
                 ("", ""),
+                ("clock", "compare it with your own: that is the real delay"),
                 ("--dev", "this layer on"),
                 ("--no-chrome", "force it off (scripts, CI)"),
             ]
