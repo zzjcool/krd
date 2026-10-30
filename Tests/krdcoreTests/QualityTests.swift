@@ -87,6 +87,21 @@ final class QualityTests: XCTestCase {
                        [0x7D, 0x7D, 0x7D])
     }
 
+    /// Bit depths the replicator cannot serve must come back untouched, not trap. 3 bits would need
+    /// a negative shift to fill the low 5, and 8 bits has nothing to drop.
+    func testImpossibleBitDepthsAreIgnored() {
+        let pixels: [UInt8] = [0x7F, 0x7F, 0x7F]
+        for r in UInt8(1)...9 {
+            let bits = QualityBudget.Bits(r: r, g: r, b: r)
+            if r == 4 || r == 5 || r == 6 || r == 7 {
+                XCTAssertNotEqual(ScreenWriter.quantise(pixels, bits: bits), pixels, "\(r) bits")
+            } else {
+                XCTAssertEqual(ScreenWriter.quantise(pixels, bits: bits), pixels, "\(r) bits")
+            }
+        }
+        XCTAssertEqual(ScreenWriter.quantise565([1, 2]), [1, 2], "a partial pixel is left alone")
+    }
+
     func testQuantise565IsJustTheFiveSixFiveRung() {
         let pixels = noise(count: 32 * 32 * 3)
         XCTAssertEqual(ScreenWriter.quantise565(pixels),
@@ -180,6 +195,23 @@ final class QualityTests: XCTestCase {
         XCTAssertTrue(policy.plan(for: 0).quantise, "quality 50 does not wait for evidence")
         XCTAssertEqual(policy.plan(for: 0).bits, QualityBudget.fourFourFour)
         XCTAssertTrue(policy.plan(for: 0).eager)
+    }
+
+    /// The eager budget must not let the quantised-ratio bookkeeping zero the learned zlib level:
+    /// that pins every tile to level 1 and throws away the per-tile level issue #3 exists to learn.
+    func testEagerQuantisingKeepsTheLearnedZlibLevel() {
+        var policy = LevelPolicy(tiles: 1, quality: QualityBudget(70))
+        policy.observe(index: 0, ratio: 0.02)              // text: learns level 9
+        XCTAssertEqual(policy.plan(for: 0).level, 9)
+        // Same content, next frame, quantised: the ratio is still text-like, so the level must stay
+        // 9. The pre-fix code recorded a skip here, which pinned the tile to level 1 for good.
+        policy.observe(index: 0, ratio: 0.02, quantisedIn: true)
+        XCTAssertEqual(policy.plan(for: 0).level, 9, "an eager budget still uses the learned level")
+        XCTAssertTrue(policy.plan(for: 0).quantise)
+        XCTAssertEqual(policy.skippedCount, 0, "nothing is sent raw by policy under an eager budget")
+        // A photo-like quantised ratio still teaches it to spend less CPU.
+        policy.observe(index: 0, ratio: 0.40, quantisedIn: true)
+        XCTAssertEqual(policy.plan(for: 0).level, 1)
     }
 
     func testQuantisedCountReportsWhatThePanelShows() {

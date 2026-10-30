@@ -437,7 +437,7 @@ final class Chrome {
                  m.scale < 0.999 && m.scaleAuto ? .warn : .plain)
             line(6, "wire", m.format,
                  "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells · "
-                 + "565 \(m.quantisedTiles) raw \(m.skippedTiles)")
+                 + "quantised \(m.quantisedTiles) raw \(m.skippedTiles)")
             if m.queueBytes >= 0 {
                 line(7, "pty buffer", "\(m.queueBytes) B",
                      String(format: "%.0f ms at this rate · sshd took %.1f MB/s", m.queueMs, m.drainMbps))

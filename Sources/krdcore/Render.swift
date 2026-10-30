@@ -109,13 +109,20 @@ public final class ScreenWriter {
     public func level(for index: Int) -> Int { levels.level(for: index) }
     /// Level + quantise, the two decisions the tile loop needs per tile.
     public func plan(for index: Int) -> LevelPolicy.Plan { levels.plan(for: index) }
-    /// How many tiles are being quantised right now (tests and the stats line).
-    public var quantisedTiles: Int { levels.quantisedCount }
-    /// How many tiles are being sent raw because zlib buys nothing (#53).
-    public var skippedTiles: Int { levels.skippedCount }
+    /// What the last frame actually did: how many tiles it quantised and how many it sent raw.
+    ///
+    /// Counted from `observe` rather than read back out of `LevelPolicy` on the UI thread: the
+    /// policy is mutated per tile on the capture queue, and walking its arrays from the chrome
+    /// timer was a race (and, under an eager budget, a guess: it reported the grid size rather than
+    /// what was encoded).
+    public private(set) var lastFrameQuantised = 0
+    public private(set) var lastFrameRaw = 0
+    public var quantisedTiles: Int { lastFrameQuantised }
+    public var skippedTiles: Int { lastFrameRaw }
     /// The tile loop compresses in parallel and reports the wall time once.
     public func addCompressTime(_ ms: Double) { lastCompressMs += ms }
     public func observe(index: Int, ratio: Double, quantisedIn: Bool = false) {
+        if quantisedIn { lastFrameQuantised += 1 } else if ratio >= 1 { lastFrameRaw += 1 }
         levels.observe(index: index, ratio: ratio, quantisedIn: quantisedIn)
     }
 
@@ -240,6 +247,8 @@ public final class ScreenWriter {
         lastCompressMs = 0
         lastWriteMs = 0
         lastCompressedTiles = 0
+        lastFrameQuantised = 0
+        lastFrameRaw = 0
         frameWireBytes = 0
         if syncMode == .frame && !batchOpen {
             append("\u{1B}[?2026h")
@@ -312,7 +321,8 @@ public final class ScreenWriter {
         // Two ways to deal with content zlib cannot help with: the content became compressible
         // again (lossless, issue #53), or it stays incompressible long enough to quantise (#59).
         // The predictor is what tells them apart, and it costs ~10 µs.
-        if let bits = plan.bits, plan.eager || !looksCompressible(pixels, rect: rect) {
+        if plan.quantise, let bits = plan.bits,
+           plan.eager || !looksCompressible(pixels, rect: rect) {
             pixels = quantise(pixels, bits: bits,
                               bytesPerPixel: max(3, pixels.count / max(1, rect.w * rect.h)))
             quantised = true
@@ -379,7 +389,9 @@ public final class ScreenWriter {
         guard bpp >= 3 else { return pixels }
         let specs: [(shift: UInt8, low: UInt8)] = [(8 - bits.r, bits.r), (8 - bits.g, bits.g),
                                                   (8 - bits.b, bits.b)]
-        guard specs.allSatisfy({ $0.shift > 0 && $0.low < 8 }) else { return pixels }
+        // 4...7 bits, because `high >> (low - shift)` has to be a real shift: at 3 bits the
+        // replication would need a negative one and trap. The ladder never goes below 4.
+        guard specs.allSatisfy({ $0.low >= 4 && $0.low < 8 }) else { return pixels }
         var out = pixels
         var i = 0
         while i + 2 < out.count {

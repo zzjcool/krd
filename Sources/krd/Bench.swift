@@ -57,6 +57,10 @@ struct BenchConfig {
     var source: String
     /// Capture scale (`--scale`): the picture is `px` pixels at this fraction of the pane's pixels.
     var scale: String
+    /// `--quality` and the rung it resolves to. Without it a table of wire bytes cannot be
+    /// attributed: the same layout at 80 and at 50 differs by 1.3x, and nothing else in the JSON
+    /// would say which one was measured.
+    var quality: String
     var machine: String
     var arch: String
     var cores: Int
@@ -77,6 +81,7 @@ struct BenchConfig {
             rounds: rounds,
             source: "\(Int(source.width))x\(Int(source.height))",
             scale: number(layout.scale),
+            quality: "\(writer.quality.value) \(writer.quality.label)",
             machine: sysctlString("hw.model"),
             arch: unameField(&uts.machine),
             cores: ProcessInfo.processInfo.activeProcessorCount,
@@ -92,7 +97,7 @@ struct BenchConfig {
         "machine":{"model":"\(machine)","arch":"\(arch)","cores":\(cores),"os":"\(os)"},\
         "config":{"pane":"\(pane)","cell":"\(cell)","tile":"\(tile)","format":"\(format)",\
         "px":"\(px)","tiles":\(tiles),"rounds":\(rounds),"source":"\(source)",
-        "scale":\(scale)}}
+        "scale":\(scale),"quality":"\(quality)"}}
         """
     }
 }

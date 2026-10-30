@@ -116,7 +116,12 @@ public struct LevelPolicy {
         // that already compress well. From quality 70 down the user has asked for bytes, so it is
         // bypassed instead of being waited out.
         let quantise = allowsQuantise && (quality.eager || quantised[index])
-        return Plan(level: skipped[index] ? 0 : level[index],
+        // Under an eager budget `skipped` carries no information -- every tile is quantised, so the
+        // decision "send it raw" is taken per frame inside `compress` -- and honouring it would pin
+        // every tile to zlib level 1 for the life of the layout, throwing away the per-tile level
+        // that issue #3 exists to learn.
+        let level = quality.eager || !skipped[index] ? self.level[index] : 0
+        return Plan(level: level,
                     quantise: quantise,
                     bits: quantise ? quality.bits : nil,
                     eager: quantise && quality.eager)
@@ -136,7 +141,10 @@ public struct LevelPolicy {
             // small *because* the low bits are gone). Staying put is what stops the two encodings
             // from flapping every frame. Quantisation ends when `compress` finds content that
             // compresses losslessly again — a lossless ratio then comes back through here.
-            skipped[index] = true
+            //
+            // An eager budget never asks this question (it quantises regardless), so recording a
+            // skip here would only poison the state for a later, non-eager budget.
+            if !quality.eager { skipped[index] = true }
         } else if newRatio >= Self.skipAt {
             skipped[index] = true
             streak[index] += 1

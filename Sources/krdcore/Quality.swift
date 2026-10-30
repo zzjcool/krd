@@ -2,7 +2,8 @@
 ///
 /// The number is a *ceiling on the bit depth*, not a target: every tile still gets the encoder that
 /// is cheapest for its content, and the ceiling says how far that encoder may go. That is why 100
-/// means "not one pixel changes" and why the default (80) is exactly what krd has always done.
+/// means "not one pixel changes", and why the default (80) is the decision krd has always made:
+/// 5-6-5 on a tile that proved incompressible, lossless everywhere else.
 ///
 /// Bit depth is the right axis because it is the one that both the bytes and the eye follow: leaving
 /// the low bits off gives zlib repeats to point at, and the visible damage grows smoothly with the
@@ -12,15 +13,23 @@
 ///
 /// The rungs between 50 and 100 all stay on `f=24`, so no terminal, no protocol and no decoder
 /// changes are involved; below 50 the encoder needs PNG payloads (grey/paletted `f=100`) and those
-/// rungs are not shipped yet, so values under 50 clamp to 4-4-4.
+/// rungs are not shipped yet, so anything under 70 resolves to 4-4-4 and the panel says so.
 ///
 /// | value | bits per pixel | what the tiles look like        | bytes vs lossless |
 /// |------:|---------------:|---------------------------------|------------------:|
-/// |   100 |             24 | lossless                        |             1.00x |
-/// |    90 |             18 | 6-6-6, 262k colours             |             1.35x |
-/// |  *80* |             16 | 5-6-5, 65k colours (the default)|             1.57x |
-/// |    70 |             15 | 5-5-5, 32k colours              |             1.80x |
-/// |    50 |             12 | 4-4-4, 4096 colours             |             2.26x |
+/// Byte counts below are `krd --bench --json --rounds 4`, `photo` case (hash noise), wire bytes:
+///
+/// | value | bits per pixel | what a quantised tile looks like  | wire   | vs 100 |
+/// |------:|---------------:|----------------------------------|-------:|-------:|
+/// |   100 |             24 | lossless                         | 521,797 | 1.00x |
+/// |    90 |             18 | 6-6-6, 262k colours              | 399,955 | 1.30x |
+/// |  *80* |             16 | 5-6-5, 65k colours (the default) | 408,935 | 1.28x |
+/// |    70 |             15 | 5-5-5, 32k colours               | 351,947 | 1.48x |
+/// |    50 |             12 | 4-4-4, 4096 colours              | 308,143 | 1.69x |
+///
+/// 6-6-6 comes out *cheaper* than 5-6-5 because a uniform 64-symbol alphabet codes better than
+/// 5-6-5's 32/64/32 one -- it is a candidate default, kept off only because 80 has to stay what krd
+/// did before this type existed.
 public struct QualityBudget: Equatable {
     /// Bits kept per channel, high bits first. Losing bits this way is what gives zlib structure.
     public struct Bits: Equatable {

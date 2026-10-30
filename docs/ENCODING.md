@@ -127,12 +127,16 @@ content, and the ceiling says how far it may go. Three things follow from that.
 
 - **100 is the only lossless rung**, and it is what `--no-quantise` always meant; the old flag is
   kept as an alias so existing command lines keep meaning the same thing.
-- **80 is byte-for-byte what krd did before this flag existed** (5-6-5 behind the two-frame guard), so
-  the default does not change any existing behaviour.
+- **80 makes the same decision krd made before this flag existed** (5-6-5 behind the two-frame
+  guard), so the default rung changes nothing about *what* is sent. The bytes are not identical,
+  though: the entropy stage behind it changed in the same breath (see below), and quantised tiles
+  come out ~17 % smaller than they used to. A tile that is not quantised is byte-for-byte unchanged.
 - **70 and below quantise eagerly**, guard bypassed: at that point the user has asked for bytes, and
-  waiting two frames to save them is the wrong trade. 50 and below clamp here until the encoder
-  grows PNG payloads (grey 8 = 2.16×, 3-3-2 = 5.07× on a photograph: coarse quantisation creates the
-  repeats, so at 8 bits per pixel coarse colour beats fine greyscale — see `probe/gray_probe.py`).
+  waiting two frames to save them is the wrong trade. Everything below 70 resolves to 4-4-4 until
+  the encoder grows PNG payloads (grey 8 = 2.16×, 3-3-2 = 5.07× on a photograph: coarse quantisation
+  creates the repeats, so at 8 bits per pixel coarse colour beats fine greyscale — see
+  `probe/gray_probe.py`). Values between rungs round down, so `--quality 79` is 80 and the panel
+  prints the requested number next to the rung that is actually in force.
 
 Note that 6-6-6 (quality 90) is both **higher fidelity and slightly cheaper** than 5-6-5 on noise:
 a uniform 64-symbol alphabet codes better than 5-6-5's mixed 32/64/32 one. It is a candidate default
@@ -147,9 +151,9 @@ immediately. Huffman-only also broke the ladder's ordering: with every symbol co
 `compress(level:quantise:)` overload, which hard-coded 5-6-5 and dropped the rung; it now passes the
 `Plan` through.
 
-The stats panel's `encoder` row names the rung and the tile counts (`q80 5-6-5`), and the `wire` row
-says how many tiles are being quantised and how many are sent raw — a picture that looks soft because
-a number is wrong is the hardest kind of bug to see from outside.
+The stats panel's `encoder` row names the rung (`q80 5-6-5`), and the `wire` row counts what the last
+frame actually did (`quantised 41 raw 3`) — counted per frame, not guessed from the grid, because a
+picture that looks soft because a number is wrong is the hardest kind of bug to see from outside.
 
 ## Why these levers and not others
 

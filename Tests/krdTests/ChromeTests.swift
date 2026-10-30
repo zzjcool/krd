@@ -100,7 +100,7 @@ final class ChromeTests: XCTestCase {
                                                  state: ChromeState(panel: .stats)),
                           as: UTF8.self)
         XCTAssertTrue(text.contains("q50 4-4-4"), "the encoder row must name the rung")
-        XCTAssertTrue(text.contains("565 41"), "and how many tiles it actually applied to")
+        XCTAssertTrue(text.contains("quantised 41"), "and how many tiles it actually applied to")
         XCTAssertTrue(text.contains("raw 3"), "and how many are being sent raw")
     }
 

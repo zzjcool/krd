@@ -34,6 +34,9 @@ struct Options {
     /// How much colour the encoder may drop (`--quality`, 0...100, default 80 = adaptive 5-6-5).
     /// `--no-quantise` is kept as an alias for 100 so old command lines keep meaning the same thing.
     var quality = QualityBudget.default
+    /// Whether `--quality` (or `--no-quantise`) was typed. The selftest's sha256 is a byte contract,
+    /// so naming a lossy rung next to it is a usage error -- the default must keep working.
+    var qualityPinned = false
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
     /// anything that is not plain ASCII.
@@ -155,8 +158,10 @@ func usage() -> String {
       --no-input          view only, do not inject events
       --quality <0-100>   how much colour the picture may lose: 100 keeps every pixel, 80 (the
                           default) is 5-6-5 on tiles that proved incompressible, 70 is 5-5-5 and
-                          50 is 4-4-4 for everything. Bit depth is the axis; one step down is
-                          ~15-30% fewer bytes (docs/ENCODING.md)
+                          50 is 4-4-4 for everything. Values in between round down to the next
+                          rung (79 is 80). Bit depth is the axis: on a photograph 70 costs 1.48x
+                          and 50 costs 1.69x less than 100 (docs/ENCODING.md). Only the mirror
+                          path encodes pixels, so the wall and --full-frame ignore it
       --no-quantise       same as --quality 100
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
@@ -348,10 +353,16 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
             i += 1
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
-        case "--no-quantise": options.quality = QualityBudget(100)
+        case "--no-quantise": options.quality = QualityBudget(100); options.qualityPinned = true
         case "--quality":
             options.quality = parseQualitySpec(args[safe: i + 1])
+            options.qualityPinned = true
             i += 1
+        // The other `--flag=value` spellings are handled the same way, so this one has to be too:
+        // a user who types `--quality=70` means it.
+        case let arg where arg.hasPrefix("--quality="):
+            options.quality = parseQualitySpec(String(arg.dropFirst("--quality=".count)))
+            options.qualityPinned = true
         case "--cursor": options.drawsCursor = true
         case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
@@ -674,6 +685,15 @@ final class Desk {
         // silent change of the sha256 people compare against.
         if options.selftest && options.scalePinned {
             throw DeskError.message("--selftest always captures at scale 1; drop --scale")
+        }
+        // Same contract, same reason: `--quality 50` would change every byte the hash covers while
+        // still printing a hash. Reported the way the other usage errors are (`--ime`, `--symbols`),
+        // not thrown: a thrown error here reaches only the log, and a usage error the user cannot
+        // see is a usage error that will be reported as "the hash changed".
+        if options.selftest && options.quality.isLossy && options.qualityPinned {
+            FileHandle.standardError.write(
+                Data("krd: --selftest checks a lossless byte contract; use --quality 100\n".utf8))
+            exit(2)
         }
         // Adaptive scaling is the default, but these four paths must not have it: they either have no
         // pipe to measure, or they write something a later run reads back. Pin them to 1 and say why,
