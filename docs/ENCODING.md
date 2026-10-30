@@ -134,10 +134,60 @@ referenced by construction, so the conversion writes in place.
 and 0.02 ms on a typed character. A faster base64 would be invisible; the numbers above say so, and
 that is the point of measuring it.
 
+## The capture size comes from the source, not the pane (issue #69)
+
+`--window` used to size the capture from the pane's box (`cols × cellW × rows × cellH`) whatever the
+source was. ScreenCaptureKit does not upscale a window into a box larger than the window: it draws the
+window 1:1 in the top-left and **pads the rest with black**. On a 1024×678 window in a 70×24 pane
+(1190×792 px box) that was 31.8 % of the frame, and because the pointer was mapped across the whole
+padded box, a click near the picture's right edge was sent ~143 pt to its left — which is why the
+window felt unoperable.
+
+The rule now:
+
+- `f = min(boxW / srcW, boxH / srcH, 1)` — never ask for more pixels than the source has, and never
+  upscale beyond the pane either;
+- the frame is `src × f`, which has the source's aspect by construction, so there is nothing to pad;
+- the placement box is `c = ceil(pxW / cellW)`, `r = ceil(pxH / cellH)`, anchored at the pane's
+  top-left; the cells it does not reach are left to the terminal's background (krd does not paint
+  them);
+- the pointer uses **that same box** — `Viewport` is built from the placement cells, not from the
+  pane — so a click in the leftover cells is outside the picture and is dropped, not guessed.
+
+A source larger than the box is still downscaled into it, so this changes nothing for a full-screen
+capture; `--scale` multiplies the fitted size, and `--display` follows the same rule (a pane wider than
+the display no longer asks for pixels the display does not have).
+
+Measured (macOS 26.6, `--window 530` = a 1024×678 Safari window, share of black pixels in the first
+recorded frame):
+
+| pane | before: frame | before: black | after: frame | after: black |
+|---|---|---:|---|---:|
+| 70×24 | 1190×792 | 31.6 % | 1024×678 (61×21 cells) | 7.5 % |
+| 88×30 | 1496×990 | 56.6 % | 1024×678 (61×21 cells) | 7.5 % |
+| 60×20 | 1020×660 | 8.9 % | 997×660 (59×20 cells) | 6.8 % |
+| 70×24 at `--scale 0.5` | 595×396 | 7.0 % | 512×339 (61×21 cells) | 6.4 % |
+
+The black that is left is the page's own dark UI: the same runs against a light page measure 0.2 %, and
+the padding was visible as a band — the last row and the last column of the before frames are 100 %
+black, of the after frames 0–6 %.
+
+Clicking was checked against a control rather than by eye: the "New Tab" button of that window, at the
+pixel where it sits in the picture, opened a tab in six of six runs (panes 70×24, 30×12 and 88×30, at
+scale 1 and 0.5) and in none of the same six clicks on the previous build. In the 88×30 pane the old
+mapping sent that pixel to `(1022,247)` instead of `(1316,255)` — the 294 pt that made the window
+unusable there.
+
+Clicks in `--window` mode were also broken for a second, unrelated reason on macOS 26:
+`CGEvent.postToPid` delivers keyboard events but drops **mouse** events (Safari and TextEdit both
+ignore them silently), so the mirrored window could not be clicked at all. Mouse events now go through
+the global tap while the mirrored window is the one on top at the pointer, and through the pid only
+when it is covered (issue #17's case).
+
 ## Capture scale: `--scale` (issue #60)
 
 `--scale 0.5` asks the capturer for half as many pixels in each direction (`SCStreamConfiguration.
-width/height` = the pane's own pixel size × the scale) and lets the terminal upscale the image back
+width/height` = the fitted source size × the scale) and lets the terminal upscale the image back
 into the same cell box. Nothing else moves:
 
 - the **crop** (`sourceRect`) is unchanged — this is not zoom;
