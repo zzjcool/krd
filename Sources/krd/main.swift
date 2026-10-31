@@ -655,7 +655,11 @@ final class Desk {
     /// Written once, in `run()` before anything starts: a reproducible path pins the scale
     /// (issue #73). Nothing else mutates it, so the closure reads are not a race.
     private var options: Options
-    private let writer = ScreenWriter()
+    /// `internal`, not `private`, together with the five chrome members below: `PanelWheelRealPathTests`
+    /// drives the wheel the way the product does -- reader decision, then `chromeClick`, then the hop
+    /// to the main queue, then `scrollPanel` -- and that needs the state `applyLayout`/the 1 Hz tick
+    /// would otherwise leave behind. Nothing outside this module can reach any of it.
+    let writer = ScreenWriter()
     /// The mascot card shown until the first frame lands (see LoadingView).
     private var loading: LoadingView?
     private let capturer = Capturer()
@@ -766,9 +770,9 @@ final class Desk {
     // TUI layer (--dev). Everything below is written on the main queue at 1 Hz; the picture
     // never waits for it and the writer serializes the two.
     private let chrome = Chrome()
-    private var chromeState = ChromeState()
-    private var chromeMetrics = ChromeMetrics()
-    private var chromeGeometry: ChromeGeometry?
+    var chromeState = ChromeState()
+    var chromeMetrics = ChromeMetrics()
+    var chromeGeometry: ChromeGeometry?
     private var chromeTimer: DispatchSourceTimer?
     /// The single 1 Hz tick that samples rates and feeds the panel, the log line and the JSON.
     private var diagnosticsTimer: DispatchSourceTimer?
@@ -3530,7 +3534,7 @@ final class Desk {
     /// is the normal case there, and a cell the wall does not know is swallowed rather than
     /// forwarded to the remote desktop (design §8: the route decision is "inside the picture
     /// rect", and the wall has no picture at all).
-    private func chromeClick(row: Int, col: Int, wheel: Int) {
+    func chromeClick(row: Int, col: Int, wheel: Int) {
         if wallMode {
             // A wheel report is not a click: it scrolls the shelf it is over instead of entering
             // the card under the cursor (a two-finger scroll used to enter a window by accident).
@@ -3592,7 +3596,7 @@ final class Desk {
     /// and the bar only — the cell grid. The panel arm is a rectangle out of the geometry
     /// (`Chrome.panelRect`), so a repaint or a resize on the main queue can never turn a panel cell
     /// into "nobody's" half way through this question.
-    private func chromeOwns(row: Int, col: Int) -> Bool {
+    func chromeOwns(row: Int, col: Int) -> Bool {
         guard chromeAvailable, let geometry = chromeGeometry else { return false }
         return chrome.route(row: row, col: col, geometry: geometry) != .picture
     }
