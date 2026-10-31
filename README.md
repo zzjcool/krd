@@ -105,7 +105,11 @@ code — only the pixels are synthetic, so it needs no permission and never stop
 On the landing screen a click is the whole vocabulary: the right bar scrolls the stage and the shelf
 (one click = one page, the wheel = one item), and **clicking a picture opens that window's mirror** —
 krd *becomes* `krd --window <id>` (it `exec`s itself, so there is never a second screen-capture client). That
-mirror wears a one-row macOS-style bar — the window's name, the live rate, the clock — and its `[ - ]` button
+mirror wears a one-row macOS-style bar — the window's name, the live rate, **the delay we measure**
+(`38 ms`: the terminal's `CSI 5n` round trip, or `— ms` when there is no measurement), the clock — and
+**`[ ≡ ]`, which opens a menu of three sliders** (colour = the bit depth, quality = how eagerly the
+encoder spends it, frame rate = 1…20). Each tick on a slider is a click, the change is hot, and a click
+pins the axis it touches so no governor takes it back; `[ ≡ ]` again closes it. Its `[ - ]` button
 (or `Ctrl-\`) shrinks it back into the wall, on the page you left it on. Pictures are centred in their box.
 
 Exit with **`Ctrl-\`**. `Ctrl-C` is forwarded to the remote desktop, like on a real machine.

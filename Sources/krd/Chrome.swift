@@ -52,6 +52,12 @@ struct ChromeGeometry: Equatable {
 
 enum ChromePanel: String, CaseIterable {
     case stats, devices, settings, log, help
+    /// The three sliders (issue #87). A panel rather than a box of its own: a panel is what the
+    /// layout already knows how to give rows to, and its cells go through the same positioned
+    /// writes, the same `panelInsideRows` clamp and the same "never the final row" rule as every
+    /// other one. Only its cells carry `hit` ids -- the tracks below -- which is why it is also the
+    /// only panel whose rows a click can reach (`Chrome.route`).
+    case menu
 
     var title: String { rawValue }
 
@@ -63,6 +69,7 @@ enum ChromePanel: String, CaseIterable {
         case .devices: return 12
         case .log: return 14
         case .help: return 13
+        case .menu: return 6
         }
     }
 
@@ -83,6 +90,7 @@ enum ChromePanel: String, CaseIterable {
         case .devices: return max(1, m.devices.count)      // the "none" row when the list is empty
         case .log: return max(1, m.logTail.count)
         case .help: return 11
+        case .menu: return ChromeAxis.allCases.count + 1   // three sliders and the line that explains them
         }
     }
 
@@ -121,6 +129,15 @@ extension ChromeMetrics {
         guard rttAvailable else { return "—" }
         return Series.show(rttP99Ms)
     }
+
+    /// The bar's delay readout: **the round trip we measure**, with its unit.
+    ///
+    /// The same number the stats panel's `rtt` row and `--bench --json`'s `rtt_ms` print --
+    /// `RTTProbe` sends `CSI 5n` and times the terminal's `CSI 0n` answer, so it is the one figure
+    /// that covers the terminal side, which `frame ms` (cap + pipe) cannot see (issue #87). The unit
+    /// stays on the `—` so the slot still reads as a delay with no measurement in it: a terminal
+    /// without DSR is a capability, not a zero, and `0 ms` would be a lie.
+    var delayLabel: String { "\(rttLabel) ms" }
 
     /// The whole frame, `cap + pipe`, or `—` when the capture half was not measured (`capMs < 0`:
     /// `--mock`, `--replay`, `--selftest`). With no `cap`, `e2eMs` *is* the pipe half, so printing it
@@ -193,6 +210,15 @@ struct ChromeMetrics {
     /// `--quality` as it stands, and the bit depth it allows: "80" and "5-6-5", or "100 lossless".
     var quality = 80
     var qualityLabel = "5-6-5"
+    /// Whether the encoder quantises every tile rather than only the ones that proved
+    /// incompressible -- the second half of `--quality` (`QualityBudget.eager`), which the menu's
+    /// second slider moves on its own.
+    var qualityEager = false
+    /// Whether `--quality auto`'s governor still owns colour and frame rate. A click on the menu
+    /// pins them (that is exactly what `--quality <n>` already means), and this is what the menu's
+    /// `pinned` note reads: a number that walks back by itself after the click is the worst of the
+    /// options (issue #87).
+    var qualityGoverned = false
     /// Tiles the encoder is currently quantising and the tiles it is sending raw (#53/#59).
     var quantisedTiles = 0
     var skippedTiles = 0
@@ -227,6 +253,91 @@ struct ChromeMetrics {
     var logTail: [String] = []
     var mbpsHistory: [Double] = []
     var latencyHistory: [Double] = []
+}
+
+/// The menu's three axes, and the one table that says what a position on each of them means.
+///
+/// The drawer, the `hit` id on a tick and the click path all read this: a tick cannot draw one
+/// value and set another, and the two halves of `--quality` (the bit depth and how eagerly the
+/// encoder spends it) get one axis each instead of two sliders fighting over one number.
+///
+/// The mapping is the one issue #87 proposed and `QualityBudget`'s own table already encodes:
+/// **colour** is the bit depth a frame may lose (50 = 4-4-4, 70 = 5-5-5, 80 = 5-6-5, 90 = 6-6-6,
+/// 100 = lossless), and **quality** is `eager` -- quantise every tile, or only the ones that proved
+/// incompressible. Between them they are exactly today's `--quality`, so nothing about the encoder
+/// had to change.
+enum ChromeAxis: String, CaseIterable {
+    case colour, quality, fps
+
+    var label: String {
+        switch self {
+        case .colour: return "colour"
+        case .quality: return "quality"
+        case .fps: return "fps"
+        }
+    }
+
+    /// Positions on the track. Steps are 0-based everywhere: the id, the drawer and the click.
+    var steps: Int {
+        switch self {
+        case .colour: return ChromeAxis.colourValues.count
+        case .quality: return 2
+        case .fps: return ChromeAxis.fpsRange.count
+        }
+    }
+
+    /// The `--quality` numbers the colour track lands on: `QualityBudget`'s four shipped bit depths
+    /// and lossless, i.e. the rungs its own table documents.
+    static let colourValues = [50, 70, 80, 90, 100]
+    /// `--fps`'s documented range; one cell per frame, so the track is the number.
+    static let fpsRange = 1...20
+
+    static func colourValue(step: Int) -> Int {
+        colourValues[min(max(0, step), colourValues.count - 1)]
+    }
+
+    static func fpsValue(step: Int) -> Int {
+        fpsRange.lowerBound + min(max(0, step), fpsRange.count - 1)
+    }
+
+    /// Where the current `--quality` sits on the colour track: the highest rung it can still reach,
+    /// so the default 80 lands on 5-6-5 and a `--no-quantise` 100 lands on the lossless end.
+    static func colourStep(for quality: Int) -> Int {
+        var step = 0
+        for (i, value) in colourValues.enumerated() where quality >= value { step = i }
+        return step
+    }
+
+    /// The tick this axis is on, given what the stream is doing now.
+    func step(_ m: ChromeMetrics) -> Int {
+        switch self {
+        case .colour: return ChromeAxis.colourStep(for: m.quality)
+        case .quality: return m.qualityEager ? 1 : 0
+        case .fps: return min(max(0, m.fpsTarget - 1), steps - 1)
+        }
+    }
+
+    /// What the value column says next to the track.
+    func value(_ m: ChromeMetrics) -> String {
+        switch self {
+        case .colour: return "\(m.qualityLabel) (\(m.quality))"
+        case .quality: return m.qualityEager ? "eager — quantise every tile"
+                                             : "guarded — only what will not compress"
+        case .fps: return "\(m.fpsTarget) fps"
+        }
+    }
+
+    /// `rung:colour:2`. Prefixed, so it can never collide with a status segment or bar button id,
+    /// and parseable back without a second table of strings in the click path.
+    static func id(_ axis: ChromeAxis, _ step: Int) -> String { "rung:\(axis.rawValue):\(step)" }
+
+    static func parse(_ id: String) -> (axis: ChromeAxis, step: Int)? {
+        let parts = id.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "rung",
+              let axis = ChromeAxis(rawValue: String(parts[1])),
+              let step = Int(parts[2]), step >= 0, step < axis.steps else { return nil }
+        return (axis, step)
+    }
 }
 
 enum ChromeHit: Equatable {
@@ -377,9 +488,18 @@ final class Chrome {
     /// The mirror's top bar: a macOS window dressed for a terminal pane.
     ///
     /// Left: three traffic lights (decoration - `--dev` has no window to close). Middle: what is
-    /// being mirrored. Right: the live rate, the clock, and the one control that matters, `[ - ]`,
-    /// which shrinks this window back into the wall it came from. One row, reversed end to end so it
-    /// reads as furniture rather than as picture.
+    /// being mirrored. Right: the live rate, **the delay we measure**, the clock, and the two
+    /// controls -- `[ ≡ ]`, which opens the three sliders, and `[ - ]`, which shrinks this window
+    /// back into the wall it came from. One row, reversed end to end so it reads as furniture
+    /// rather than as picture.
+    ///
+    /// The delay is `rttLabel`: the terminal's own round trip (`CSI 5n` out, `CSI 0n` back), the
+    /// same series the stats panel's `rtt` row prints -- *not* `frame ms`, which is cap + pipe and
+    /// stops at our last write. It carries its unit, and `— ms` when there is no measurement
+    /// (probe off, or a terminal that never answers `CSI 5n`); issue #87: do not print `0`.
+    ///
+    /// The numbers share one ladder (`barNumbers`): fps > delay > clock > rate, so a narrow pane
+    /// gives up the rate first and the delay outlives both the clock and the rate.
     private func drawBar(row: Int, geometry: ChromeGeometry, m: ChromeMetrics) {
         guard row >= 0, row < rows, cols > 0 else { return }
         for x in 0..<cols { set(x, row, " ", .reverse) }
@@ -391,26 +511,57 @@ final class Chrome {
             x += DisplayWidth.of(dot)
         }
         x += 1
-        // The title gets whatever the right side does not need, and is cut rather than wrapped.
+        // The two buttons own the right edge and are never dropped -- `[ ≡ ]` is the only way into
+        // the sliders and `[ - ]` is the only way out of the window, and a bar that can only be
+        // looked at is exactly what issue #87 was about.
         let button = " [ - ] "
-        let clock = m.clock.isEmpty || cols < 44 ? "" : "  " + m.clock
-        let rate = cols < 66 ? "" : String(format: "%4.0f fps  ·  %.1f MB/s", m.fps, m.mbps)
-        let right = DisplayWidth.of(button) + DisplayWidth.of(clock) + DisplayWidth.of(rate)
+        let menu = " [ ≡ ] "
+        let buttons = DisplayWidth.of(button) + DisplayWidth.of(menu)
+        let numbers = Chrome.barNumbers(room: max(0, cols - x - buttons - 1),
+                                        fps: String(format: "%4.0f fps", m.fps),
+                                        mbps: String(format: "%.1f MB/s", m.mbps),
+                                        delay: m.delayLabel,
+                                        clock: m.clock)
+        // The title gets whatever the right side does not need, and is cut rather than wrapped.
+        let right = buttons + (numbers.isEmpty ? 0 : DisplayWidth.of(numbers) + 2)
         let room = max(0, cols - x - right - 1)
         if room > 8 {
             let title = DisplayWidth.truncate(m.title, to: room)
             text(x, row, title, .barBright, hit: "shrink")
         }
         var rx = cols - DisplayWidth.of(button)
-        if !clock.isEmpty {
-            rx -= DisplayWidth.of(clock)
-            text(rx, row, clock, .barDim)
+        text(rx, row, button, .barBright, hit: "shrink")
+        rx -= DisplayWidth.of(menu)
+        text(rx, row, menu, .barBright, hit: "menu")
+        if !numbers.isEmpty {
+            rx -= DisplayWidth.of(numbers) + 2
+            text(rx, row, "  " + numbers, .barDim)
         }
-        if !rate.isEmpty, rx - DisplayWidth.of(rate) > x {
-            rx -= DisplayWidth.of(rate)
-            text(rx, row, rate, .barDim)
+    }
+
+    /// The bar's numbers, given the cells they have: `fps`, the rate, the delay, the clock.
+    ///
+    /// One list in the bar's priority order (issue #87: **fps > delay > clock > rate**), trimmed
+    /// from the bottom until it fits, so a narrow pane loses the rate first and `fps` last and the
+    /// delay the issue asked for outlives the clock. Pure arithmetic -- a test can ask the ladder
+    /// about a width without a pane, a pty or a terminal.
+    static func barNumbers(room: Int, fps: String, mbps: String, delay: String, clock: String,
+                           sep: String = " · ") -> String {
+        guard room > 0, !fps.isEmpty else { return "" }
+        let parts = [fps, mbps, delay, clock]
+        var keep = [true, true, true, !clock.isEmpty]      // fps, rate, delay, clock
+        func joined() -> String {
+            parts.enumerated().filter { keep[$0.offset] }.map(\.element).joined(separator: sep)
         }
-        text(cols - DisplayWidth.of(button), row, button, .barBright, hit: "shrink")
+        guard DisplayWidth.of(joined()) > room else { return joined() }
+        // Lowest priority first: the rate, then the clock, then the delay. `fps` is never dropped -
+        // it is the one number the bar always had.
+        for i in [1, 3, 2] {
+            keep[i] = false
+            if DisplayWidth.of(joined()) <= room { break }
+        }
+        let text = joined()
+        return DisplayWidth.of(text) <= room ? text : ""
     }
 
     /// Force a full repaint on the next draw (after a resize or a cleared screen).
@@ -434,11 +585,14 @@ final class Chrome {
             && y >= geometry.panelTop && y < geometry.panelTop + geometry.panelHeight
     }
 
-    /// The routing decision, in priority order: panel rectangle → chrome row with a `hit` id →
-    /// picture. Only the middle arm reads `cells`, and only for the two rows that are drawn as
-    /// clickable text (`statusRow`, `barRow`); everything else is a rectangle.
+    /// The routing decision, in priority order: panel rectangle → a cell with a `hit` id (the panel's
+    /// tracks, then the bar and the status line) → picture.
+    ///
+    /// Only the middle arm reads `cells`, and a panel cell with **no** id is still `.panel` -- which
+    /// is what the wheel needs (#118), and which no other panel can lose, because no other panel
+    /// draws an id on its rows. The menu's three tracks do, and a click on a tick has to arrive
+    /// through the same `hit` id path the bar's own buttons use (issue #87).
     func route(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeRoute {
-        if Chrome.panelRect(geometry, row: row, col: col) { return .panel }
         // One snapshot of the grid, because `resize` runs on the main queue and replaces `cells`,
         // `cols` and `rows` one field at a time while this runs on the reader thread. Reading them
         // again inside the index expression is a race that can trap (an index past the end of the
@@ -450,8 +604,16 @@ final class Chrome {
         // `cols`/`rows` are three separate loads, so a resize between them can still leave this
         // thread holding the new grid's size with the old grid's array. That answers "nobody's"
         // instead of reading a cell the array does not have.
-        guard cols > 0, rows > 0, cells.count == cols * rows,
-              y >= 0, y < rows, x >= 0, x < cols else { return .picture }
+        let sane = cols > 0 && rows > 0 && cells.count == cols * rows
+            && y >= 0 && y < rows && x >= 0 && x < cols
+        if Chrome.panelRect(geometry, row: row, col: col) {
+            // A control inside the box, or the box itself. Only the menu draws ids; every other
+            // panel's rows carry none, so their cells keep meaning "the panel owns the pointer".
+            guard sane else { return .panel }
+            let id = cells[y * cols + x].hit
+            return id.isEmpty ? .panel : .status(id)
+        }
+        guard sane else { return .picture }
         if y == geometry.statusRow || y == geometry.barRow {
             let id = cells[y * cols + x].hit
             return id.isEmpty ? .picture : .status(id)
@@ -745,6 +907,40 @@ final class Chrome {
             for (i, item) in items.enumerated() { line(i, item.0, item.1, "", item.2) }
             if let r = slot(items.count + 1) {
                 text(2, y + 1 + r, "bold = hot (no restart) · dim = cold (restart the stream)", .dim)
+            }
+        case .menu:
+            // Three axes, one row each: the label column every panel uses, a track of ticks, and the
+            // value as it stands. Every tick carries a `hit` id (`rung:<axis>:<step>`), so a click is
+            // the whole interaction -- no key opens this and no key moves it. The bar exists on
+            // pages without `--dev` (a handed-over window mirror) and the chord table is being
+            // reworked elsewhere (#180), so the mouse route has to stand on its own (issue #87).
+            for (i, axis) in ChromeAxis.allCases.enumerated() {
+                guard let r = slot(i) else { continue }
+                let y0 = y + 1 + r
+                text(2, y0, DisplayWidth.pad(axis.label, to: 14), .dim)
+                let selected = axis.step(m)
+                // The track keeps a value column to its right; on a narrow pane that is what gives
+                // way, and a tick that is not drawn is a tick that cannot be clicked.
+                let valueRoom = max(6, DisplayWidth.of(axis.value(m)) + 1)
+                let track = max(1, min(axis.steps, w - valueCol - valueRoom - 1))
+                for step in 0..<track {
+                    let reached = step <= selected
+                    text(valueCol + step, y0, reached ? "█" : "▁",
+                         step == selected ? .barBright : (reached ? .accent : .dim),
+                         hit: ChromeAxis.id(axis, step))
+                }
+                text(valueCol + track + 2, y0,
+                     DisplayWidth.truncate(axis.value(m), to: max(0, w - valueCol - track - 3)),
+                     .bright)
+            }
+            if let r = slot(ChromeAxis.allCases.count) {
+                // Says the two things a reader cannot guess: how to close it, and what `pinned`
+                // means -- a slider whose value walks back by itself is the worst of the options,
+                // so a click pins the axis it touches (issue #87).
+                let note = m.qualityGoverned
+                    ? "click a tick to set it · a click pins the axis (no governor) · [ ≡ ] closes"
+                    : "click a tick to set it · pinned: no governor takes it back · [ ≡ ] closes"
+                text(2, y + 1 + r, DisplayWidth.truncate(note, to: max(0, w - 4)), .dim)
             }
         case .devices:
             if m.devices.isEmpty, let r = slot(0) {
