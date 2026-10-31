@@ -85,8 +85,9 @@ final class ReplayRefusalTests: XCTestCase {
         XCTAssertTrue(refusal.contains("frame 1"), refusal)
         XCTAssertTrue(refusal.contains("000001.raw"), refusal)
         XCTAssertTrue(refusal.contains("20 B"), "the actual size on disk: \(refusal)")
-        XCTAssertTrue(refusal.contains("4x3 px, 3 bpp = 36 B"),
+        XCTAssertTrue(refusal.contains(replay.entries[1].declaredSize),
                       "the size its own manifest line declares: \(refusal)")
+        XCTAssertTrue(refusal.contains("36 B"), refusal)
         XCTAssertNil(replay.refusal(0, layoutWidth: 4, layoutHeight: 2, bpp: 3),
                      "frame 0 is intact and must not be blamed for its neighbour")
     }
@@ -106,7 +107,8 @@ final class ReplayRefusalTests: XCTestCase {
         XCTAssertTrue(refusal.contains("frame 1"), refusal)
         XCTAssertTrue(refusal.contains("000001.raw"), refusal)
         XCTAssertTrue(refusal.contains("missing"), refusal)
-        XCTAssertTrue(refusal.contains("4x3 px, 3 bpp = 36 B"), refusal)
+        XCTAssertTrue(refusal.contains(replay.entries[1].declaredSize), refusal)
+        XCTAssertTrue(refusal.contains("36 B"), refusal)
     }
 
     /// Two intact files whose lines declare different sizes: `frame(_:)` now believes each line, so
@@ -131,5 +133,49 @@ final class ReplayRefusalTests: XCTestCase {
         // exactly what it is for -- so "this one frame is fine" is the per-index call.
         XCTAssertNil(replay.refusal(1, layoutWidth: 4, layoutHeight: 3, bpp: 3),
                      "frame 1 is exactly what a 4x3 layout renders")
+    }
+
+    /// A line that declares no frame at all (a `w` of 0) makes the whole set unusable, wherever in the
+    /// file it sits: the pre-flight only ever looked at the sizes, so it would have passed a zero-size
+    /// entry on to `frame(_:)` and reported a "truncated" frame that is simply not a frame.
+    func testAManifestLineDeclaringNoFrameIsRefused() throws {
+        try writeManifest([
+            Self.headerLine,
+            frameLine(n: 0, w: 4, h: 0, tMs: 0),
+            frameLine(n: 1, w: 4, h: 2, tMs: 33.3),
+        ])
+        try writeFile(pixels(count: 4 * 2 * 3, seed: 0x10), "000000.raw")
+        try writeFile(pixels(count: 4 * 2 * 3, seed: 0x40), "000001.raw")
+
+        XCTAssertNil(FrameReplay.open(dir.path), "a middle line with no frame makes the set unusable")
+    }
+
+    /// A hand-edited line can declare a size no `Int` holds, and `Entry.byteCount` multiplies it: the
+    /// manifest is refused where it is read instead of trapping the pre-flight (measured before this:
+    /// `Trace/BPT trap: 5`, exit 133, where cd9ac5d exited 0).
+    func testALineWhoseSizeOverflowsIsRefusedWithoutTrapping() throws {
+        try writeManifest([
+            Self.headerLine,
+            #"{"n":0,"w":100000000000,"h":100000000000,"bpp":3,"t_ms":0}"#,
+            frameLine(n: 1, w: 4, h: 2, tMs: 33.3),
+        ])
+        try writeFile(pixels(count: 4 * 2 * 3, seed: 0x10), "000000.raw")
+        try writeFile(pixels(count: 4 * 2 * 3, seed: 0x40), "000001.raw")
+
+        XCTAssertNil(FrameReplay.open(dir.path), "a size no Int holds is not a frame this build renders")
+    }
+
+    /// The replay loop's belt-and-braces branch: an index the manifest never declared has to be named
+    /// rather than answered with a bare `nil`.
+    func testAFrameIndexPastTheManifestIsNamedNotSilent() throws {
+        try writeManifest([
+            Self.headerLine,
+            frameLine(n: 0, w: 4, h: 2, tMs: 0),
+        ])
+        try writeFile(pixels(count: 4 * 2 * 3, seed: 0x10), "000000.raw")
+
+        let replay = try XCTUnwrap(FrameReplay.open(dir.path))
+        let refusal = try XCTUnwrap(replay.refusal(99, layoutWidth: 4, layoutHeight: 2, bpp: 3))
+        XCTAssertTrue(refusal.contains("does not exist"), refusal)
     }
 }
