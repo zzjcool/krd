@@ -85,6 +85,12 @@ extension ChromeMetrics {
         guard rttAvailable else { return "—" }
         return Series.show(rttP99Ms)
     }
+
+    /// The whole frame, `cap + pipe`, or `—` when the capture half was not measured (`capMs < 0`:
+    /// `--mock`, `--replay`, `--selftest`). With no `cap`, `e2eMs` *is* the pipe half, so printing it
+    /// as the frame put a confident `0 ms` in one column of a row whose own note said
+    /// `cap — (no PTS)` (#117). The unit belongs to the caller, like its two neighbours.
+    var e2eLabel: String { capMs < 0 ? "—" : "\(Int(e2eMs))" }
 }
 
 /// One second of numbers: the same counters the `--debug` stats line prints, plus the rates it
@@ -400,8 +406,12 @@ final class Chrome {
         let scale: Seg = ("\(String(format: "%.2g", m.scale))×", m.scaleAuto ? .accent : .warn, "scale")
         let bw: Seg = ("\(String(format: "%.1f", m.mbps)) MB/s", .plain, "stats")
         // `frame`, not `pipe`: since #52 this number is cap + pipe, and the bar must not call all of
-        // it ours -- at 10 fps the capture half is ~50 ms on its own.
-        let lat: Seg = (cols >= 84 ? "frame \(Int(m.e2eMs)) ms" : "\(Int(m.e2eMs)) ms", latStyle, "stats")
+        // it ours -- at 10 fps the capture half is ~50 ms on its own. With no `cap` measured the sum
+        // *is* the pipe half, so the segment takes the panel's name for that half; `frame 0 ms` read
+        // as a measured end to end (#117).
+        let latencyName = m.capMs < 0 ? "pipe" : "frame"
+        let lat: Seg = (cols >= 84 ? "\(latencyName) \(Int(m.e2eMs)) ms"
+                                   : "\(Int(m.e2eMs)) ms", latStyle, "stats")
         let menu: Seg = (prefix ? "^\\ … " : "^\\ menu ", .dim, "help")
         let scaled = m.scale < 0.999
         switch cols {
@@ -472,7 +482,7 @@ final class Chrome {
             // The split that answers "was it the capture or the write" (issue #52).
             let cap = m.capMs < 0 ? "cap — (no PTS)"
                 : String(format: "cap %.0f p99 %.0f", m.capMs, m.capP99Ms)
-            line(next(), "frame", "\(Int(m.e2eMs)) ms",
+            line(next(), "frame", "\(m.e2eLabel) ms",
                  String(format: "%@ · pipe %.0f p99 %.0f", cap, m.pipeMs, m.pipeP99Ms))
             // The network's own share, which `pipe` cannot see: it is measured on the terminal's
             // reply, so it includes whatever is still queued in front of the picture.
