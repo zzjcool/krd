@@ -23,6 +23,7 @@ final class DiagnosticsTests: XCTestCase {
         m.capP99Ms = 55
         m.pipeMs = 12.5
         m.pipeP99Ms = 20
+        m.pipeMaxMs = 1368
         m.e2eMs = 52.5
         m.fps = 9.5
         m.captureFps = 10
@@ -46,6 +47,8 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(object["cap_p99_ms"] as? Double, 55)
         XCTAssertEqual(object["pipe_ms"] as? Double, 12.5)
         XCTAssertEqual(object["pipe_p99_ms"] as? Double, 20)
+        XCTAssertEqual(object["pipe_max_ms"] as? Double, 1368,
+                       "the worst frame in the ring, which p99 of 300 cannot show (#91)")
         XCTAssertEqual(object["e2e_ms"] as? Double, 52.5, "the number the panel prints as `frame`")
         XCTAssertEqual(object["fps"] as? Double, 9.5)
         XCTAssertEqual(object["capture_fps"] as? Double, 10)
@@ -99,10 +102,12 @@ final class DiagnosticsTests: XCTestCase {
         m.capP99Ms = 55
         m.pipeMs = 1.5
         m.pipeP99Ms = 2.5
+        m.pipeMaxMs = 1368
         m.e2eMs = 41.5
         let panel = statsPanel(m)
         XCTAssertTrue(panel.contains("cap 40 p99 55"), panel)
         XCTAssertTrue(panel.contains("pipe 2 p99 2") || panel.contains("pipe 1 p99 2"), panel)
+        XCTAssertTrue(panel.contains("max 1368"), "a single 1,368 ms frame is readable in the row: \(panel)")
     }
 
     func testThePanelTellsQuietFromUnaskedAboutTheRoundTrip() {
