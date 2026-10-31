@@ -12,8 +12,9 @@ import Foundation
 ///
 /// So the decision is *ambient*, not per-call-site: `passthrough` is set once from
 /// `TmuxPassthrough.resolve` before anything is written, and `open`/`close`/`sequence`/`write` are
-/// the only way a graphics escape is built. Every emitter goes through them — the nine `appendAPC`
-/// sites in `Render`, the probe's two, and the debug delete — because there is no other constructor.
+/// the only way a graphics escape is built. Every emitter goes through them — every emission site in
+/// `Render` (the `appendAPC` ones and the chunked `appendTransmitChunk` ones alike), all three of the
+/// probe's APCs, and the debug delete — because there is no other constructor.
 ///
 /// Two guards keep it that way without a grep:
 /// - `isFullyEnveloped` is a real parser (§below), run by `ScreenWriter.flushLocked` on every chunk
