@@ -130,23 +130,26 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(replies(events).first?.image, 31)
     }
 
-    // MARK: - the rest of the string-terminated family
+    // MARK: - what is *not* a reply: the rest of the string family
 
-    /// DCS (`ESC P`), SOS (`ESC X`) and PM (`ESC ^`) are the same class of sequence: replies, not
-    /// keys. A terminal that answers `CSI 6n` inside a DCS, or a `tmux` passthrough, lands here.
-    func testOtherStringSequencesAreNotTypedEither() {
+    /// `DCS` (`ESC P`), `SOS` (`ESC X`) and `PM` (`ESC ^`) are **not** replies as far as krd is
+    /// concerned. Those three prefixes are exactly how a legacy terminal encodes Alt+P, Alt+X and
+    /// Alt+^, so scanning them for an `ST` ate a legal keystroke and every key typed while it
+    /// waited (the gate's stages D/E). Only the prefix krd itself provokes — `ESC _ G` — enters the
+    /// reply scan; these keep the pre-#109 meaning byte for byte, which is what this pins.
+    func testOtherStringSequencesStayKeystrokes() {
         let dcs = parse(Array("\u{1B}P1;2|hello\u{1B}\\".utf8))
-        XCTAssertEqual(injected(dcs).count, 0, "DCS became input: \(trace(dcs))")
-        XCTAssertEqual(replies(dcs).first?.status, "unparsed", "a DCS body is reported, not guessed")
-        XCTAssertEqual(notices(dcs).count, 0)
+        XCTAssertEqual(replies(dcs).count, 0, "a DCS is not a graphics reply: \(trace(dcs))")
+        XCTAssertEqual(dcs.first, .text("P", [.maskAlternate]), trace(dcs))
+        XCTAssertEqual(injected(dcs).count, 11, "DCS changed what reaches the desktop: \(trace(dcs))")
 
-        let sos = parse(Array("\u{1B}Xjunk\u{1B}\\".utf8))
-        XCTAssertEqual(injected(sos).count, 0, "SOS became input: \(trace(sos))")
-        XCTAssertEqual(replies(sos).count, 1)
+        let sos = parse(Array("\u{1B}Xjunk".utf8))
+        XCTAssertEqual(sos.first, .text("X", [.maskAlternate]), trace(sos))
+        XCTAssertEqual(injected(sos).count, 5, trace(sos))
 
-        let pm = parse(Array("\u{1B}^junk\u{1B}\\".utf8))
-        XCTAssertEqual(injected(pm).count, 0, "PM became input: \(trace(pm))")
-        XCTAssertEqual(replies(pm).count, 1)
+        let pm = parse(Array("\u{1B}^junk".utf8))
+        XCTAssertEqual(pm.first, .text("^", [.maskAlternate]), trace(pm))
+        XCTAssertEqual(injected(pm).count, 5, trace(pm))
     }
 
     /// `KRD_Q=0` also makes the terminal answer the *transmit* (`ESC _ G a=t …`), with the same
@@ -179,15 +182,123 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(replies(withID).first?.status, "EINVAL: bad; param")
     }
 
-    /// A `DCS`/`SOS`/`PM` that never terminates still emits nothing — the read loop's idle tick
-    /// drops the stalled bytes, so the keyboard comes back without a payload byte being typed.
-    func testUnterminatedStringSequenceEmitsNothing() {
-        let dcs = parse(Array("\u{1B}P1;2|hello".utf8))
-        XCTAssertEqual(dcs.count, 0, "an unfinished DCS leaked: \(trace(dcs))")
-        let sos = parse(Array("\u{1B}Xjunk".utf8))
-        XCTAssertEqual(sos.count, 0, "an unfinished SOS leaked: \(trace(sos))")
-        let pm = parse(Array("\u{1B}^junk".utf8))
-        XCTAssertEqual(pm.count, 0, "an unfinished PM leaked: \(trace(pm))")
+    // MARK: - a sequence that stops arriving (the read loop's idle tick)
+
+    /// An `APC` that never terminates emits nothing while it is incomplete: the body is buffered
+    /// (or, past the cap, discarded) and no byte of it is typed.
+    func testUnterminatedAPCEmitsNothing() {
+        let events = parse(Array("\u{1B}_Gi=31;OK".utf8))
+        XCTAssertEqual(events.count, 0, "an unfinished APC leaked: \(trace(events))")
+    }
+
+    /// Stage F of the gate's transcript: `ESC _`, a pause, then the rest of the reply. The two-byte
+    /// prefix used to be released as Alt+`_`, which *legitimised the tail* — `G i=31;OK ST` then
+    /// arrived as `G`, `i`, `=`, … and typed itself. The prefix is how a reply starts, so a stalled
+    /// one is discarded together with its tail, and only a lone `ESC` is still a key.
+    func testAStalledAPCLosesItsTailToTheDiscard() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+
+        parser.feed(Array("\u{1B}_".utf8))
+        XCTAssertEqual(events.count, 0, "half a reply emitted early: \(trace(events))")
+        XCTAssertEqual(parser.resolveStall(), .sequence)
+        XCTAssertEqual(parser.buffer.count, 0, "the head was left in the buffer")
+
+        parser.feed(Array("Gi=31;OK\u{1B}\\".utf8))
+        XCTAssertEqual(events.count, 0, "the tail of a stalled reply was typed: \(trace(events))")
+        parser.feed(Array("hi".utf8))                     // ... and the keyboard is back
+        XCTAssertEqual(events, [.text("h", []), .text("i", [])], trace(events))
+    }
+
+    /// The same rule once the prefix has arrived: `ESC _ G i=31` then nothing. Dropping it would
+    /// hand the rest of the body to the byte loop, so it latches the discard instead.
+    func testAStalledAPCBodyAlsoLosesItsTail() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+        parser.feed(Array("\u{1B}_Gi=31".utf8))
+        XCTAssertEqual(parser.resolveStall(), .sequence)
+        parser.feed(Array(";OK\u{1B}\\".utf8))
+        XCTAssertEqual(events.count, 0, "the tail of a stalled reply was typed: \(trace(events))")
+    }
+
+    /// Stage G: an `OSC` reply that stops mid-body. This is the regression the gate found — the read
+    /// loop used to `reset()`, discard the head, and parse `SECRET` (the rest of the payload) as the
+    /// keys S, E, C, R, E, T into the mirrored desktop.
+    func testAStalledOSCLosesItsTailToTheDiscard() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+
+        parser.feed(Array("\u{1B}]52;c;".utf8))            // a clipboard read reply, truncated
+        XCTAssertEqual(events.count, 0, trace(events))
+        XCTAssertEqual(parser.resolveStall(), .sequence)
+
+        parser.feed(Array("SECRET\u{1B}\\".utf8))
+        XCTAssertEqual(injected(events).count, 0, "the tail of a stalled OSC was typed: \(trace(events))")
+        parser.feed(Array("hi".utf8))
+        XCTAssertEqual(events, [.text("h", []), .text("i", [])], trace(events))
+    }
+
+    /// The two discards keep the asymmetry the terminator scan uses: `BEL` ends an `OSC` and never
+    /// an `APC` (a `BEL` inside a reply is payload, so ending there would type the rest of it).
+    func testTheDiscardsEndWhereTheSequencesEnd() {
+        let osc = InputParser()
+        var oscEvents: [Event] = []
+        osc.onEvent = { oscEvents.append($0) }
+        osc.feed(Array("\u{1B}]52;c;".utf8))
+        _ = osc.resolveStall()
+        osc.feed(Array("ab\u{07}hi".utf8))
+        XCTAssertEqual(oscEvents, [.text("h", []), .text("i", [])], trace(oscEvents))
+
+        let apc = InputParser()
+        var apcEvents: [Event] = []
+        apc.onEvent = { apcEvents.append($0) }
+        apc.feed(Array("\u{1B}_".utf8))
+        _ = apc.resolveStall()
+        apc.feed(Array("ab\u{07}cd\u{1B}\\hi".utf8))
+        XCTAssertEqual(apcEvents, [.text("h", []), .text("i", [])],
+                       "a BEL ended an APC discard: \(trace(apcEvents))")
+    }
+
+    /// Only a lone `ESC` has no tail, so it is the only stalled buffer still released as a key.
+    func testAStalledLoneEscapeIsStillTheEscKey() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+        parser.feed([0x1B])
+        XCTAssertEqual(parser.resolveStall(), .escape)
+        XCTAssertEqual(parser.buffer.count, 0)
+        XCTAssertEqual(events.count, 0, "the read loop decides what the Esc key is")
+    }
+
+    /// Half a keystroke (`ESC O` is half of F1, `ESC [ 1 ; 5` half a modified arrow) is neither a
+    /// reply nor a key: dropped, and — unlike a reply — it latches no discard, so the next key is
+    /// unaffected. This is the pair the gate's stages D/E were about.
+    func testAStalledKeySequenceIsDroppedWithoutADiscard() {
+        for half in ["\u{1B}O", "\u{1B}[1;5"] {
+            let parser = InputParser()
+            var events: [Event] = []
+            parser.onEvent = { events.append($0) }
+            parser.feed(Array(half.utf8))
+            XCTAssertEqual(events.count, 0, "half a key emitted: \(trace(events))")
+            XCTAssertEqual(parser.resolveStall(), .sequence)
+            parser.feed(Array("ab".utf8))
+            XCTAssertEqual(events, [.text("a", []), .text("b", [])],
+                           "\(half): the discard ate the next key: \(trace(events))")
+        }
+    }
+
+    /// Which prefixes may latch a discard. `OSC` and `APC` carry a reply's payload; the rest are
+    /// keys in progress and must not swallow anything.
+    func testOnlyTheReplyPrefixesLatchADiscard() {
+        XCTAssertTrue(InputParser.isReplyPrefix([0x1B, 0x5F]))
+        XCTAssertTrue(InputParser.isReplyPrefix([0x1B, 0x5D, 0x35]))
+        XCTAssertFalse(InputParser.isReplyPrefix([0x1B]))
+        XCTAssertFalse(InputParser.isReplyPrefix([]))
+        XCTAssertFalse(InputParser.isReplyPrefix([0x1B, 0x4F]))
+        XCTAssertFalse(InputParser.isReplyPrefix([0x1B, 0x5B, 0x31]))
     }
 
     // MARK: - the keystroke this must not break
@@ -210,6 +321,19 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(events.count, 0, "half a sequence emitted early: \(trace(events))")
         parser.feed(Array("x".utf8))
         XCTAssertEqual(events, [.text("_", [.maskAlternate]), .text("x", [])])
+    }
+
+    /// Alt-`P`/`X`/`^` arrive as `ESC P`/`X`/`^` — the same bytes a `DCS`/`SOS`/`PM` starts with.
+    /// They resolve on the spot, so the key is not even *slow*, let alone eaten.
+    func testAltLettersSharingASequencePrefixAreImmediate() {
+        for (letter, bytes) in [("P", "\u{1B}P"), ("X", "\u{1B}X"), ("^", "\u{1B}^")] {
+            let parser = InputParser()
+            var events: [Event] = []
+            parser.onEvent = { events.append($0) }
+            parser.feed(Array(bytes.utf8))
+            XCTAssertEqual(events, [.text(Character(letter), [.maskAlternate])], bytes)
+            XCTAssertEqual(parser.buffer.count, 0, "\(bytes) was held instead of resolved")
+        }
     }
 
     // MARK: - the cap (the #149 rule, for the string family)

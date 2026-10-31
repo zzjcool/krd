@@ -48,10 +48,10 @@ fixes it, it is a terminal bug worth reporting upstream, not a krd bug.
 
 **Cause.** `q=2` suppresses every protocol reply, including errors. This is the right default
 (replies cost bytes on a healthy link), but it hides the reason nothing was drawn.
-**Fix.** `KRD_Q=1` (failures only) or `KRD_Q=0` (everything): since issue #109 krd parses replies, so
-a refusal is one log line — `krd: image 137 refused: EINVAL: decompression failed` — and no byte of
-the reply is typed into the desktop. `KRD_Q=0 --no-input` still works and is the quietest way to
-read the raw `OK`/`EINVAL: …`/`ENOENT: …` bodies.
+**Fix.** `KRD_Q=1` (failures only) or `KRD_Q=0` (everything): since issue #109 krd parses the `APC` a
+terminal answers in, so a refusal is one log line — `krd: image 137 refused: EINVAL: decompression
+failed` — and none of that reply is typed into the desktop. `KRD_Q=0 --no-input` still works and is
+the quietest way to read the raw `OK`/`EINVAL: …`/`ENOENT: …` bodies.
 
 ### 3. A per-tile delete wipes the whole picture
 
@@ -260,8 +260,10 @@ Two things worth knowing:
 ### 21. `KRD_Q=0` typed garbage into the desktop
 
 **Cause.** Protocol replies arrive on stdin, which is in raw mode and parsed as input; the first
-byte sequence looked like Alt-`G` and the rest became text. Fixed by issue #109: `APC G … ST` (and
-`DCS`/`SOS`/`PM`) is parsed into a typed reply event, counted and logged, and is never injected.
+byte sequence looked like Alt-`G` and the rest became text. Fixed by issue #109: the graphics `APC`
+(`ESC _ G … ST`) is parsed into a typed reply event, counted and logged, and is never injected —
+including a reply that stops arriving half-way, whose tail is swallowed to its terminator. `DCS`,
+`SOS` and `PM` are deliberately *not* parsed: those prefixes are Alt+P, Alt+X and Alt+^ too.
 **Fix.** Update. In a build without the fix: only use `KRD_Q=0` with `--no-input`, or inspect
 `KRD_DUMP` offline.
 

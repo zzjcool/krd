@@ -388,9 +388,26 @@ APC G i=<iid>;OK ST                     # success
 APC G i=<iid>;<ERRNO>:<text> ST         # e.g. EINVAL: decompression failed, ENOENT: ...
 ```
 
-krd *does* parse replies (issue #109). The body of an `APC` (`ESC _ … ST`) — and of the rest of the
-string-terminated family, `DCS`/`SOS`/`PM` — becomes one typed `Event.graphicReply` and is counted
-as a reply, never as input: no byte of it can reach the mirrored desktop, whatever `KRD_Q` says.
+krd *does* parse replies (issue #109) — the `APC` the graphics protocol answers in, and only that:
+
+- `APC G … ST` (`ESC _ G … ESC \`) becomes exactly one typed `Event.graphicReply`, is counted as a
+  reply, and is never input: no byte of it reaches the mirrored desktop, terminator included.
+- The third byte decides, not a timer. `ESC _` followed by anything but `G` is the Alt-`_` keystroke
+  it always was, and `DCS`/`SOS`/`PM` (`ESC P`, `ESC X`, `ESC ^`) are **not** parsed at all: those
+  three prefixes are how a legacy terminal encodes Alt+P, Alt+X and Alt+^, so a legal key wins over a
+  sequence krd never asked for. They mean exactly what they meant before #109.
+- A reply that stops arriving is discarded together with its tail, never released. `ESC _` (or
+  `ESC ]`, a clipboard answer) sent on its own used to be typed as Alt+`_`, which legitimised the
+  rest: the next `G i=31;OK ST` arrived as keystrokes. A stalled `OSC` is now swallowed to `BEL` or
+  `ST`, a stalled `APC` to `ST`, and no byte up to that terminator becomes input.
+- Half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is the one thing still dropped on a timeout: 500 ms
+  (five idle polls of 100 ms) with no bytes, then it is discarded — not typed. A lone `ESC` is the
+  Esc key, and a complete `ESC x` is Alt+`x`, both immediately.
+
+The bound this leaves: the bytes are safe, the reply itself can be *lost*. If a terminal writes a
+reply in pieces more than one idle poll (100 ms) apart, the head is discarded and the tail swallowed
+— nothing is typed and nothing is reported. A local pty writes a ~40 B reply in one go.
+
 The first refusal per image is logged once, where the log panel already is:
 
 ```
@@ -399,8 +416,7 @@ krd: image 137 refused: EINVAL: decompression failed
 
 So `KRD_Q=1` (success suppressed, failures reported — the kitty recommendation) is safe to use with
 input on; `KRD_Q=0` adds the per-success `OK` line and is mainly useful with `--debug`. A body krd
-cannot classify is reported as `unparsed` rather than guessed at, and only `ESC _ G` is treated as a
-reply: any other `ESC _` stays the Alt-`_` keystroke it always was.
+cannot classify is reported as `unparsed` rather than guessed at.
 
 ## 9. References
 

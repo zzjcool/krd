@@ -182,6 +182,10 @@ final class InputReader {
     private let stoppedSignal = DispatchSemaphore(value: 0)
     /// 100 ms ticks with no bytes for the escape sequence sitting in `parser.buffer` (see `loop`).
     private var idleReads = 0
+    /// How long half a *keystroke* is held before it is dropped: five of the 100 ms poll ticks, i.e.
+    /// 500 ms. A reply prefix does not wait at all — see `loop`. This is the number
+    /// `docs/PROTOCOL.md` §8 quotes.
+    private static let stallGraceTicks = 5
 
     private func loop() {
         defer {
@@ -198,36 +202,38 @@ final class InputReader {
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {
-                // An escape sequence that stopped arriving. Two different things can look like
-                // this, and both must leave the keyboard working:
+                // An escape sequence that stopped arriving. Three things can look like this, and
+                // all three must leave the keyboard working (issue #109):
                 //
-                // - `ESC x` with nothing after it is Alt+`x` (a legal keystroke: Option+Shift+P on
-                //   a legacy terminal *is* `ESC P`, and that is also how a DCS starts). The parser
-                //   holds it for one tick to see whether a string sequence follows; after that it
-                //   is the keystroke, exactly as before issue #109.
-                // - Anything longer that stopped (`ESC _ G …` without its `ST`, a truncated CSI, a
-                //   reply whose terminator was lost) is dropped, not typed: no payload byte ever
-                //   reaches the desktop, and a lost terminator cannot hold the keyboard hostage.
-                if parser.buffer.count == 1, parser.buffer[0] == 0x1B {
+                // - A lone `ESC` is the Esc key, exactly as before this change.
+                // - A *reply* prefix — `ESC ]` (OSC: a clipboard answer) or `ESC _` (the graphics
+                //   `APC` this issue is about) — is data, not input. The head is discarded and the
+                //   parser swallows everything up to the terminator, so the tail can never be
+                //   typed. Resolved on the first idle tick: waiting cannot make a reply more
+                //   likely, it only lets its tail arrive as keystrokes.
+                // - Half a keystroke (`ESC O`, `ESC [ 1 ; 5`) gets the grace below and is then
+                //   dropped, not released: a sequence that stopped is not a key either.
+                //
+                // Nothing here resets the parser and keeps parsing the remainder: `reset()` drops
+                // the buffered head and the *rest* of the sequence then arrives as input, which is
+                // how `SECRET` got typed into the mirrored desktop.
+                let held = parser.buffer
+                if held.count == 1, held[0] == 0x1B {
                     parser.reset()
                     idleReads = 0
                     postKey(Keys.esc, [])
                     continue
                 }
-                if parser.buffer.count == 2, parser.buffer[0] == 0x1B, parser.buffer[1] >= 0x20 {
-                    let byte = parser.buffer[1]
-                    parser.reset()
-                    idleReads = 0
-                    if let ch = String(bytes: [byte], encoding: .utf8)?.first {
-                        postUnicode(ch, [.maskAlternate])
-                    }
-                    continue
-                }
-                if parser.buffer.count > 1 {
-                    idleReads += 1
-                    if idleReads >= 5 {
-                        if trace { log("dropped an unterminated escape sequence (\(parser.buffer.count) B)") }
-                        parser.reset()
+                if held.count > 1 {
+                    let isReply = InputParser.isReplyPrefix(held)
+                    idleReads = isReply ? Self.stallGraceTicks : idleReads + 1
+                    if idleReads >= Self.stallGraceTicks {
+                        if trace {
+                            log(isReply
+                                ? "discarded the rest of a reply that stopped arriving (\(held.count) B)"
+                                : "dropped an unterminated escape sequence (\(held.count) B)")
+                        }
+                        parser.resolveStall()
                         idleReads = 0
                     }
                     continue

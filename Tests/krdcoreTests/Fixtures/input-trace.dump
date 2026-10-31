@@ -30,4 +30,4 @@ osc 0;t 7 B
 text U+4E2D mods=0
 graphicReply G i=31 p=- ok 8 B
 graphicReply G i=137 p=7 error 39 B
-graphicReply 1 i=- p=- unparsed 9 B
+graphicReply G i=- p=- unparsed 6 B

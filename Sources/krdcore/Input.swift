@@ -164,6 +164,47 @@ public final class InputParser {
         discardSawESC = false
     }
 
+    /// What a buffer that stopped growing turned out to be.
+    public enum StalledBytes: Equatable {
+        /// Nothing was held.
+        case none
+        /// One lone `ESC` — the Esc key, exactly as before issue #109.
+        case escape
+        /// The head of a sequence that never finished. It is gone, and when the prefix could only
+        /// have been a reply (`OSC`, `APC`) every byte up to its terminator is now swallowed, so the
+        /// rest of that sequence cannot become input either.
+        case sequence
+    }
+
+    /// True for the two prefixes whose tail can only be payload: `OSC` (`ESC ]`, a clipboard
+    /// reply) and the graphics `APC` (`ESC _`). A stalled one must be discarded, never released.
+    public static func isReplyPrefix(_ bytes: [UInt8]) -> Bool {
+        bytes.count >= 2 && bytes[0] == 0x1B && (bytes[1] == 0x5D || bytes[1] == 0x5F)
+    }
+
+    /// Resolve a sequence that stopped arriving half-way: `krd`'s read loop calls this when its idle
+    /// poll comes back empty and the buffer still holds an unfinished escape sequence (issue #109).
+    ///
+    /// Nothing on the sequence path is typed — *not* the two bytes that used to be released as
+    /// Alt+`_` / Alt+`]`. Those are exactly how a reply starts: a terminal that writes `ESC _`,
+    /// pauses, and then sends `G i=31;OK ST` would have the prefix typed as a keystroke and the tail
+    /// parsed as keys, which is the leak this closes. Only a lone `ESC` has no tail, so it is the
+    /// only stalled buffer released as a key.
+    ///
+    /// Same shape as #149's `discardingOSC`: the payload is swallowed by a discard state instead of
+    /// being handed to the ordinary byte loop, and `BEL` ends an `OSC` while an `APC` ends only at
+    /// `ST` (a `BEL` in an `APC` is payload).
+    public func resolveStall() -> StalledBytes {
+        let held = buffer
+        buffer.removeAll(keepingCapacity: true)
+        guard let first = held.first else { return .none }
+        if held.count == 1, first == 0x1B { return .escape }
+        if Self.isReplyPrefix(held) {
+            if held[1] == 0x5D { discardingOSC = true } else { discardingString = true }
+        }
+        return .sequence
+    }
+
     /// Upper bound for an OSC body, shared with `OSC52` so the parser and the clipboard code
     /// cannot disagree about when a sequence is "too big to be ours" (2 MB of payload, base64'd).
     public static let maxEncodedOSC = ((2 << 20) * 4) / 3 + 16
@@ -268,15 +309,14 @@ public final class InputParser {
                 return nil
             }
             return nil
-        case 0x5F, 0x50, 0x58, 0x5E:            // APC: ESC _ … ST; DCS ESC P; SOS ESC X; PM ESC ^
-            // A graphics reply is `ESC _ G … ST` (issue #109) and the other three are the same
-            // class of sequence: a reply or a passthrough, never a key. Alt-`_` is a legal
-            // keystroke though, so any `ESC _` that is not the reply prefix keeps today's meaning
-            // exactly — one byte of lookahead, then the Alt-text path below.
-            if buffer[1] == 0x5F {
-                guard buffer.count >= 3 else { return nil }
-                guard buffer[2] == 0x47 else { return altText() }
-            }
+        case 0x5F:                                  // APC: `ESC _ … ST`, of which only `ESC _ G` is ours
+            // `ESC _ G` is the *only* sequence krd ever asks a terminal to send (issue #109), and
+            // the third byte decides: a `G` enters the reply scan, anything else is the Alt-`_`
+            // keystroke this parser has always produced for it. The test is on the byte, not on
+            // a timer, so a keystroke is never held waiting for a terminator a keyboard will not
+            // send.
+            guard buffer.count >= 3 else { return nil }
+            guard buffer[2] == 0x47 else { return altText() }
             return parseStringSequence()
         default:
             return altText()
@@ -296,8 +336,13 @@ public final class InputParser {
         return 2
     }
 
-    /// `APC`/`DCS`/`SOS`/`PM`: `ESC x … ST`. The body is a reply's payload, never input, so it
+    /// The graphics `APC` (`ESC _ G … ST`). The body is a reply's payload, never input, so it
     /// becomes exactly one `.graphicReply` — an unrecognised body included, as `unparsed`.
+    ///
+    /// `DCS` (`ESC P`), `SOS` (`ESC X`) and `PM` (`ESC ^`) deliberately do **not** arrive here: the
+    /// same prefix is how a legacy terminal encodes Alt+P, Alt+X and Alt+^, so scanning for their
+    /// `ST` ate a legal keystroke and every key typed while it waited. Only the reply prefix krd
+    /// itself provokes (`ESC _ G`) is worth that trade (issue #109: no legal input may be eaten).
     ///
     /// `ST` is the only terminator here (`BEL` ends an `OSC` and nothing else), and the scan stops at
     /// the cap: past it the sequence is dropped whole rather than buffered or typed.
@@ -328,9 +373,10 @@ public final class InputParser {
         emit(.graphicReply(GraphicsReply(body: body)))
     }
 
-    /// Swallow the body of an over-cap `APC`/`DCS`/`SOS`/`PM` up to its `ST`, for the reason
-    /// `discardOSC` documents. Same contract, one difference: `BEL` is payload in a string sequence,
-    /// so it does not end the discard — ending there would type the rest of the reply.
+    /// Swallow the body of an `APC` up to its `ST`, for the reason `discardOSC` documents — an
+    /// over-cap one, or one the read loop found stalled (`resolveStall`). Same contract, one
+    /// difference: `BEL` is payload in a string sequence, so it does not end the discard — ending
+    /// there would type the rest of the reply.
     private func discardString() -> Int? {
         if discardSawESC {
             guard let first = buffer.first else { return nil }

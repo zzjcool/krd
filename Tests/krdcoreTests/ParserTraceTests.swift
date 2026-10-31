@@ -26,10 +26,11 @@ final class ParserTraceTests: XCTestCase {
         "\u{16}",
         "\u{1B}]52;c;dGVybWluYWwtdGV4dA==\u{1B}\\\u{1B}]0;title\u{07}\u{4E2D}",
         // Issue #109: the terminal's answers on stdin. `KRD_Q=0|1`, so an APC carries the status of
-        // a transmit and of a placement, and the DCS is the shape a `tmux` passthrough answers in.
+        // a transmit, of a placement, and of a body krd cannot classify. `DCS`/`SOS`/`PM` are *not*
+        // here on purpose: their prefixes are Alt+P/Alt+X/Alt+^, so they stay keystrokes.
         "\u{1B}_Gi=31;OK\u{1B}\\"
             + "\u{1B}_Gi=137,p=7;EINVAL: decompression failed\u{1B}\\"
-            + "\u{1B}P1;2|hello\u{1B}\\",
+            + "\u{1B}_Ghello\u{1B}\\",
     ]
 
     private func fixtureURL() -> URL {
