@@ -48,6 +48,11 @@ struct Options {
     /// Whether `--quality` (or `--no-quantise`) was typed. The selftest's sha256 is a byte contract,
     /// so naming a lossy rung next to it is a usage error -- the default must keep working.
     var qualityPinned = false
+    /// The menu's frame-rate track was clicked and the *pin* has to travel with `--fps` (issue #87).
+    ///
+    /// `--fps <n>` alone is the capture cadence: a hand-over that carried only the number came back
+    /// unpinned, and the next governor rung moved the rate the reader had just picked.
+    var fpsPinned = false
     /// The menu's colour or quality track was clicked (issue #87): the *encoder* is the user's now,
     /// so the governor's quality half stands down while its frame-rate half keeps running.
     ///
@@ -563,6 +568,9 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
         // can spell. Order-independent: applied once the line is read (`eagerOverride`).
         case "--eager": options.eagerOverride = true
         case "--no-eager": options.eagerOverride = false
+        // The menu's fps pin, as a flag: `--fps <n>` is the number and this is "hold it". A
+        // hand-over carries both (issue #87).
+        case "--fps-pinned": options.fpsPinned = true
         case "--quality":
             let parsed = try parseQualitySpec(value("--quality", args, &i))
             options.quality = parsed.budget
@@ -1037,6 +1045,11 @@ final class Desk {
         // never asks for a mode whose whole purpose is sending bytes to a reader that does not
         // exist -- and `--selftest`'s sha256 is a byte contract that depends on it.
         ScreenWriter.focusReporting = !options.noInput && !options.wall
+        // The pins the menu put on this device, read back from the command line a hand-over wrote:
+        // the value alone would let the governor take it away again (issue #87).
+        fpsPinned = options.fpsPinned
+        if fpsPinned { pinnedAxes.insert(.fps) }
+        if options.qualityHeld { pinnedAxes.insert(.colour) }
         if options.qualityAuto {
             qualityGovernor = QualityGovernor(start: .init(quality: options.quality.value,
                                                            fps: options.fps))
@@ -1074,8 +1087,7 @@ final class Desk {
         // see is a usage error that will be reported as "the hash changed".
         // `--quality 80` is the default and therefore the hash everyone already has; anything else
         // that can quantise -- including `auto`, which is a moving target -- would change it.
-        let pinnedLossy = options.qualityPinned
-            && (options.qualityAuto || (options.quality.isLossy && options.quality != .default))
+        let pinnedLossy = Desk.selftestRefusesLossy(options)
         if options.selftest && pinnedLossy {
             FileHandle.standardError.write(
                 Data("krd: --selftest checks a lossless byte contract; drop --quality or use --quality 100\n".utf8))
@@ -2186,6 +2198,19 @@ final class Desk {
         return arguments + sticky
     }
 
+    /// Whether a command line names a lossy knob next to `--selftest`, which is a usage error.
+    ///
+    /// `--quality <n>` has always been refused (the hash is a byte contract); `--eager` is the other
+    /// half of the same `QualityBudget` and quantises every tile, so it changes the same bytes and
+    /// is refused the same way. Pure, so the guard is a test and not a shell script.
+    static func selftestRefusesLossy(_ options: Options) -> Bool {
+        guard options.selftest, options.qualityPinned || options.eagerOverride != nil else {
+            return false
+        }
+        return options.qualityAuto || options.eagerOverride == true
+            || (options.quality.isLossy && options.quality != .default)
+    }
+
     /// Whether a pinned `--scale` below 1 has to abandon placeholders.
     ///
     /// WHY: a placeholder grid draws one image pixel per device pixel, so it cannot stretch a
@@ -2277,6 +2302,10 @@ final class Desk {
         }
         if options.fps != Options().fps {
             arguments += ["--fps", String(options.fps)]
+        }
+        // The number without the pin is a capture cadence the next rung may lower (issue #87).
+        if options.fpsPinned {
+            arguments.append("--fps-pinned")
         }
         if let dpr = options.dpr {
             arguments += ["--dpr", String(format: "%g", dpr)]
@@ -3029,8 +3058,8 @@ final class Desk {
         // half keeps adapting: this is what stops a late rung overwriting a frame rate the slider
         // had just set (`effectiveFps` *and* `frameGate` wholesale), which was the failure the
         // issue called worst -- the slider walked back.
-        let takesQuality = !options.qualityHeld
-        let takesFps = !fpsPinned
+        let (takesQuality, takesFps) = Desk.qualityChangeTargets(qualityHeld: options.qualityHeld,
+                                                                fpsPinned: fpsPinned)
         guard takesQuality || takesFps else { return }
         if takesQuality {
             // The eager half is not the ladder's: a rung names a bit depth, not how eagerly it is
@@ -3047,6 +3076,15 @@ final class Desk {
         chromeDirty = true
         Log.write("krd: \(change.line)" + (takesFps ? "" : " (frame rate pinned by the menu)")
                   + (takesQuality ? "" : " (quality pinned by the menu)") + "\n")
+    }
+
+    /// Which halves of a governor rung a set of pins still lets through (issue #87).
+    ///
+    /// One governor walks colour and frame rate together (`QualityGovernor.Change` carries both), and
+    /// a menu click pins one of them. Pure, so "a pinned frame rate does not walk back" is a test
+    /// and not a demo -- the slider's whole promise is this line.
+    static func qualityChangeTargets(qualityHeld: Bool, fpsPinned: Bool) -> (quality: Bool, fps: Bool) {
+        (!qualityHeld, !fpsPinned)
     }
 
     /// Step the capture resolution in place: the same `updateSource` a pan uses (#57), so the stream
@@ -3945,6 +3983,16 @@ final class Desk {
         return (capSeries, pipeSeries)
     }
 
+    /// The menu's three tracks, from the writer and the pins (issue #87). One rule with two callers:
+    /// the 1 Hz sample and the repaint a click asks for, so a click cannot draw a value the next
+    /// tick will contradict and the drawer and the governor cannot disagree about who owns an axis.
+    private func menuMetrics(_ m: inout ChromeMetrics) {
+        m.quality = writer.quality.value
+        m.qualityLabel = writer.quality.label
+        m.qualityEager = writer.quality.eager
+        m.pinned = pinnedAxes
+    }
+
     /// Fill `chromeMetrics` from the same counters the `--debug` line prints, plus the rates
     /// (which the line only implies) and the switches that are otherwise invisible.
     private func sampleChrome() {
@@ -3988,12 +4036,9 @@ final class Desk {
         chromeSampleFrames = framesHandled
         chromeSampleDelivered = framesDelivered
         m.kbPerFrame = writer.lastFrameBytes / 1024
-        m.quality = writer.quality.value
-        m.qualityLabel = writer.quality.label
-        // The menu's three tracks read these (issue #87): which half of `--quality` is set, and
-        // whether a governor still owns the axis -- a slider whose value walks back needs to say so.
-        m.qualityEager = writer.quality.eager
-        m.pinned = pinnedAxes
+        // The menu's three tracks read these (issue #87): which half of `--quality` is set, which
+        // axes a click has pinned, and therefore whether a governor still owns each of them.
+        menuMetrics(&m)
         m.quantisedTiles = writer.quantisedTiles
         m.skippedTiles = writer.skippedTiles
         m.tilesPerSec = Int(lastRates.tilesPerSec.rounded())
@@ -4290,7 +4335,7 @@ final class Desk {
             // to hit this guard and do nothing -- the fourth row of a four-row panel was unreachable
             // at the sizes where the box scrolls (issue #87, and #118's "the wheel reaches the rest").
             guard wheel == 0 else {
-                if ChromeAxis.parse(id) != nil {
+                if Chrome.scrollsPanel(.status(id), wheel: wheel) {
                     DispatchQueue.main.async { [weak self] in
                         self?.scrollPanel(by: wheel < 0 ? -1 : 1)
                     }
@@ -4331,7 +4376,7 @@ final class Desk {
             // The wheel over a panel is how the rows its box cannot hold are reached (#118): one
             // notch is one row, clamped at both ends. A click inside a panel is still not forwarded
             // anywhere -- it is not a picture cell and there is no control under it.
-            guard wheel != 0 else { return }
+            guard Chrome.scrollsPanel(.panel, wheel: wheel) else { return }
             // …and the hop is the wall's, for the same reason: this closure runs on the *reader*
             // thread, while the window arithmetic reads `chromeMetrics` and the repaint writes the
             // pty, both of which the main queue owns.
@@ -4365,14 +4410,12 @@ final class Desk {
             options.quality = QualityBudget(ChromeAxis.colourValue(step: step),
                                             eager: options.quality.eager)
             writer.quality = options.quality
-            options.qualityPinned = true
             options.qualityHeld = true
             Log.write("krd: menu colour \(step) -> q\(options.quality.value) \(options.quality.label)"
                       + "\(options.quality.eager ? " eager" : "") (pinned: no governor)\n")
         case .quality:
             options.quality = QualityBudget(options.quality.value, eager: step == 1)
             writer.quality = options.quality
-            options.qualityPinned = true
             options.qualityHeld = true
             Log.write("krd: menu quality \(step) -> q\(options.quality.value)"
                       + "\(options.quality.eager ? " eager" : " guarded") (pinned: no governor)\n")
@@ -4385,10 +4428,14 @@ final class Desk {
             effectiveFps = fps
             frameGate = FrameGate(fps: fps)
             fpsPinned = true
+            options.fpsPinned = true
             Log.write("krd: menu fps \(step) -> \(fps) fps (held by the frame gate, no governor)\n")
         }
         // Repaint now, not on the next 1 Hz tick: a slider that answers a second late reads as a
-        // click that missed.
+        // click that missed. The snapshot has to be refreshed first -- `chromeMetrics` is written
+        // once a second by `sampleChrome`, so repainting straight from it drew the *old* value,
+        // tick and `pinned` mark, i.e. the click looked like it missed after all.
+        menuMetrics(&chromeMetrics)
         chromeDirty = true
         drawChrome()
     }

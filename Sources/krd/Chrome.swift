@@ -476,9 +476,10 @@ final class Chrome {
     static func pictureRows(paneRows: Int, bar: Bool, panel: ChromePanel?, chrome: Bool) -> Int {
         let barRows = bar ? 1 : 0
         var rows = max(1, paneRows - barRows)
-        // The same predicate `ChromeGeometry.panelsDrawable` uses: the bar alone can open a panel,
-        // and a panel whose rows the picture never gave up would be drawn over the tiles.
-        guard chrome || bar, rows > 4 else { return rows }
+        // The same predicate `ChromeGeometry.panelsDrawable` uses -- the bar alone can open a panel
+        // -- but narrower: with no panel open there is nothing to reserve, and a bar-only mirror
+        // must not lose a picture row (and gain a blank one) to a box that is not there.
+        guard chrome || (bar && panel != nil), rows > 4 else { return rows }
         let panelRows = panel?.height ?? 0
         // What the panel would get with a one-row picture: -1 picture, -1 status line.
         let forPanel = min(panelRows, rows - 2)
@@ -610,6 +611,22 @@ final class Chrome {
         // painted in is how a handed-over mirror swallowed clicks on a strip of its own picture.
         return geometry.panelsDrawable && geometry.panelHeight > 0
             && y >= geometry.panelTop && y < geometry.panelTop + geometry.panelHeight
+    }
+
+    /// Whether a wheel notch on this route scrolls the panel instead of being swallowed (issue #87).
+    ///
+    /// The panel's own cells always scroll it (#118), and a cell that carries a *rung* id is still a
+    /// panel cell: the menu's tracks are the first panel rows with ids, and `guard wheel == 0` in the
+    /// click path used to eat exactly those notches, which is how the box's last row became
+    /// unreachable at the sizes where it scrolls. Bar and status controls keep ignoring the wheel.
+    /// Pure, so the rule is a test rather than a gesture.
+    static func scrollsPanel(_ route: ChromeRoute, wheel: Int) -> Bool {
+        guard wheel != 0 else { return false }
+        switch route {
+        case .panel: return true
+        case .status(let id): return ChromeAxis.parse(id) != nil
+        case .picture: return false
+        }
     }
 
     /// The routing decision, in priority order: panel rectangle → a cell with a `hit` id (the panel's
@@ -967,8 +984,8 @@ final class Chrome {
                 // means -- a slider whose value walks back by itself is the worst of the options,
                 // so a click pins the axis it touches (issue #87).
                 text(2, y + 1 + r,
-                     DisplayWidth.truncate("a click sets it and pins the axis (no governor) · "
-                                           + "[ ≡ ] closes", to: max(0, w - 4)), .dim)
+                     DisplayWidth.truncate("a click sets it and pins that axis (no governor takes "
+                                           + "it back) · [ ≡ ] closes", to: max(0, w - 4)), .dim)
             }
         case .devices:
             if m.devices.isEmpty, let r = slot(0) {

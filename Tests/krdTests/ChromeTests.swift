@@ -1385,4 +1385,31 @@ final class ChromeMenuTests: XCTestCase {
         XCTAssertFalse(text.contains("guarded — only what will not compress · pinned"),
                        "the quality axis was not pinned and must not claim it")
     }
+
+    /// The wheel must reach the box's last row even when the pointer is over a tick -- the menu's
+    /// tracks are the first panel cells with ids, and `guard wheel == 0` in the `.status` arm ate
+    /// exactly those notches (issue #87, and #118's "the wheel reaches the rest").
+    func testAWheelNotchOverATickStillScrollsThePanel() {
+        XCTAssertTrue(Chrome.scrollsPanel(.panel, wheel: 1))
+        XCTAssertTrue(Chrome.scrollsPanel(.status("rung:fps:6"), wheel: -1))
+        XCTAssertTrue(Chrome.scrollsPanel(.status("rung:colour:2"), wheel: 1))
+        XCTAssertFalse(Chrome.scrollsPanel(.status("shrink"), wheel: 1), "the way out is not a scroller")
+        XCTAssertFalse(Chrome.scrollsPanel(.status("menu"), wheel: 1))
+        XCTAssertFalse(Chrome.scrollsPanel(.status("rung:fps:6"), wheel: 0), "a click is not a notch")
+        XCTAssertFalse(Chrome.scrollsPanel(.picture, wheel: 1))
+    }
+
+    /// The row a bar-only mirror gives up for a panel it is not showing: nothing. The panel
+    /// reservation is the *bar or the panel's* business, not the `--dev` chrome's (issue #87).
+    func testABarOnlyPaneReservesRowsForAPanelOnlyWhenOneIsOpen() {
+        let closed = Chrome.pictureRows(paneRows: 30, bar: true, panel: nil, chrome: false)
+        XCTAssertEqual(closed, 29, "a closed menu costs the picture nothing")
+        let open = Chrome.pictureRows(paneRows: 30, bar: true, panel: .menu, chrome: false)
+        XCTAssertEqual(open, 22, "an open menu takes its six rows out of the picture")
+        // …and the geometry it feeds agrees: the box fits above the pane's last row.
+        let geo = Chrome.layout(paneCols: 100, paneRows: 30, imageCols: 100,
+                                imageRows: 1 + open, bar: true, dev: false, panel: .menu)
+        XCTAssertEqual(geo.panelHeight, 6)
+        XCTAssertEqual(geo.panelTop + geo.panelHeight, 29, "never the final row")
+    }
 }
