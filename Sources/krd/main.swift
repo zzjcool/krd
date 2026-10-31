@@ -3270,8 +3270,9 @@ final class Desk {
                 let index = dirty[i]
                 let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
                 let plan = writer.plan(for: index)
-                base[i] = ScreenWriter.compress(index: index, rect: rect,
-                                                pixels: grid.extract(pixels, rect: rect), plan: plan)
+                // One walk: the tile is quantised as it is copied out of the frame (#92 step 2).
+                base[i] = ScreenWriter.compress(index: index, rect: rect, frame: pixels,
+                                               grid: grid, plan: plan, timing: nil)
             }
         }
         writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)

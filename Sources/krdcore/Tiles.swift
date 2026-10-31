@@ -223,9 +223,80 @@ public struct TileGrid {
     /// Copy one tile out of a full frame into a tight buffer.
     public func extract(_ frame: [UInt8],
                  rect r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)) -> [UInt8] {
+        extract(frame, rect: r, quantising: nil)
+    }
+
+    /// Copy one tile out of a full frame into a tight buffer, **dropping the low bits of every
+    /// colour channel as the bytes are copied out** (issue #92, step 2).
+    ///
+    /// `extract(frame, rect:) + quantise(_:bits:bytesPerPixel:)` was two walks over the tile: a
+    /// `memcpy` out of the frame, then a read-modify-write of the copy. This is one walk -- the map
+    /// `quantise` applies is folded into the store -- so the quantised path has no second pass over
+    /// the tile at all. `bits == nil` is the `memcpy` above, byte for byte (same loop, same rows).
+    ///
+    /// Byte identity with the two-pass result is the contract, not an argument: the three
+    /// expressions are `quantise`'s own, at the same indices (`i`, `i + 1`, `i + 2`, stride `bpp`,
+    /// `w * bpp` bytes per row, so the flat loop and the per-row loop touch the same set of bytes),
+    /// and `QuantiseTests` compares this against `quantise(extract(…))` -- evaluated through the
+    /// kept-verbatim `specs` loop -- over every byte value, every channel, every rung, random
+    /// buffers, both shipping strides and the bench corpus' geometry. Byte 3 of an `rgba` pixel is
+    /// never touched, exactly as in `quantise`.
+    ///
+    /// The geometry is untouched: `rect` still decides the box and nothing here has an opinion
+    /// about cells (#121, #151).
+    public func extract(_ frame: [UInt8],
+                 rect r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int),
+                 quantising bits: QualityBudget.Bits?) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: r.w * r.h * bpp)
         let stride = pixelW * bpp
         let rowBytes = r.w * bpp
+        if let bits, let map = ScreenWriter.QuantiseMap(bits, bytesPerPixel: bpp) {
+            // The fused walk. `map.apply` is the *same three expressions* `quantise` runs, applied
+            // to the byte the copy has just loaded -- so there is no read-modify-write pass left to
+            // fold in: the store is the quantised value.
+            frame.withUnsafeBufferPointer { src in
+                out.withUnsafeMutableBufferPointer { dst in
+                    guard let s = src.baseAddress, let d = dst.baseAddress else { return }
+                    for row in 0..<r.h {
+                        let q = s + (r.y + row) * stride + r.x * bpp
+                        let dRow = d + row * rowBytes
+                        var i = 0
+                        if map.stride == 3 {
+                            // The mirror's shape (`PixelFormat.rgb`): three bytes per pixel, so the
+                            // copy and the map are the same three stores.
+                            while i + 2 < rowBytes {
+                                let r0 = q[i] >> map.shiftR
+                                let g0 = q[i + 1] >> map.shiftG
+                                let b0 = q[i + 2] >> map.shiftB
+                                dRow[i] = (r0 << map.shiftR) | (r0 >> map.repR)
+                                dRow[i + 1] = (g0 << map.shiftG) | (g0 >> map.repG)
+                                dRow[i + 2] = (b0 << map.shiftB) | (b0 >> map.repB)
+                                i += 3
+                            }
+                        } else {
+                            // `rgba` (the wall's panels, `bpp 4`): byte 3 of the pixel is **copied
+                            // verbatim**, because `quantise` never writes it either -- leaving it
+                            // behind here would zero the alpha the two-pass path preserved, which
+                            // is exactly what the first version of this loop did.
+                            while i + 2 < rowBytes {
+                                let r0 = q[i] >> map.shiftR
+                                let g0 = q[i + 1] >> map.shiftG
+                                let b0 = q[i + 2] >> map.shiftB
+                                dRow[i] = (r0 << map.shiftR) | (r0 >> map.repR)
+                                dRow[i + 1] = (g0 << map.shiftG) | (g0 >> map.repG)
+                                dRow[i + 2] = (b0 << map.shiftB) | (b0 >> map.repB)
+                                var k = 3
+                                while k < map.stride { dRow[i + k] = q[i + k]; k += 1 }
+                                i += map.stride
+                            }
+                        }
+                        // No partial pixel can be left over: `rowBytes` is `r.w * bpp`, a multiple
+                        // of the stride, so the last pixel of a row is the last byte of the row.
+                    }
+                }
+            }
+            return out
+        }
         frame.withUnsafeBufferPointer { src in
             out.withUnsafeMutableBufferPointer { dst in
                 for row in 0..<r.h {

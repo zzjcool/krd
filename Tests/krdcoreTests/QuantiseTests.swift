@@ -191,6 +191,188 @@ final class QuantiseTests: XCTestCase {
         XCTAssertLessThan(tile.ratio, 0.3)
     }
 
+    // MARK: the fused extract is the two-pass result (issue #92, step 2)
+
+    /// A grid whose tiles are real tiles: edge tiles are smaller than the interior ones, so a fused
+    /// copy sees every shape `rect` can produce.
+    private func grid(cols: Int = 5, rows: Int = 3, cellW: Double = 4, cellH: Double = 4,
+                      tileCols: Int = 2, tileRows: Int = 2, bpp: Int = 3) -> TileGrid {
+        TileGrid.make(paneCols: cols, paneRows: rows, cellW: cellW, cellH: cellH, aspect: 1,
+                      tileCols: tileCols, tileRows: tileRows, bpp: bpp)
+    }
+
+    /// Every byte of a tile compares, tile by tile: `extract(…, quantising:)` against the two-pass
+    /// `quantise(extract(…))` — and the second is the *kept-verbatim* old loop, not `quantise`
+    /// itself, so this pins the fused copy against the arithmetic `main` shipped as well.
+    ///
+    /// Sweep A is the one the hoisted loop is pinned with: every byte value, every channel, every
+    /// rung. B adds random frames (both shipping strides, every tile shape of two grids), C the
+    /// pinned bench geometry, and D the strides and bit depths where `quantise` does *nothing*
+    /// (bpp 1 and 2, a bit count outside 4...7) — the branches that must never start dropping bits.
+    func testFusedExtractIsTheTwoPassResult() {
+        let rungs = [QualityBudget.fiveSixFive, QualityBudget.sixSixSix,
+                     QualityBudget.fiveFiveFive, QualityBudget.fourFourFour]
+        let g = grid()
+
+        // A. every byte value, in every channel, for every rung.
+        for bits in rungs {
+            for v in 0...255 {
+                for channel in 0..<3 {
+                    var frame = [UInt8](repeating: 0, count: g.pixelW * g.pixelH * g.bpp)
+                    for i in 0..<frame.count where i % g.bpp == channel {
+                        frame[i] = UInt8(v)
+                    }
+                    assertFusedEqualsTwoPass(frame, grid: g, bits: bits, "v=\(v) channel \(channel) \(bits.label)")
+                }
+            }
+        }
+
+        // A'. the same, but with the value moving through the frame, so an off-by-one in the fused
+        // loop's row or pixel stride cannot hide behind a uniform buffer.
+        for bits in rungs {
+            for offset in stride(from: 0, to: 256, by: 37) {
+                var frame = [UInt8](repeating: 0, count: g.pixelW * g.pixelH * g.bpp)
+                for i in 0..<frame.count { frame[i] = UInt8((i &* 101 &+ offset) & 0xFF) }
+                assertFusedEqualsTwoPass(frame, grid: g, bits: bits, "pattern offset \(offset) \(bits.label)")
+            }
+        }
+
+        // B. random frames, both shipping strides, and a grid whose edge tiles are one cell.
+        for bpp in [3, 4] {
+            for (cols, rows, tileCols, tileRows) in [(5, 3, 2, 2), (7, 5, 3, 2), (3, 3, 3, 3)] {
+                let gg = grid(cols: cols, rows: rows, cellW: 5, cellH: 3,
+                              tileCols: tileCols, tileRows: tileRows, bpp: bpp)
+                let frame = noise(count: gg.pixelW * gg.pixelH * bpp, seed: UInt32(0xBEEF + bpp))
+                for bits in rungs {
+                    assertFusedEqualsTwoPass(frame, grid: gg, bits: bits,
+                                             "bpp \(bpp) \(cols)x\(rows) tile \(tileCols)x\(tileRows)")
+                }
+            }
+        }
+
+        // C. the pinned bench geometry: 2329x1452 px, 198 tiles of 8x4 cells (docs/BENCHMARK.md).
+        let bench = TileGrid.make(paneCols: 137, paneRows: 44, cellW: 17, cellH: 33,
+                                  aspect: 1920.0 / 1200.0, tileCols: 8, tileRows: 4)
+        XCTAssertEqual(bench.pixelW, 2329, "the shape the issue measures")
+        XCTAssertEqual(bench.pixelH, 1452)
+        XCTAssertEqual(bench.count, 198)
+        let bigFrame = noise(count: bench.pixelW * bench.pixelH * bench.bpp, seed: 0x5EED_1234)
+        assertFusedEqualsTwoPass(bigFrame, grid: bench, bits: QualityBudget.fiveSixFive,
+                                 "bench corpus shape, 5-6-5")
+
+        // D. the branches where `quantise` returns its input untouched.
+        for bpp in [1, 2] {
+            let gg = grid(cols: 5, rows: 3, bpp: bpp)
+            let frame = noise(count: gg.pixelW * gg.pixelH * bpp, seed: 0x1234 + UInt32(bpp))
+            assertFusedEqualsTwoPass(frame, grid: gg, bits: QualityBudget.fiveSixFive, "bpp \(bpp)")
+        }
+        for odd in [QualityBudget.Bits(r: 3, g: 6, b: 5), QualityBudget.Bits(r: 5, g: 8, b: 5),
+                    QualityBudget.Bits(r: 0, g: 0, b: 0)] {
+            assertFusedEqualsTwoPass(noise(count: g.pixelW * g.pixelH * g.bpp), grid: g,
+                                     bits: odd, "out-of-range bits \(odd.r)-\(odd.g)-\(odd.b)")
+        }
+    }
+
+    /// One frame, every tile: fused against two-pass, plus the invariants the copy has to keep —
+    /// same length, alpha untouched, and the caller's frame never written.
+    private func assertFusedEqualsTwoPass(_ frame: [UInt8], grid: TileGrid,
+                                          bits: QualityBudget.Bits, _ label: String,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        let control = frame
+        var covered = 0
+        for ty in 0..<grid.tilesY {
+            for tx in 0..<grid.tilesX {
+                let r = grid.rect(tx, ty)
+                let plain = grid.extract(frame, rect: r)
+                let want = referenceQuantise(plain, bits: bits, bytesPerPixel: grid.bpp)
+                let got = grid.extract(frame, rect: r, quantising: bits)
+                XCTAssertEqual(got, want, "\(label) tile \(tx),\(ty) rect \(r.w)x\(r.h)")
+                XCTAssertEqual(got.count, r.w * r.h * grid.bpp, "\(label) tile \(tx),\(ty) length")
+                if grid.bpp == 4 {
+                    for i in stride(from: 3, to: got.count, by: 4) {
+                        XCTAssertEqual(got[i], plain[i], "\(label) alpha at \(i), tile \(tx),\(ty)")
+                    }
+                }
+                covered += r.w * r.h
+            }
+        }
+        XCTAssertEqual(covered, grid.pixelW * grid.pixelH, "\(label): the tiles must partition the frame")
+        XCTAssertEqual(frame, control, "\(label): the frame must not be written in place")
+    }
+
+    // MARK: the fused decision is the tile decision (issue #92, step 2)
+
+    /// The decision has to be taken *before* the copy, so it is taken from the frame. It must still
+    /// be the decision `compress` takes from the extracted tile — otherwise the fused path would be
+    /// free to quantise a tile the two-pass path would have sent losslessly, and the bytes would
+    /// move on content that sits near the predictor's cut.
+    func testFrameProbeIsTheTileProbe() {
+        let g = grid(cols: 7, rows: 5, cellW: 5, cellH: 3, tileCols: 3, tileRows: 2)
+        // Noise: the predictor says "zlib cannot win". Text: it says it can, plus the two cases the
+        // early exit fires on halfway through (`photo`, `photoReal` in the bench).
+        let frames = [noise(count: g.pixelW * g.pixelH * g.bpp, seed: 7),
+                      text(count: g.pixelW * g.pixelH * g.bpp),
+                      noise(count: g.pixelW * g.pixelH * g.bpp, seed: 0xABCD),
+                      [UInt8](repeating: 200, count: g.pixelW * g.pixelH * g.bpp)]
+        let plans = [LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.fiveSixFive),
+                     LevelPolicy.Plan(level: 6, quantise: true, bits: QualityBudget.fiveSixFive),
+                     LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.fourFourFour),
+                     LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.fiveSixFive, eager: true),
+                     LevelPolicy.Plan(level: 0, quantise: false),
+                     LevelPolicy.Plan(level: 6)]
+        for (fi, frame) in frames.enumerated() {
+            for plan in plans {
+                for ty in 0..<g.tilesY {
+                    for tx in 0..<g.tilesX {
+                        let r = g.rect(tx, ty)
+                        // What the tile path decides, in `compress`'s own words.
+                        let want: QualityBudget.Bits? = {
+                            guard plan.quantise, let bits = plan.bits else { return nil }
+                            if plan.eager { return bits }
+                            let tile = g.extract(frame, rect: r)
+                            return ScreenWriter.looksCompressible(tile, rect: r) ? nil : bits
+                        }()
+                        XCTAssertEqual(ScreenWriter.quantiseBits(frame, grid: g, rect: r, plan: plan),
+                                       want, "frame \(fi) plan \(plan) tile \(tx),\(ty)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// End to end: the fused entry and the two-pass entry produce the same `CompressedTile`, decision
+    /// and payload, on the content classes the bench uses.
+    func testFusedCompressIsTheTwoPassTile() throws {
+        let g = grid(cols: 7, rows: 5, cellW: 5, cellH: 3, tileCols: 3, tileRows: 2)
+        let frames = [("noise", noise(count: g.pixelW * g.pixelH * g.bpp, seed: 11)),
+                      ("text", text(count: g.pixelW * g.pixelH * g.bpp)),
+                      ("flat", [UInt8](repeating: 40, count: g.pixelW * g.pixelH * g.bpp))]
+        let plans = [LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.fiveSixFive),
+                     LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.fiveSixFive, eager: true),
+                     LevelPolicy.Plan(level: 0, quantise: true, bits: QualityBudget.sixSixSix),
+                     LevelPolicy.Plan(level: 6, quantise: false),
+                     LevelPolicy.Plan(level: 0, quantise: false)]
+        for (name, frame) in frames {
+            for plan in plans {
+                for ty in 0..<g.tilesY {
+                    for tx in 0..<g.tilesX {
+                        let r = g.rect(tx, ty)
+                        let twoPass = try XCTUnwrap(ScreenWriter.compress(
+                            index: tx, rect: r, pixels: g.extract(frame, rect: r), plan: plan))
+                        let fused = try XCTUnwrap(ScreenWriter.compress(
+                            index: tx, rect: r, frame: frame, grid: g, plan: plan, timing: nil))
+                        XCTAssertEqual(fused.payload, twoPass.payload,
+                                       "\(name) \(plan) tile \(tx),\(ty) payload")
+                        XCTAssertEqual(fused.isCompressed, twoPass.isCompressed, "\(name) \(plan)")
+                        XCTAssertEqual(fused.isQuantised, twoPass.isQuantised,
+                                       "\(name) \(plan) tile \(tx),\(ty) quantised")
+                        XCTAssertEqual(fused.ratio, twoPass.ratio, accuracy: 1e-12, "\(name) \(plan)")
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: the state machine
 
     func testSwitchNeedsTwoIncompressibleFrames() {

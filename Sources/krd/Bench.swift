@@ -449,9 +449,9 @@ enum Bench {
                     packed.withUnsafeMutableBufferPointer { buffer in
                         let base = buffer.baseAddress!
                         DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
-                            let pixels = layout.extract(px, rect: rects[i])
                             base[i] = ScreenWriter.compress(index: dirty[i], rect: rects[i],
-                                                            pixels: pixels, plan: plans[i])
+                                                            frame: px, grid: layout,
+                                                            plan: plans[i], timing: nil)
                         }
                     }
                     parallelMsRound = benchNowMs() - parallelStart
@@ -489,31 +489,30 @@ enum Bench {
             if serial, !lastDirty.isEmpty {
                 let rects = lastDirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
                 let plans = lastDirty.map { writer.plan(for: $0) }
-                var best = Double.infinity, bestExtract = 0.0, bestCompressed = 0.0
+                var best = Double.infinity, bestCompressed = 0.0
                 var bestTiming = CompressTiming()
                 for _ in 0..<3 {
-                    var extract = 0.0, compressed = 0.0
+                    var compressed = 0.0
                     var timing = CompressTiming()
                     let start = benchNowMs()
                     for i in 0..<lastDirty.count {
                         let t0 = benchNowMs()
-                        let pixels = layout.extract(lastFrame, rect: rects[i])
-                        let t1 = benchNowMs()
                         withUnsafeMutablePointer(to: &timing) { timingPtr in
                             _ = ScreenWriter.compress(index: lastDirty[i], rect: rects[i],
-                                                      pixels: pixels, plan: plans[i], timing: timingPtr)
+                                                      frame: lastFrame, grid: layout,
+                                                      plan: plans[i], timing: timingPtr)
                         }
-                        let t2 = benchNowMs()
-                        extract += t1 - t0; compressed += t2 - t1
+                        let t1 = benchNowMs()
+                        compressed += t1 - t0
                     }
                     let elapsed = benchNowMs() - start
                     if elapsed < best {
-                        best = elapsed; bestExtract = extract; bestCompressed = compressed
+                        best = elapsed; bestCompressed = compressed
                         bestTiming = timing
                     }
                 }
                 serialMs = [best]
-                extractMs = [bestExtract]
+                extractMs = [bestTiming.extractMs]
                 heuristicMs = [bestTiming.heuristicMs]
                 quantiseMs = [bestTiming.quantiseMs]
                 zlibMs = [bestTiming.deflateMs]

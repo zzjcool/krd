@@ -23,6 +23,9 @@ public struct CompressTiming {
     public var heuristicMs = 0.0
     public var quantiseMs = 0.0
     public var deflateMs = 0.0
+    /// Time spent copying the tile out of the frame, on the fused entry only -- where that copy is
+    /// also the quantise pass, so a quantised tile has no separate `quantiseMs` to report (#92).
+    public var extractMs = 0.0
     public init() {}
 }
 
@@ -444,8 +447,6 @@ public final class ScreenWriter {
                                 plan: LevelPolicy.Plan,
                                 timing: UnsafeMutablePointer<CompressTiming>?) -> CompressedTile? {
         guard !pixels.isEmpty else { return nil }
-        var pixels = pixels
-        var quantised = false
         // One `now` per stage, and only when a benchmark asked for the split: the live path pays
         // one nil check per tile, nothing else (same pattern as `emitImage`).
         var mark = 0.0
@@ -456,6 +457,8 @@ public final class ScreenWriter {
         // plain `looksCompressible` plus a clock write: the conditions below keep the shape they
         // had (the `||` short circuit, both call sites), because neither the decisions nor the
         // bytes may move for a timing column (issue #96).
+        var pixels = pixels
+        var quantised = false
         if plan.quantise, let bits = plan.bits,
            plan.eager || !timedCompressible(pixels, rect: rect, timing: timing, mark: &mark) {
             pixels = quantise(pixels, bits: bits,
@@ -466,8 +469,91 @@ public final class ScreenWriter {
                 timing.pointee.quantiseMs += now - mark
                 mark = now
             }
-        } else if plan.level <= 0 &&
-                  !timedCompressible(pixels, rect: rect, timing: timing, mark: &mark) {
+        }
+        return encode(index: index, rect: rect, pixels: pixels, plan: plan, quantised: quantised,
+                      mark: &mark, timing: timing)
+    }
+
+    /// The mirror's tile path, with the quantisation **fused into the extraction** (issue #92,
+    /// step 2): the tile is quantised as it is copied out of the frame, so the quantised path has
+    /// no second walk over the tile left in it.
+    ///
+    /// The two passes this replaces were `TileGrid.extract` (a `memcpy` per row) and then
+    /// `quantise` (a read-modify-write of the copy). Both are gone as separate steps: the decision
+    /// is answered from the *frame* (`quantiseBits`, one read-only pass at the tile's own offsets),
+    /// and the copy that follows applies the map in its store. Every decision and every byte is the
+    /// one the two-pass version took: `quantiseBits` runs the same predictor with the same operands
+    /// in the same order over the same bytes (`looksCompressible` is one function, given a row
+    /// stride), and `extract(…, quantising:)` is `quantise`'s three expressions folded into the
+    /// copy. `QuantiseTests.testFusedExtractIsTheTwoPassResult` pins both halves against the
+    /// two-pass oracle; `testFrameProbeIsTheTileProbe` pins the decision.
+    ///
+    /// What is *not* fused, and deliberately so: the wall's panel path (`WallPictures.quantised`,
+    /// one RGBA panel per display) still calls `quantise` on its own buffer. Its panels are not cut
+    /// out of a frame by `TileGrid`, so there is no copy to fold the map into.
+    public static func compress(index: Int, rect: TileRect, frame: [UInt8], grid: TileGrid,
+                                plan: LevelPolicy.Plan,
+                                timing: UnsafeMutablePointer<CompressTiming>?) -> CompressedTile? {
+        // A stride `quantise` would not step by (bpp < 3) keeps the old shape: copy, then let the
+        // tile entry decide on the copy. No grid in the pipeline has one; `TileGrid`'s default is 3.
+        guard grid.bpp >= 3 else {
+            return compress(index: index, rect: rect, pixels: grid.extract(frame, rect: rect),
+                            plan: plan, timing: timing)
+        }
+        var mark = 0.0
+        if timing != nil { mark = benchNowMs() }
+        let bits = quantiseBits(frame, grid: grid, rect: rect, plan: plan,
+                               timing: timing, mark: &mark)
+        if let timing { mark = benchNowMs() }
+        let pixels = grid.extract(frame, rect: rect, quantising: bits)
+        if let timing {
+            let now = benchNowMs()
+            // The fused copy is `extract`, and on a quantised tile it is also the quantise pass.
+            timing.pointee.extractMs += now - mark
+            mark = now
+        }
+        return encode(index: index, rect: rect, pixels: pixels, plan: plan,
+                      quantised: bits != nil, mark: &mark, timing: timing)
+    }
+
+    /// The quantise decision `compress` takes for one tile, answered **from the frame** instead of
+    /// from an extracted copy -- which is what lets the copy and the map be one walk (issue #92).
+    ///
+    /// `nil` means "copy it plainly": either the plan does not ask (`guard` first, so a lossless
+    /// budget stays free), or the predictor found content zlib can still win on. `plan.eager`
+    /// (quality 70 and below, and the wall) skips the predictor exactly as it does further down.
+    public static func quantiseBits(_ frame: [UInt8], grid: TileGrid, rect: TileRect,
+                                    plan: LevelPolicy.Plan) -> QualityBudget.Bits? {
+        var mark = 0.0
+        return quantiseBits(frame, grid: grid, rect: rect, plan: plan, timing: nil, mark: &mark)
+    }
+
+    private static func quantiseBits(_ frame: [UInt8], grid: TileGrid, rect: TileRect,
+                                     plan: LevelPolicy.Plan,
+                                     timing: UnsafeMutablePointer<CompressTiming>?,
+                                     mark: inout Double) -> QualityBudget.Bits? {
+        guard plan.quantise, let bits = plan.bits else { return nil }
+        if plan.eager { return bits }
+        let compressible = looksCompressible(frame, grid: grid, rect: rect)
+        if let timing {
+            let now = benchNowMs()
+            timing.pointee.heuristicMs += now - mark
+            mark = now
+        }
+        return compressible ? nil : bits
+    }
+
+    /// The encode half, shared by both entries. `quantised` says the pixels are already quantised
+    /// and the probe has already been answered: the only thing left is the decision this function
+    /// itself makes ("does zlib win on these bytes after all?", the `level <= 0` guard) and the
+    /// deflate. Splitting it out is what lets the fused entry hand over a tile whose low bits were
+    /// dropped during the copy without probing or quantising it a second time.
+    private static func encode(index: Int, rect: TileRect, pixels: [UInt8], plan: LevelPolicy.Plan,
+                               quantised: Bool, mark: inout Double,
+                               timing: UnsafeMutablePointer<CompressTiming>?) -> CompressedTile? {
+        guard !pixels.isEmpty else { return nil }
+        if !quantised, plan.level <= 0,
+           !timedCompressible(pixels, rect: rect, timing: timing, mark: &mark) {
             return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
         }
         // else: content is compressible after all -> fall through and compress losslessly
@@ -540,36 +626,95 @@ public final class ScreenWriter {
         let w = rect.w, h = rect.h
         guard w > 1, h > 0, pixels.count >= w * h else { return true }
         let bpp = max(1, pixels.count / (w * h))
+        return pixels.withUnsafeBufferPointer { p in
+            guard let base = p.baseAddress else { return true }
+            return looksCompressible(base, rowStride: w * bpp, w: w, h: h, bpp: bpp)
+        }
+    }
+
+    /// The same predictor over a tile that is **still in the frame** (issue #92): the bytes of a
+    /// tile are `rect`'s rows of the frame, so the only difference from the call above is the stride
+    /// between rows. Same `base` pointer arithmetic, same comparisons, same order, same early exit
+    /// (which is a proof, not an estimate) -- so the verdict is the one the extracted copy would get,
+    /// without paying for a copy first. That is what lets `extract(…, quantising:)` fuse the copy
+    /// and the map: the decision has to exist before the first byte is written.
+    static func looksCompressible(_ frame: [UInt8], grid: TileGrid, rect r: TileRect) -> Bool {
+        let bpp = grid.bpp
+        guard r.w > 1, r.h > 0, bpp >= 1 else { return true }
+        let rowStride = grid.pixelW * bpp
+        // The last byte the tile reads, which is also the last byte `extract` copies. A frame that
+        // is short of it is not this grid's frame; the tile path's answer for a buffer that does not
+        // hold the tile is the conservative one ("compresses"), and `extract` is about to trap on
+        // the `memcpy` anyway, so this only ever has to avoid reading past the buffer.
+        guard (r.y + r.h - 1) * rowStride + (r.x + r.w) * bpp <= frame.count else { return true }
+        let start = r.y * rowStride + r.x * bpp
+        return frame.withUnsafeBufferPointer { p in
+            guard let base = p.baseAddress else { return true }
+            return looksCompressible(base + start, rowStride: rowStride, w: r.w, h: r.h, bpp: bpp)
+        }
+    }
+
+    /// The predictor's body, once. `rowStride` is how far one pixel row is from the next: `w * bpp`
+    /// for a tight tile buffer, `pixelW * bpp` while the tile is still in the frame.
+    private static func looksCompressible(_ base: UnsafePointer<UInt8>, rowStride: Int,
+                                          w: Int, h: Int, bpp: Int) -> Bool {
         let rowBytes = w * bpp
         // Every byte but the first pixel of the first row has a reference to compare against.
         let total = h * rowBytes - bpp
         guard total > 0 else { return true }
         var smooth = 0, compared = 0
         var decided: Bool?
-        pixels.withUnsafeBufferPointer { p in
-            for y in 0..<h {
-                let row = y * rowBytes
-                let start = y == 0 ? row + bpp : row
-                var i = start
-                while i < row + rowBytes {
-                    // The `UInt8` absolute difference, unsigned, without widening to `Int`. This
-                    // has to be the absolute value: the wrapping difference alone is `(a-b) mod 256`,
-                    // so `d >= 252` would also fire on `|a-b| ∈ {252...255}` — 20 of the 65,536 byte
-                    // pairs, and they are the *most* unsmooth ones, which is backwards. Ordering the
-                    // operands first costs a comparison and saves the `Int` conversion, which is
-                    // what bound this loop.
-                    let a = p[i], b = p[y == 0 ? i - bpp : i - rowBytes]
-                    let d = a > b ? a &- b : b &- a
-                    if d <= 4 { smooth += 1 }
-                    i += 1
-                }
-                compared += row + rowBytes - start
-                if 2 * smooth > total { decided = true; return }
-                if 2 * (smooth + (total - compared)) <= total { decided = false; return }
+        for y in 0..<h {
+            let row = y * rowStride
+            let start = y == 0 ? row + bpp : row
+            var i = start
+            while i < row + rowBytes {
+                // The `UInt8` absolute difference, unsigned, without widening to `Int`. This
+                // has to be the absolute value: the wrapping difference alone is `(a-b) mod 256`,
+                // so `d >= 252` would also fire on `|a-b| ∈ {252...255}` — 20 of the 65,536 byte
+                // pairs, and they are the *most* unsmooth ones, which is backwards. Ordering the
+                // operands first costs a comparison and saves the `Int` conversion, which is
+                // what bound this loop.
+                let a = base[i], b = base[y == 0 ? i - bpp : i - rowStride]
+                let d = a > b ? a &- b : b &- a
+                if d <= 4 { smooth += 1 }
+                i += 1
             }
+            compared += row + rowBytes - start
+            if 2 * smooth > total { decided = true; break }
+            if 2 * (smooth + (total - compared)) <= total { decided = false; break }
         }
         if let decided { return decided }
         return 2 * smooth > total
+    }
+
+    /// The per-byte map `quantise` applies, hoisted into a value so that a caller which is *copying*
+    /// bytes anyway can fold it into the store instead of walking its buffer a second time (issue
+    /// #92, step 2: `TileGrid.extract(…, quantising:)`).
+    ///
+    /// It holds exactly the six numbers `quantise` derives and nothing else, and `apply` writes the
+    /// same three expressions at the same offsets; `QuantiseTests` pins the fused result against
+    /// `quantise` over every byte value, channel, rung and stride. `nil` from the initialiser is
+    /// `quantise`'s early return: a stride below 3, or a bit depth outside `4...7`, means "copy it
+    /// plainly" -- which for a copy is the same buffer `quantise` would have handed back.
+    public struct QuantiseMap {
+        let shiftR: UInt8, repR: UInt8
+        let shiftG: UInt8, repG: UInt8
+        let shiftB: UInt8, repB: UInt8
+        /// Bytes per pixel, and therefore the stride of every loop that applies this map.
+        let stride: Int
+
+        public init?(_ bits: QualityBudget.Bits, bytesPerPixel bpp: Int) {
+            guard bpp >= 3 else { return nil }
+            // Same validation, in the same place, for the same reason as `quantise`: `8 - bits`
+            // traps above 8, and a count below 4 would need a negative right shift.
+            let channels = [bits.r, bits.g, bits.b]
+            guard channels.allSatisfy({ (4...7).contains($0) }) else { return nil }
+            shiftR = 8 - channels[0]; repR = channels[0] - shiftR
+            shiftG = 8 - channels[1]; repG = channels[1] - shiftG
+            shiftB = 8 - channels[2]; repB = channels[2] - shiftB
+            stride = bpp
+        }
     }
 
     /// 5-6-5 colour with bit replication, still 3 bytes per pixel (issue #59).
