@@ -392,27 +392,48 @@ krd *does* parse replies (issue #109) — the `APC` the graphics protocol answer
 
 - `APC G … ST` (`ESC _ G … ESC \`) becomes exactly one typed `Event.graphicReply`, is counted as a
   reply, and is never input: no byte of it reaches the mirrored desktop, terminator included.
-- **A reply is `ESC _ G`, not `ESC _`.** The third byte decides: a `G` enters the reply scan, and
-  anything else is the Alt-`_` keystroke it always was. A *bare* `ESC _` — no third byte yet — is
-  the one undecided case: it is held for 600 ms, because a terminal may write the three bytes in
-  two pieces and typing the head would legitimise the tail, and then released as the Alt-`_` key
-  with everything after it typed normally. A keystroke is never held longer than that. `DCS`/`SOS`/
-  `PM` (`ESC P`, `ESC X`, `ESC ^`) are **not** parsed at all: those three prefixes are how a legacy
-  terminal encodes Alt+P, Alt+X and Alt+^, so a legal key wins over a sequence krd never asked for.
+- **Only an unambiguous reply is treated as one; every other byte behaves as it does on `main`.**
+  `ESC _` is a reply candidate **only while it is a strict prefix of `ESC _ G`** — exactly two
+  bytes — and **the next byte decides, never a clock**. A `G` makes it a reply and the body is
+  discarded to the terminator; anything else releases it *that instant* as the Alt-`_` keystroke,
+  plus whatever followed. Nothing is typed while it is undecided, which is why a reply written in
+  pieces is still heard as a reply: `ESC _`, a 1200 ms pause, then `Gi=31;OK ST` is one
+  `graphicReply` and 0 keys. `DCS`/`SOS`/`PM` (`ESC P`, `ESC X`, `ESC ^`) are **not** parsed at
+  all: those three prefixes are how a legacy terminal encodes Alt+P, Alt+X and Alt+^, so a legal key
+  wins over a sequence krd never asked for.
+- **`ESC ]` has no state of its own beyond `main`'s.** A bare `ESC ]` (no body yet) is the Alt-`]`
+  keystroke, released on the next read that returns no data (~100 ms, which is what a human's
+  Alt-`]` looks like) — `main` only buffered it, so this is strictly a release, never a swallow. An
+  `OSC` *with* a body that stops arriving is a clipboard answer: it latches `main`'s
+  `discardingOSC` and is swallowed to `BEL` or `ST`.
 - **A reply that stops arriving is discarded together with its tail** — a stalled `OSC` to `BEL` or
-  `ST`, a stalled `APC` to `ST` — and no byte up to that terminator becomes input. The discard is
-  **bounded** on both sides: 64 KiB (`maxEncodedOSC` for a clipboard reply, whose payload is
-  legitimately megabytes) and 1500 ms *without a byte*. Past either, it is abandoned: the keyboard
-  comes back, the swallowed bytes are gone, and one log line says so. An input path may never wedge.
+  `ST`, a stalled `APC` to `ST` — and no byte up to that terminator becomes input. Every discard
+  ends in exactly one of three ways: its terminator, a **byte cap** (65,536 B for a graphics reply;
+  **2,796,218 B** for an `OSC`, the base64 of a 2 MB clipboard, because a legal clipboard answer
+  really is megabytes), or a **fixed total deadline of 1500 ms anchored at the byte that started
+  it**. Incoming bytes do **not** move that deadline: a keystroke is a byte, so a refreshed window
+  would let the typist be the one input that keeps a discard alive forever. Past any of the three
+  the discard is abandoned: the keyboard comes back, the swallowed bytes are gone, and one log line
+  says so.
 - Half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is the one other thing dropped on a timeout: 500 ms
-  with no bytes, then it is discarded — not typed. A lone `ESC` is the Esc key, and a complete
+  with no bytes, then it is discarded — not typed. A lone `ESC` is the Esc key and a complete
   `ESC x` is Alt+`x`, both immediately.
 
-The bound this leaves: the bytes are safe, the reply itself can be *lost*. If a terminal writes a
-reply in pieces more than 600 ms apart, the head is released as Alt-`_` and the rest is typed as
-keys; and a reply that goes quiet for 1500 ms mid-body loses its remaining bytes to the log. A local
-pty writes a ~40 B reply in one go, so neither happens in practice, and both leave a working
-keyboard — which is the property that matters (#109 round 3).
+The bounds this leaves are named rather than hidden: the bytes are safe, the reply itself can be
+*lost*, and the undecided head waits for a byte rather than for a timer.
+
+- A reply split **after** `ESC _ G` (so the `G` arrived but the body did not) is discarded with its
+  tail: safe bytes, lost reply, one log line at the 1500 ms deadline.
+- A lone `ESC _` that no byte ever follows is delivered when the next byte arrives, not before (on
+  `main` it was typed at once). Releasing it from the idle read instead would be a clock, and the
+  idle read fires ~100 ms after `ESC _` — before the body of a reply written 1200 ms later, which
+  would type that body.
+- Conversely `ESC _` followed by `G` is a reply **whenever** the `G` arrives, exactly as specified:
+  a human typing Alt+`_` and then `G` is read as a reply head, and the bytes after it are swallowed
+  until `ESC \` or the 1500 ms deadline. That is the trade the byte-decides rule makes, and the
+  deadline is what bounds it.
+- An `OSC` body that stops arriving is never released as text: on `main` it was buffered until more
+  arrived, so a stalled one is swallowed rather than typed.
 
 The first refusal per image is logged once, where the log panel already is:
 

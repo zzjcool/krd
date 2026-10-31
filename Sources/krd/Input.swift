@@ -180,8 +180,8 @@ final class InputReader {
     private let stopLock = NSLock()
     private var stopFlag = false
     private let stoppedSignal = DispatchSemaphore(value: 0)
-    /// 100 ms ticks with no bytes: the only clock the idle decisions run on. The *policy* — how long
-    /// a bare `ESC _` may wait for its `G`, how long a discard may stay silent — lives in
+    /// 100 ms ticks with no bytes: the only clock the idle decisions run on. The *policy* — what a
+    /// bare `ESC ]` releases, and when a discard is past its fixed deadline — lives in
     /// `InputParser.resolveStall`, so the parser can be tested against a fake clock.
     private func loop() {
         defer {
@@ -198,12 +198,12 @@ final class InputReader {
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {
-                // An escape sequence that stopped arriving. `krd` decides *nothing* here any more:
-                // `resolveStall` holds it, releases it, drops it or abandons its discard on its own
-                // deadlines (issue #109, round 3), and the invariant it enforces is that every one
-                // of those ends — a bare `ESC _` becomes the Alt-`_` keystroke it is, and a reply's
-                // discard is bounded in bytes and in silence, so a keystroke is never swallowed
-                // forever.
+                // A read that returned no data: an escape sequence that stopped arriving. This is
+                // the only clock the parser's idle decisions ever see, and it decides only two
+                // things — a bare `ESC ]` is the Alt-`]` key, and a discard past its fixed
+                // deadline is abandoned. `ESC _` is **not** decided here: it waits for the byte
+                // that decides it, so a reply written in pieces far apart is still a reply
+                // (`InputParser.resolveStall`, issue #109 round 4).
                 //
                 // Nothing here resets the parser and keeps parsing the remainder: `reset()` drops
                 // the buffered head and the *rest* of the sequence then arrives as input, which is
@@ -220,7 +220,7 @@ final class InputReader {
                     case .none, .escape, .pending, .abandoned:
                         break                       // `abandoned` emitted its own `.notice`
                     case .released:
-                        log("released a stalled `ESC _` as the Alt+_ keystroke")
+                        log("released a stalled `ESC ]` as the Alt+] keystroke")
                     case .sequence:
                         // A reply latched a discard; half a keystroke simply went away.
                         log(held.count >= 2 && (InputParser.isReplyCandidate(held) || held[1] == 0x5D)

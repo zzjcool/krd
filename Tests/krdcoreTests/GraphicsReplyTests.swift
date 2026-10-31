@@ -191,11 +191,10 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(events.count, 0, "an unfinished APC leaked: \(trace(events))")
     }
 
-    /// Stage F of the gate's transcript, round 3: **a lone `ESC _` is the Alt-`_` keystroke**, not a
-    /// reply. It is held for `apcDecideMs` (that hold is what keeps a reply split across two reads
-    /// from being typed) and then released — and the bytes after it are typed normally, which is the
-    /// whole point: round 2 latched an uncapped discard here, so on any legacy terminal a legal
-    /// Alt+`_` ate every following keystroke until a stray `ST` arrived.
+    /// Stage F of the gate's transcript (round 4): **a lone `ESC _` is the Alt-`_` keystroke**, and
+    /// *no clock* decides that — the byte that arrives after it does. The idle tick holds it
+    /// (`.pending`, however long the silence lasts), and `hello` then arrives as Alt+`_` and the five
+    /// letters, with nothing lost and nothing typed early.
     func testALoneAPCHeadIsReleasedAsAltUnderscore() {
         let parser = InputParser()
         var events: [Event] = []
@@ -205,6 +204,8 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(events.count, 0, "half a reply emitted early: \(trace(events))")
         XCTAssertEqual(parser.resolveStall(now: 100), .pending, "the head was decided on the first tick")
         XCTAssertEqual(parser.resolveStall(now: 400), .pending, "300 ms is inside the window")
+        XCTAssertEqual(parser.resolveStall(now: 5_000), .pending,
+                       "a clock released the reply head — the round-4 regression")
 
         parser.feed(Array("hello".utf8))                  // ... and now the keys arrive
         XCTAssertEqual(events, [.text("_", [.maskAlternate]), .text("h", []), .text("e", []),
@@ -214,33 +215,64 @@ final class GraphicsReplyTests: XCTestCase {
 
     /// The deciding third byte is honoured while the head is still held: the same stalled `ESC _`,
     /// followed by the rest of the reply, is *heard* as one reply — not typed, and not discarded as
-    /// if the head had been a keystroke either.
+    /// if the head had been a keystroke either. The hold is not a window (round 4): the gate's gap 2
+    /// was `ESC _` + 1200 ms + `Gi=31;OK ST`, and the reply must still be the answer at 1200 ms.
     func testAHeldAPCHeadStillBecomesTheReply() {
         let parser = InputParser()
         var events: [Event] = []
         parser.onEvent = { events.append($0) }
         parser.feed(Array("\u{1B}_".utf8))
-        XCTAssertEqual(parser.resolveStall(now: 100), .pending)
+        for tick in stride(from: 100.0, through: 1_200.0, by: 100) {
+            XCTAssertEqual(parser.resolveStall(now: tick), .pending, "released at \(tick) ms")
+        }
         parser.feed(Array("Gi=31;OK\u{1B}\\".utf8))
         XCTAssertEqual(replies(events).count, 1, trace(events))
         XCTAssertEqual(injected(events).count, 0, "a reply was typed: \(trace(events))")
     }
 
-    /// Policy 2: a discard that goes silent is **abandoned**, not kept forever. Past
-    /// `replyDiscardIdleMs` of no bytes, the keyboard comes back and one `.notice` says so.
-    func testAReplyThatNeverTerminatesLosesItsKeyboardForNoMoreThanTheIdleBudget() {
+    /// Policy 4: a discard dies on a **fixed total deadline** counted from the byte that started it,
+    /// not on an idle window. Past `replyDiscardBudgetMs`, the keyboard comes back and one `.notice`
+    /// says so.
+    func testAReplyThatNeverTerminatesLosesItsKeyboardForNoMoreThanTheDeadline() {
         let parser = InputParser()
         var events: [Event] = []
         parser.onEvent = { events.append($0) }
 
         parser.feed(Array("\u{1B}_Gi=31;OK".utf8))        // a reply whose `ST` never came
-        XCTAssertEqual(parser.resolveStall(now: 100), .sequence)
+        // The idle tick that latched it is the anchor: whatever `now` the loop sees next, the 1500 ms
+        // run from *here*.
+        XCTAssertEqual(parser.resolveStall(now: 1_000), .sequence)
         XCTAssertEqual(injected(events).count, 0, "the payload was typed: \(trace(events))")
-        XCTAssertEqual(parser.resolveStall(now: 1_000), .pending, "abandoned too early")
-        XCTAssertEqual(parser.resolveStall(now: 1_700), .abandoned)
+        XCTAssertEqual(parser.resolveStall(now: 2_000), .pending, "abandoned too early")
+        XCTAssertEqual(parser.resolveStall(now: 2_600), .abandoned)
         XCTAssertEqual(notices(events).count, 1, "the abandon was not logged: \(trace(events))")
 
         parser.feed(Array("hi".utf8))                     // ... and the keyboard is back
+        XCTAssertEqual(injected(events), [.text("h", []), .text("i", [])], trace(events))
+    }
+
+    /// **The round-4 regression, gap 3.** A keystroke is a byte, so an idle clock that every `feed`
+    /// refreshed made the *typist* the one input that could keep a discard alive forever: a stray
+    /// `ESC ]` swallowed every key typed afterwards, up to a 2.7 MB budget. The deadline is anchored
+    /// at the discard's first byte and no byte moves it.
+    func testADiscardsDeadlineIsNotRefreshedByIncomingBytes() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+
+        parser.feed(Array("\u{1B}_Gi=31;OK".utf8))
+        XCTAssertEqual(parser.resolveStall(now: 0), .sequence)
+        // 1400 ms of typing at 200 ms intervals: the same bytes that used to reset the clock.
+        for tick in stride(from: 200.0, through: 1_400.0, by: 200) {
+            parser.feed(Array("x".utf8))
+            XCTAssertEqual(parser.resolveStall(now: tick), .pending,
+                           "abandoned before its deadline at \(tick) ms")
+        }
+        XCTAssertEqual(parser.resolveStall(now: 1_500), .abandoned,
+                       "the deadline slid with the incoming bytes")
+
+        events.removeAll()
+        parser.feed(Array("hi".utf8))
         XCTAssertEqual(injected(events), [.text("h", []), .text("i", [])], trace(events))
     }
 
@@ -313,7 +345,36 @@ final class GraphicsReplyTests: XCTestCase {
                        "a BEL ended an APC discard: \(trace(apcEvents))")
     }
 
-    /// Only a lone `ESC` has no tail, so it is the only stalled buffer still released as a key.
+    /// **The round-4 regression, gap 1.** `ESC ]` is how a legacy terminal encodes Alt+`]`, so a
+    /// stray one must cost exactly one keystroke and nothing else. Round 3 latched an OSC discard on
+    /// it — budget `maxEncodedOSC`, 2,796,218 B — and the idle clock was refreshed by every key, so a
+    /// typist could lose 27 of 27 keystrokes. It is Alt-`]` on the next read that returns no data,
+    /// and the typing after it is untouched.
+    func testABareOSCIntroducerIsTheAltBracketKey() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+
+        parser.feed(Array("\u{1B}]".utf8))
+        XCTAssertEqual(events.count, 0, "half a sequence emitted early: \(trace(events))")
+        XCTAssertEqual(parser.resolveStall(now: 100), .released,
+                       "a bare `ESC ]` latched a discard instead of being a key")
+        XCTAssertEqual(events, [.text("]", [.maskAlternate])], trace(events))
+        XCTAssertFalse(parser.isDiscarding, "a legal Alt+] started a discard")
+
+        // ... and a whole second of typing, one key every 200 ms, arrives as keys.
+        for ch in "hello" {
+            parser.feed(Array(String(ch).utf8))
+            XCTAssertEqual(parser.resolveStall(now: 300), .none)
+        }
+        XCTAssertEqual(events, [.text("]", [.maskAlternate]), .text("h", []), .text("e", []),
+                                .text("l", []), .text("l", []), .text("o", [])], trace(events))
+    }
+
+    /// Only a lone `ESC` has no tail, so it is the only stalled buffer still released as a key with
+    /// nothing after it. (`ESC ]` is released too — as Alt-`]`, above — because an introducer with
+    /// no body is a keystroke; `ESC _` is *held*, because two of its three possible bytes are a
+    /// reply.)
     func testAStalledLoneEscapeIsStillTheEscKey() {
         let parser = InputParser()
         var events: [Event] = []

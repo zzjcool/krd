@@ -131,9 +131,9 @@ public final class InputParser {
     public var onEvent: ((Event) -> Void)?
 
     /// An over-cap OSC is being swallowed up to its terminator: its bytes are a reply's payload,
-    /// never input. Kept across `feed`s because a reply arrives in reads, not in one piece. Only a
-    /// terminator (or `reset()`) ends it: a reply that never terminates leaves the parser
-    /// discarding, which is deliberate — the alternative is typing its payload.
+    /// never input. Kept across `feed`s because a reply arrives in reads, not in one piece. A
+    /// terminator, the byte cap or the fixed deadline ends it (`startDiscard`), so a reply that
+    /// never terminates loses its payload rather than the keyboard.
     private var discardingOSC = false
     /// The same for an over-cap `APC`/`DCS`/`SOS`/`PM` body (issue #109). A separate field because
     /// the terminator rule differs: a string sequence ends on `ST` only, so a `BEL` inside one is
@@ -150,12 +150,13 @@ public final class InputParser {
     /// The byte budget this discard may spend (`maxStringSequence`, or `maxEncodedOSC` for a
     /// clipboard reply, whose payload is legitimately megabytes).
     private var discardByteCap = maxStringSequence
-    /// When this discard last heard a byte (`benchNowMs`). Silence past
-    /// `replyDiscardIdleMs` — not total elapsed time, so a big OSC that keeps arriving is never
-    /// cut off — abandons it.
-    private var discardHeardAt: Double = 0
-    /// When the current buffer first failed to complete, so a half-arrived sequence can be given a
-    /// deadline. Reset by `feed`: the window runs from the last byte, not from the first.
+    /// When this discard *began* (`benchNowMs`). The deadline is counted from here and **no byte
+    /// moves it** (issue #109, round 4): a keystroke is a byte, so an idle window that each `feed`
+    /// refreshed made the typist the one input that could keep a discard alive forever.
+    private var discardStartedAt: Double = 0
+    /// When the current buffer first failed to complete, so a half-arrived *keystroke* can be given
+    /// a deadline. Reset by `feed`: that window runs from the last byte, and it only ever decides a
+    /// buffer that is neither a reply nor a legal key (`keySequenceGraceMs`).
     private var stalledSince: Double = 0
 
     /// True while an unfinished sequence's payload is being swallowed. The read loop logs the idle
@@ -165,15 +166,13 @@ public final class InputParser {
     public init() {}
 
     public func feed(_ bytes: [UInt8]) {
-        stalledSince = 0                            // the windows run from the last byte
-        discardHeardAt = 0                          // ... and so does a discard's idle clock
-        buffer.append(contentsOf: bytes)
+        stalledSince = 0                            // the keystroke grace runs from the last byte
+        buffer.append(contentsOf: bytes)             // a discard's deadline does *not* move
         drain()
     }
 
     public func feed(_ bytes: ArraySlice<UInt8>) {
         stalledSince = 0
-        discardHeardAt = 0
         buffer.append(contentsOf: bytes)
         drain()
     }
@@ -186,7 +185,7 @@ public final class InputParser {
         discardSawESC = false
         discarded = 0
         discardByteCap = Self.maxStringSequence
-        discardHeardAt = 0
+        discardStartedAt = 0
         stalledSince = 0
     }
 
@@ -196,14 +195,16 @@ public final class InputParser {
         case none
         /// One lone `ESC` — the Esc key, exactly as before issue #109.
         case escape
-        /// Still undecided: held for one of the windows below, nothing typed and nothing dropped.
+        /// Still undecided: nothing typed and nothing dropped. A discard that has not reached its
+        /// deadline, or a buffer a *byte* still has to decide (`ESC _`), or half a keystroke inside
+        /// `keySequenceGraceMs`.
         case pending
         /// The head of a sequence that was a reply (or half a keystroke). It is gone, and when the
         /// prefix could only have been a reply (`ESC _ G`, `OSC`) every byte up to its terminator is
         /// now swallowed, so the rest of that sequence cannot become input either.
         case sequence
-        /// `ESC _` waited out `apcDecideMs` without the `G` that would have made it a reply, so it
-        /// was released as the legal Alt-`_` keystroke it is.
+        /// A bare `ESC ]` — the OSC introducer with no body yet — was released as the Alt-`]`
+        /// keystroke it is, so the introducer can never swallow the typing that follows it.
         case released
         /// A discard ran out of budget (bytes or silence) and was given up: the keyboard is back and
         /// the parser has already emitted the `.notice` that says so.
@@ -218,52 +219,62 @@ public final class InputParser {
     }
 
     /// `ESC _ G`: the only three bytes that begin a reply (issue #109). A bare `ESC _` is **not** a
-    /// candidate. Nothing krd sends produces `ESC _` and then a pause before the `G`, so a bare one
-    /// is the legal Alt-`_` — and treating it as a reply is how a keystroke got swallowed forever.
+    /// candidate — it is undecided, and only the *next byte* decides it.
     public static func isReplyCandidate(_ bytes: [UInt8]) -> Bool {
         bytes.count >= 3 && bytes[0] == 0x1B && bytes[1] == 0x5F && bytes[2] == 0x47
     }
 
-    /// How long a bare `ESC _` is held waiting for the `G` that would make it a reply. A terminal
-    /// writes `ESC _ G` in one go, so this only ever elapses when no reply is coming; 600 ms is
-    /// longer than any terminal's inter-write gap and shorter than a human re-typing.
-    public static let apcDecideMs: Double = 600
+    /// A strict prefix of `ESC _ G`: exactly the two bytes `ESC _`, the only undecided state on this
+    /// path. Three bytes always decide, and a bare `ESC` is the Esc key.
+    public static func isReplyHead(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 2 && bytes[0] == 0x1B && bytes[1] == 0x5F
+    }
 
     /// How long half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is held before it is dropped. This is
-    /// the 500 ms `docs/PROTOCOL.md` §8 quotes.
+    /// the 500 ms `docs/PROTOCOL.md` §8 quotes. It never applies to `ESC _`: a reply head is decided
+    /// by the next byte, not by a clock.
     public static let keySequenceGraceMs: Double = 500
 
-    /// How long a discard may go *silent* before it is abandoned and the keyboard released. Counted
-    /// from the last byte, so a reply that keeps arriving is never cut off, while a keyboard that
-    /// stopped producing input cannot be swallowed for longer than this.
-    public static let replyDiscardIdleMs: Double = 1500
+    /// The **total** life of one discard, counted from the byte that started it and never refreshed.
+    /// Past it the discard is abandoned, the keyboard comes back and one `.notice` says so — the
+    /// three ways out of a discard (terminator, byte cap, this deadline) all end it, because an
+    /// input path may never wedge (`resolveStall`).
+    public static let replyDiscardBudgetMs: Double = 1500
 
-    /// Resolve a sequence that stopped arriving: `krd`'s read loop calls this on every idle poll
-    /// (100 ms) and asks the same question each time, so the windows below are the only thing that
-    /// decides when a held buffer is given up (issue #109, round 3).
+    /// Resolve a sequence that stopped arriving: `krd`'s read loop calls this on every read that
+    /// returned no data (its 100 ms `poll` timeout) and asks the same question each time. This is
+    /// the only place that decides a held buffer, so it can be tested against a fake clock.
     ///
-    /// The policy, in full:
+    /// The policy, in full (issue #109, round 4 — the round that removed the timers):
     ///
-    /// 1. **A reply is `ESC _ G`, not `ESC _`.** A bare `ESC _` is held for `apcDecideMs` waiting
-    ///    for the deciding byte — that hold is what stops a reply split across two reads from being
-    ///    typed — and is then released as the Alt-`_` keystroke it always was, with everything after
-    ///    it typed normally. A third byte that is not `G` releases it at once (`parseEscape`).
-    /// 2. **Every discard is bounded.** A reply's payload is swallowed, but only within a byte
-    ///    budget (`maxStringSequence`, or `maxEncodedOSC` for an OSC) *and* an idle budget
-    ///    (`replyDiscardIdleMs`). Past either, the discard is abandoned, the keyboard comes back and
-    ///    one `.notice` says so. An input path may never wedge.
-    /// 3. **A reply that never terminates still never types its payload** (#127, #109): the bytes
-    ///    up to the abandon are dropped, never handed to the byte loop.
-    ///
-    /// Nothing on the sequence path is typed before the decision. Only a lone `ESC` — which has no
-    /// tail and cannot be anything else — is a key immediately.
+    /// 1. **Only an unambiguous reply may ever be treated as one.** `ESC _ G` is a reply; `ESC _`
+    ///    plus anything else is the Alt-`_` keystroke plus what followed it (`parseEscape`). The
+    ///    undecided `ESC _` is decided by **the next byte and nothing else**: no clock releases it,
+    ///    so a reply whose head and body are written far apart is still heard as a reply instead of
+    ///    being typed, and nothing on this path is typed before that byte arrives.
+    /// 2. **What that costs is named, not hidden:** a lone `ESC _` with no byte after it is delivered
+    ///    when the next byte arrives (on `main` it was typed at once). The alternative — releasing it
+    ///    from this idle tick — is a clock, and it types the reply: a read returns no data ~100 ms
+    ///    after `ESC _`, so any release here would fire before a body written 1200 ms later.
+    /// 3. **`ESC ]` latches nothing new.** A bare `ESC ]` is Alt-`]`, released from this idle tick
+    ///    (~100 ms, which is what a human's Alt-`]` looks like); with a body it is a clipboard answer
+    ///    and latches the `discardingOSC` state `main` already had, whose only end conditions are the
+    ///    ones `startDiscard` gives it.
+    /// 4. **Every discard is bounded three ways**: its terminator, a byte budget
+    ///    (`maxStringSequence`, or `maxEncodedOSC` for an OSC), and a **fixed total deadline**
+    ///    (`replyDiscardBudgetMs`) anchored at the byte that started it. No incoming byte moves that
+    ///    deadline — keystrokes are bytes, and a refreshed window made the typist the one input that
+    ///    could keep a discard alive forever. Past any of the three, the discard is abandoned, the
+    ///    keyboard comes back and one `.notice` says so.
+    /// 5. **A reply that never terminates still never types its payload** (#127, #109): the bytes up
+    ///    to the abandon are dropped, never handed to the byte loop.
     public func resolveStall(now: Double = benchNowMs()) -> StalledBytes {
-        // A discard is resolved by silence, not by content: its buffer is empty by construction.
+        // A discard is resolved by its own deadline, not by content: its buffer is empty by
+        // construction, and `discardStartedAt` is the anchor `feed` cannot move.
         if isDiscarding {
-            if discardHeardAt == 0 { discardHeardAt = now }
-            let idle = now - discardHeardAt
-            guard idle >= Self.replyDiscardIdleMs else { return .pending }
-            emit(.notice("reply discard abandoned: no byte for \(Int(idle)) ms"
+            let lived = now - discardStartedAt
+            guard lived >= Self.replyDiscardBudgetMs else { return .pending }
+            emit(.notice("reply discard abandoned: \(Int(lived)) ms"
                          + (discarded > 0 ? ", \(discarded) B dropped" : "")))
             abandonDiscard()
             return .abandoned
@@ -279,20 +290,23 @@ public final class InputParser {
             stalledSince = 0
             return .escape
         }
-        if stalledSince == 0 { stalledSince = now }
-        let waited = now - stalledSince
 
-        // The undecided head. Held (policy 1) — and then, and only then, released as Alt-`_`.
-        if held.count == 2, first == 0x1B, held[1] == 0x5F {
-            guard waited >= Self.apcDecideMs else { return .pending }
+        // `ESC _`: a strict prefix of the only reply krd provokes, and the one buffer here that no
+        // clock may decide (policy 1/2). It waits for the byte that decides it.
+        if Self.isReplyHead(held) { return .pending }
+
+        // A bare `ESC ]` — the introducer with no body yet — is the Alt-`]` keystroke. `main` left
+        // these two bytes buffered until more arrived, so this is the one state that has to be
+        // released for typing to continue; it swallows nothing, and a body is handled below.
+        if held.count == 2, first == 0x1B, held[1] == 0x5D {
             buffer.removeAll(keepingCapacity: true)
             stalledSince = 0
-            emit(.text("_", [.maskAlternate]))
+            emit(.text("]", [.maskAlternate]))
             return .released
         }
 
-        // A reply, and only a reply, may latch a discard: `ESC ] …` (a clipboard answer) or
-        // `ESC _ G …` (the graphics reply). Both carry a payload that must never be typed.
+        // A reply, and only a reply, may latch a discard: `ESC ] …` (a clipboard answer with a
+        // body) or `ESC _ G …` (the graphics reply). Both carry a payload that must never be typed.
         if held.count >= 2, first == 0x1B, held[1] == 0x5D || Self.isReplyCandidate(held) {
             buffer.removeAll(keepingCapacity: true)
             stalledSince = 0
@@ -302,7 +316,8 @@ public final class InputParser {
 
         // Half a keystroke: neither a reply nor a key, so it gets the grace and is then dropped.
         // It latches no discard, so the next key is unaffected.
-        guard waited >= Self.keySequenceGraceMs else { return .pending }
+        if stalledSince == 0 { stalledSince = now }
+        guard now - stalledSince >= Self.keySequenceGraceMs else { return .pending }
         buffer.removeAll(keepingCapacity: true)
         stalledSince = 0
         return .sequence
@@ -418,10 +433,10 @@ public final class InputParser {
         case 0x5F:                                  // APC: `ESC _ … ST`, of which only `ESC _ G` is ours
             // `ESC _ G` is the *only* sequence krd ever asks a terminal to send (issue #109). A
             // `G` on the third byte enters the reply scan; anything else is the Alt-`_` keystroke
-            // this parser has always produced for it. A *bare* `ESC _` (no third byte yet) is the
-            // one undecided case, and the read loop holds it for `apcDecideMs` (`resolveStall`) and
-            // then releases it as Alt+`_` — never as an unbounded discard, which would eat every
-            // following keystroke on a terminal whose Alt+`_` is just a keystroke.
+            // this parser has always produced for it, released on the spot. A *bare* `ESC _` (no
+            // third byte yet) is the one undecided case: it stays buffered — **no clock, no
+            // discard** — and the next byte decides it, which is what keeps a reply whose pieces
+            // are written far apart from being typed (`resolveStall`, policy 1).
             guard buffer.count >= 3 else { return nil }
             guard buffer[2] == 0x47 else { return altText() }
             return parseStringSequence()
@@ -490,7 +505,8 @@ public final class InputParser {
         // discard functions have just scanned the same read and may have parked half an `ST` there.
         discarded = 0
         discardByteCap = osc ? Self.maxEncodedOSC : Self.maxStringSequence
-        discardHeardAt = now
+        // The clock is anchored here and never re-anchored: `feed` does not touch it (policy 4).
+        discardStartedAt = now
         stalledSince = 0
     }
 
@@ -502,7 +518,7 @@ public final class InputParser {
         discardSawESC = false
         discarded = 0
         discardByteCap = Self.maxStringSequence
-        discardHeardAt = 0
+        discardStartedAt = 0
     }
 
     /// Spend `n` payload bytes against the current discard's budget. `false` means the budget is
@@ -526,9 +542,13 @@ public final class InputParser {
     }
 
     /// Swallow the body of an `APC` up to its `ST`, for the reason `discardOSC` documents — an
-    /// over-cap one, or one the read loop found stalled (`resolveStall`). Same contract, one
-    /// difference: `BEL` is payload in a string sequence, so it does not end the discard — ending
-    /// there would type the rest of the reply.
+    /// over-cap one, or one the read loop found stalled (`resolveStall`). The OSC discard's byte
+    /// budget is `maxEncodedOSC` (**2,796,218 B** — the base64 of a 2 MB clipboard plus headroom),
+    /// because a legal clipboard answer really is megabytes; this one's is `maxStringSequence`
+    /// (65,536 B). Both are also on the fixed total deadline, which is what stops a typist's bytes
+    /// from extending a discard (policy 4 of `resolveStall`). Same contract, one difference: `BEL`
+    /// is payload in a string sequence, so it does not end the discard — ending there would type the
+    /// rest of the reply.
     private func discardString() -> Int? {
         if discardSawESC {
             guard let first = buffer.first else { return nil }
