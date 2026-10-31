@@ -159,7 +159,8 @@ final class WallPictureReuseTests: XCTestCase {
         let stage = page.first { $0.slot == WallPanels.stageSlot }!
         XCTAssertFalse(cache.isOnScreen(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect),
                        "nothing is on screen before the first paint records it")
-        cache.didPlace(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect)
+        cache.didPlace(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect,
+                       at: cache.clock)
         XCTAssertTrue(cache.isOnScreen(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect))
         cache.forgetStage()
         // Both halves, or the stage would be re-photographed and then not re-emitted: the wall would
@@ -188,7 +189,9 @@ final class WallPictureReuseTests: XCTestCase {
         let first = await WallPictures.capture(page, cache: cache)
         XCTAssertEqual(first.reused, [], "nothing is cached before the first paint")
         // The placement record a paint would have made, so the *second* half of the rule is live.
-        for panel in page { cache.didPlace(slot: panel.slot, key: key(panel), rect: panel.rect) }
+        for panel in page {
+            cache.didPlace(slot: panel.slot, key: key(panel), rect: panel.rect, at: cache.clock)
+        }
 
         // Inside the bound: the same page is free. Half the bound, so the assertion is about the
         // rule and not about a rounding.
@@ -214,6 +217,45 @@ final class WallPictureReuseTests: XCTestCase {
         let after = await WallPictures.capture(page, cache: cache)
         XCTAssertEqual(after.reused, Set(page.map(\.slot)),
                        "the fresh capture is cached, so the next paint is free")
+    }
+
+    /// The bound is the **pixels'** age, not the repaint's. A paint can emit a picture the memo
+    /// already had — a page step back to a window whose payload is still cached — and if that
+    /// placement were stamped with the *emit* time, old pixels would look fresh for another `maxAge`:
+    /// the re-capture that follows would be paid for and then skipped on the wire ("already on
+    /// screen"), and the pane would show pixels up to **2 x `maxAge`** old. So `capture` reports the
+    /// age of the pixels it hands back, and the paint stamps the placement with that number.
+    func testAReEmittedCachedPictureKeepsItsPixelsAge() async {
+        var now: TimeInterval = 500
+        let cache = WallPictures.PanelCache(now: { now })
+        let page = demoPlan(cardStart: 0)
+
+        let first = await WallPictures.capture(page, cache: cache)
+        XCTAssertEqual(first.photographed.count, page.count, "every slot reports how old its pixels are")
+        XCTAssertEqual(Set(first.photographed.values), [500], "a fresh capture is stamped when it is taken")
+
+        // A later paint that reuses every panel: the pixels are still the ones from t=500.
+        now = 502.4
+        let reuse = await WallPictures.capture(page, cache: cache)
+        XCTAssertEqual(reuse.reused, Set(page.map(\.slot)), "inside the bound, nothing is re-shot")
+        XCTAssertEqual(Set(reuse.photographed.values), [500],
+                       "a reuse reports the *pixels'* age, not this paint's clock")
+
+        // Paint what that capture handed back, the way `paintWall` does.
+        for panel in page {
+            cache.didPlace(slot: panel.slot, key: key(panel), rect: panel.rect,
+                           at: reuse.photographed[panel.slot] ?? 0)
+        }
+        XCTAssertTrue(cache.isOnScreen(slot: 0, key: key(page[0]), rect: page[0].rect),
+                      "2.4 s old pixels are on screen and may be skipped")
+
+        // 2.6 s after the *capture* something paints again. Both halves must expire on the same
+        // clock: the payload is a miss, and the placement is not "already on screen" either, or the
+        // re-capture would be paid for and never sent.
+        now = 502.6
+        XCTAssertNil(cache.picture(for: key(page[0])), "2.6 s > 2.51 s: the payload is a miss")
+        XCTAssertFalse(cache.isOnScreen(slot: 0, key: key(page[0]), rect: page[0].rect),
+                       "and the placement expires with its pixels, not with the repaint that made it")
     }
 
     /// The bound is the wall's own number, not a second opinion invented in the cache: a retune of
@@ -266,7 +308,7 @@ final class WallPictureReuseTests: XCTestCase {
         let freshest = key(panels[16])
         // Pretend the oldest picture is on screen, which is what makes "evicted != re-emitted"
         // checkable: the sent map must survive the eviction.
-        cache.didPlace(slot: 1, key: oldest, rect: panels[0].rect)
+        cache.didPlace(slot: 1, key: oldest, rect: panels[0].rect, at: cache.clock)
 
         let result = await WallPictures.capture(panels, cache: cache)
 
@@ -295,7 +337,7 @@ final class WallPictureReuseTests: XCTestCase {
         let first = await WallPictures.capture(panels, cache: cache)
         XCTAssertEqual(first.pictures.count, panels.count)
         let stage = key(panels[0])
-        cache.didPlace(slot: 0, key: stage, rect: panels[0].rect)
+        cache.didPlace(slot: 0, key: stage, rect: panels[0].rect, at: cache.clock)
         XCTAssertTrue(cache.isOnScreen(slot: 0, key: stage, rect: panels[0].rect))
 
         // This paint's capture failed on the stage: the slot paints a mask over the picture's cells.

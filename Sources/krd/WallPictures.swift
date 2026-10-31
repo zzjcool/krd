@@ -38,11 +38,10 @@ enum WallPictures {
         let height: Int
     }
 
-    /// Capture every panel, in order, one at a time.
-    ///
-    /// Sequential on purpose: all four captures go through the same screen-recording service, the
-    /// measurements were taken that way, and running them at once buys nothing a reader can see. A
-    /// panel that fails is simply absent — the caller paints its mask.
+    /// The clock the cache's ages are measured on. Monotonic, like `PanelCache`'s own default: age
+    /// is a duration, and a wall-clock change must not expire the whole memo.
+    static func clock() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
     /// Draw the test pattern instead of the desk (`--demo`). Set once before the first paint.
     static var demo = false
     /// Square corners (`--square`). Rounded is the default: a picture is the size of its cells, so a
@@ -125,7 +124,7 @@ enum WallPictures {
         private let lock = NSLock()
         /// A picture and the moment it was photographed. Both halves are needed: the picture is the
         /// payload, the stamp is what `maxAge` is measured against.
-        private struct Entry {
+        struct Entry {
             let picture: Picture
             let at: TimeInterval
         }
@@ -144,7 +143,13 @@ enum WallPictures {
             self.now = now
         }
 
-        func picture(for key: PanelKey) -> Picture? {
+        /// The cached picture for this key, **with the moment its pixels were photographed**.
+        ///
+        /// The age half is not decoration: it is what the placement record is stamped with
+        /// (`didPlace`), so "is this on screen?" and "may I draw this?" expire on the *same* clock —
+        /// the pixels'. A placement stamped with the *emit* time instead would keep a re-emitted old
+        /// payload looking fresh, which is how a bound can be doubled without any key changing.
+        func entry(for key: PanelKey) -> Entry? {
             lock.lock()
             defer { lock.unlock() }
             guard let entry = byKey[key] else { return nil }
@@ -156,13 +161,21 @@ enum WallPictures {
                 return nil
             }
             Self.touch(&order, key)
-            return entry.picture
+            return entry
         }
 
-        func store(_ picture: Picture, _ key: PanelKey) {
+        func picture(for key: PanelKey) -> Picture? {
+            entry(for: key)?.picture
+        }
+
+        /// Store a picture and answer its age stamp, so the caller can hand the *same* number to
+        /// `didPlace` — the placement is as old as the pixels it places, never newer.
+        @discardableResult
+        func store(_ picture: Picture, _ key: PanelKey) -> TimeInterval {
             lock.lock()
             defer { lock.unlock() }
-            byKey[key] = Entry(picture: picture, at: now())
+            let at = now()
+            byKey[key] = Entry(picture: picture, at: at)
             Self.touch(&order, key)
             // Eviction forgets the *capture* cache only. `sent` keeps its entry because the terminal
             // still holds that picture: an evicted key costs one re-capture, and a panel that is
@@ -170,6 +183,7 @@ enum WallPictures {
             while order.count > Self.capacity {
                 byKey.removeValue(forKey: order.removeFirst())
             }
+            return at
         }
 
         private static func touch(_ order: inout [PanelKey], _ key: PanelKey) {
@@ -180,23 +194,39 @@ enum WallPictures {
         /// Is this key's picture already placed on this slot at this exact rectangle? Both halves
         /// matter: the key alone is "the terminal holds the pixels", the rectangle is "where it
         /// draws them" — a moved placement must be re-emitted.
+        ///
+        /// `at` is the moment the **pixels** were photographed (`Entry.at`), not the moment they
+        /// were placed. That distinction is the whole bound: a paint can emit a *cached* picture —
+        /// a page step that lands on a window whose payload is still in the memo — and if the
+        /// placement were stamped with the emit time, those old pixels would look fresh for another
+        /// `maxAge`, the re-capture that follows would be skipped on the wire ("already on screen"),
+        /// and the pane would show pixels up to **2 x `maxAge`** old while paying a capture for them.
         func isOnScreen(slot: Int, key: PanelKey, rect: CellRect) -> Bool {
             lock.lock()
             defer { lock.unlock() }
             guard let placed = sent[slot] else { return false }
-            // The same age, for the same reason: a picture `picture(for:)` would have to re-capture
-            // must also travel on the wire, or the capture is paid for and the pane keeps the old
-            // frame — the one shape of this cache that would cost bytes *and* be wrong. A placement
-            // is never older than its picture (`didPlace` runs in the paint after the capture), so
-            // this can only fire where `picture(for:)` already missed.
+            // The pixels' age, for the reason `maxAge` exists: a picture the cache has to
+            // re-capture must also travel on the wire, or the capture is paid for and the pane keeps
+            // the old frame — the one shape of this cache that would cost bytes *and* be wrong.
             guard now() - placed.at < Self.maxAge else { return false }
             return placed.key == key && placed.rect == rect
         }
 
-        func didPlace(slot: Int, key: PanelKey, rect: CellRect) {
+        /// Record that this slot now shows this picture, **photographed at `at`** — the stamp
+        /// `capture` reported for those pixels (a fresh capture's `store`, or the cached entry's
+        /// age). Never `now()`: see `isOnScreen`.
+        func didPlace(slot: Int, key: PanelKey, rect: CellRect, at: TimeInterval) {
             lock.lock()
             defer { lock.unlock() }
-            sent[slot] = (key: key, rect: rect, at: now())
+            sent[slot] = (key: key, rect: rect, at: at)
+        }
+
+        /// `now` for a caller that has no picture stamp to hand over (there is always one in the
+        /// paint path; this exists so a test can place a picture without inventing a clock).
+        var clock: TimeInterval {
+            lock.lock()
+            defer { lock.unlock() }
+            return now()
         }
 
         /// This slot no longer shows the picture it recorded — it paints a mask (the capture failed),
@@ -252,22 +282,35 @@ enum WallPictures {
         }
     }
 
+    /// Capture every panel, in order, one at a time.
+    ///
+    /// Sequential on purpose: all four captures go through the same screen-recording service, the
+    /// measurements were taken that way, and running them at once buys nothing a reader can see. A
+    /// panel that fails is simply absent — the caller paints its mask.
+    ///
+    /// `photographed` answers "how old are the pixels for this slot?" per slot: a fresh capture's
+    /// store time, or the age of the cached entry it was reused from. `paintWall` hands that number
+    /// to `PanelCache.didPlace`, so a placement expires with its pixels and not with the repaint.
     static func capture(_ panels: [WallPanel], cache: PanelCache? = nil)
-        async -> (pictures: [Picture], failures: [Int: PanelCaptureError], reused: Set<Int>) {
+        async -> (pictures: [Picture], failures: [Int: PanelCaptureError], reused: Set<Int>,
+                  photographed: [Int: TimeInterval]) {
         var pictures: [Picture] = []
         var failures: [Int: PanelCaptureError] = [:]
         var reused: Set<Int> = []
+        var photographed: [Int: TimeInterval] = [:]
         for panel in panels {
             // What this panel's pixels would be, before spending a capture on finding out.
             let key = panel.key(quality: Self.quality.value, rounded: !Self.square)
-            if let cached = cache?.picture(for: key) {
+            if let cached = cache?.entry(for: key) {
                 // The *current* panel with the cached pixels: the picture is what a slot wants drawn,
                 // and a panel that kept its key but moved keeps its payload — not its old rectangle.
-                pictures.append(Picture(panel: panel, pixels: cached.pixels,
-                                        width: cached.width, height: cached.height))
+                pictures.append(Picture(panel: panel, pixels: cached.picture.pixels,
+                                        width: cached.picture.width, height: cached.picture.height))
                 reused.insert(panel.slot)
+                photographed[panel.slot] = cached.at
                 Log.write("krd: wall slot \(panel.slot) picture reused "
-                          + "\(cached.width)x\(cached.height) px (\(panel.stamp.label))\n")
+                          + "\(cached.picture.width)x\(cached.picture.height) px "
+                          + "(\(panel.stamp.label))\n")
                 continue
             }
             do {
@@ -297,7 +340,7 @@ enum WallPictures {
                     let picture = Picture(panel: panel,
                                           pixels: Self.quantised(pixels, quality: Self.quality),
                                           width: width, height: height)
-                    cache?.store(picture, key)
+                    photographed[panel.slot] = cache?.store(picture, key) ?? Self.clock()
                     pictures.append(picture)
                     continue
                 }
@@ -345,7 +388,7 @@ enum WallPictures {
                 let picture = Picture(panel: panel,
                                       pixels: Self.quantised(canvas, quality: Self.quality),
                                       width: raster.width, height: raster.height)
-                cache?.store(picture, key)
+                photographed[panel.slot] = cache?.store(picture, key) ?? Self.clock()
                 pictures.append(picture)
             } catch {
                 let reason = PanelCapture.classify(error)
@@ -357,6 +400,6 @@ enum WallPictures {
                 Log.write("krd: wall slot \(panel.slot) has no picture: \(reason); \(error)\n")
             }
         }
-        return (pictures, failures, reused)
+        return (pictures, failures, reused, photographed)
     }
 }

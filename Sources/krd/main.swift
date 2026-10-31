@@ -1763,8 +1763,9 @@ final class Desk {
     /// how many cards fit.
     private func clampAndDraw(model: WallModel, pane: PaneGeometry) {
         // The desk changed (or the pane did), so the one panel whose picture has no age signal in
-        // its key — the display — is re-photographed on the repaint that follows. A page step comes
-        // through `drawWall` from a click and never lands here, which is what keeps it free.
+        // its key — the display — is re-photographed on the repaint that follows. A page step that
+        // changes nothing in the world does not land here (a click that found the model unchanged
+        // returns before this), which is what keeps it free.
         wallPictureCache.forgetStage()
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
         // offsets still point past the end; clamping here is what keeps the shelf from going blank.
@@ -1871,7 +1872,8 @@ final class Desk {
                 }
                 desk.paintWall(layout: layout, model: model, panels: panels,
                                pictures: result.pictures, failures: result.failures,
-                               reused: result.reused, captureMs: captureMs)
+                               reused: result.reused, photographed: result.photographed,
+                               captureMs: captureMs)
                 if desk.wallDirtyWhilePainting, !desk.cleanedUp {
                     desk.wallDirtyWhilePainting = false
                     // A repaint, not a re-enumeration: everyone who can set this flag already read
@@ -1974,13 +1976,16 @@ final class Desk {
 
     /// Paint the text, then the pictures on the cells the text was told to leave alone.
     ///
-    /// `reused` is what the capture did not have to photograph (issue #100) and `captureMs` how long
-    /// it took; together they are the one summary line per paint at the end. Both are defaulted so a
-    /// paint with no pictures at all (the phase-1 placeholder wall) is still one call.
+    /// `reused` is what the capture did not have to photograph (issue #100), `photographed` how old
+    /// each slot's pixels are (`capture`'s answer, handed to the cache so a placement expires with
+    /// its pixels) and `captureMs` how long it took; together they are the one summary line per paint
+    /// at the end. All are defaulted so a paint with no pictures at all (the phase-1 placeholder
+    /// wall) is still one call.
     @discardableResult
     private func paintWall(layout: WallLayout, model: WallModel, panels: [WallPanel],
                            pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError],
-                           reused: Set<Int> = [], captureMs: Double = 0) -> Bool {
+                           reused: Set<Int> = [], photographed: [Int: TimeInterval] = [:],
+                           captureMs: Double = 0) -> Bool {
         guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else {
             Log.write("krd: wall frame not written (canvas, pane or state missing)\n")
             return false
@@ -2005,7 +2010,7 @@ final class Desk {
             // pixels, and which transport the pictures went out on.
             let scale = options.dpr ?? pane.dpr
             let cell = "cell \(Self.trim(pane.cellW))x\(Self.trim(pane.cellH))"
-            let stage = panels.first { $0.slot == 0 }.map {
+            let stage = panels.first { $0.slot == WallPanels.stageSlot }.map {
                 "pic \($0.rect.cols)x\($0.rect.rows)c \($0.fit.contentWidth)x\($0.fit.contentHeight)px"
             } ?? "no stage"
             let dot = options.symbols.dot
@@ -2034,7 +2039,8 @@ final class Desk {
         // The canvas answers with no bytes when the frame it was asked for is the frame already on
         // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
         // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
-        let wrote = !text.isEmpty
+        // Whether a frame went out (#183/#99): the text diff, or any picture bytes below.
+        var sentBytes = !text.isEmpty
         writer.writeChrome(text)
         let emitStart = Date()
         var emitted = 0, skipped = 0, payloadBytes = 0
@@ -2055,7 +2061,10 @@ final class Desk {
                 // whose key *and* rectangle are already on screen costs nothing - the terminal holds
                 // both the payload and the placement, and a page step is exactly the case where the
                 // stage's key did not change (issue #100).
-                let key = panel.key(quality: options.wallQuality.value, rounded: !options.square)
+                // Derived exactly as `capture` derives it (`WallPictures.quality`/`.square`), not
+                // from `options` a second time: two derivations that ever disagree make
+                // `isOnScreen` never match, and the wire saving vanishes with no failure anywhere.
+                let key = panel.key(quality: WallPictures.quality.value, rounded: !WallPictures.square)
                 if wallPictureCache.isOnScreen(slot: panel.slot, key: key, rect: panel.rect) {
                     // A placeholder picture *is* its cells. `WallCanvas` diffs runs, so a cell whose
                     // text did not change is not rewritten and its grid survives — but a card whose
@@ -2072,6 +2081,8 @@ final class Desk {
                                                        paneCols: pane.cols, paneRows: pane.rows,
                                                        sync: writer.perTileSync)
                     }
+                    // The cells went out, so a frame did go out.
+                    sentBytes = true
                     skipped += 1
                     continue
                 }
@@ -2100,7 +2111,13 @@ final class Desk {
                 // This picture is on screen now: the next paint may skip it if nothing about it
                 // changed (that is the whole cache, and it is recorded whether or not this emit
                 // went out as a full panel or was reused from the capture cache).
-                if bytes > 0 { wallPictureCache.didPlace(slot: panel.slot, key: key, rect: panel.rect) }
+                // Stamped with the *pixels'* age, not this instant: a paint that puts a cached
+                // picture on the wire must not make old pixels look fresh (see `isOnScreen`).
+                if bytes > 0 {
+                    wallPictureCache.didPlace(slot: panel.slot, key: key, rect: panel.rect,
+                                              at: photographed[panel.slot] ?? WallPictures.clock())
+                    sentBytes = true
+                }
                 emitted += 1
                 payloadBytes += bytes
                 // The landing screen's own unit of cost (issue #88): one line per panel, saying how many
@@ -2126,7 +2143,7 @@ final class Desk {
         Log.write("krd: wall paint \(pictures.count - reused.count) captured, \(reused.count) reused, "
                   + "\(emitted) emitted, \(skipped) skipped, \(payloadBytes) B payload, "
                   + "\(String(format: "%.2f", ms)) ms\n")
-        return wrote
+        return sentBytes
     }
 
     /// Is this slot's failure specifically "the grant is missing"?
