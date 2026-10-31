@@ -7,7 +7,8 @@ import XCTest
 /// terminal's *own* pixel grid, so a wheel anywhere in the pane was a remote-desktop scroll and the
 /// panel never saw the pointer.
 ///
-/// These tests drive the two functions the product drives — `Chrome.route` (who owns the cell) and
+/// These tests drive the three functions the product drives — `InputReader.chromeCell` (is this
+/// report offered to the chrome at all, and as what cell), `Chrome.route` (who owns that cell) and
 /// `Chrome.panelScroll` (where the window lands) — with the *numbers* krd gets at 40x15, and they
 /// pin the badge the drawer writes out of the same arithmetic. They deliberately do not compare
 /// cells inside `Chrome` (the routing must not depend on the cell grid: the wheel runs on the reader
@@ -30,13 +31,20 @@ final class PanelWheelTests: XCTestCase {
                              bar: false, dev: true, panel: .log)
     }
 
-    /// The cell size the terminal reported in the session this was found in: a 40x15 pty that
-    /// answers 320x3600 px, i.e. 8x240 cells. It is not a plausible laptop cell — it is what the
-    /// pty said, and it is exactly why the pixel box could not stand in for the chrome's regions:
-    /// krd builds the picture's frame out of these (`mirror grid 40x1 cells at 8x240 px, pane
-    /// 40x15, frame 320x3600 px` in that session), so a report over the panel at y ≈ 1800 px is
-    /// inside the picture's pixel frame as well as inside the panel.
-    private let ptyCell = (w: 8.0, h: 240.0)
+    /// The cell the routing divides by in the pty this was reproduced in: a 40x15 pane whose
+    /// `ws_xpixel`/`ws_ypixel` are 320x240, which `TermGeometry.cellSize` turns into 8x16
+    /// (`ws_xpixel / cols`, `ws_ypixel / rows`). That division is what makes px(160,112) row 8 of a
+    /// fifteen-row pane — the middle of the open box, as the debug log of that session shows
+    /// (`row=8 col=21`).
+    ///
+    /// It is *not* the cell size the `krd: mirror grid …` line prints. That line reports the fit's
+    /// cell, computed against the picture's row budget — with one picture row the same pty prints
+    /// `8x240 px`, i.e. 320/40 and 240/1, not 240/15. Reading that `240` as the cell is how the
+    /// routing came to be measured in the wrong units; the wheel divides by `ttyCell`.
+    private let ttyCell = (w: 8.0, h: 16.0)
+    /// That pty's picture frame (`krd: mirror grid 40x1 cells at 8x240 px … frame 320x240 px`). With
+    /// `?1016h` a report over the panel is inside it — the whole bug (#118).
+    private let pictureFrame = (w: 320, h: 240)
 
     // MARK: the layout the report was filed against
 
@@ -56,19 +64,20 @@ final class PanelWheelTests: XCTestCase {
         let m = elevenLineLog()
         let chrome = Chrome()          // never drawn: the routing may not need the cell grid
 
-        // Where `?1016h` puts a wheel over the box (y = 1800 px, x = 160 px — the middle of the
-        // panel in that pty), mapped to cells by the terminal's own cell size: the same division
-        // `InputReader.handleMouse` does, and the same pair the transcript logged (`row=8 col=21`).
-        let cell = InputReader.cell(forPixel: 160, 1800, cellSize: ptyCell)
+        // Where `?1016h` puts a wheel over the box: px(160, 112), the middle of the open panel in
+        // the 40x15 pty, mapped to cells by the terminal's own cell size — the same division
+        // `InputReader.chromeCell` does, and the same pair the transcript logged (`row=8 col=21`).
+        let cell = InputReader.cell(forPixel: 160, 112, cellSize: ttyCell)
         XCTAssertEqual(cell.row, 8)
         XCTAssertEqual(cell.col, 21)
         XCTAssertEqual(chrome.route(row: cell.row, col: cell.col, geometry: geometry), .panel)
 
         // The guard that used to decide this: the pane's pixel rect, which is what SGR-Pixels
         // reports are in. It says "inside the picture", so the old path posted a desktop scroll.
-        let pane = Viewport(pixelWidth: 320, pixelHeight: 3600, cols: 40, rows: 1,
-                            sourceRect: CGRect(x: 0, y: 0, width: 320, height: 3600))
-        XCTAssertTrue(pane.contains(pixel: 160, 1800))
+        let pane = Viewport(pixelWidth: pictureFrame.w, pixelHeight: pictureFrame.h, cols: 40,
+                            rows: 1, sourceRect: CGRect(x: 0, y: 0, width: pictureFrame.w,
+                                                        height: pictureFrame.h))
+        XCTAssertTrue(pane.contains(pixel: 160, 112))
 
         // One notch up: the log is read from its end, so it starts on its last window (`2-11/11`)
         // and the notch lands on the first one (`1-10/11`).
@@ -90,6 +99,40 @@ final class PanelWheelTests: XCTestCase {
         XCTAssertNil(down)
         let back = Chrome.panelWindow(.log, m, inside: geometry.panelInsideRows, requested: down)
         XCTAssertEqual([back.offset, back.total, back.last], [1, 11, 1])
+    }
+
+    // MARK: (c) the decision step itself — what `handleMouse` asks before the viewport guards
+
+    /// The pre-guard, driven through the one function `handleMouse` calls (`InputReader.chromeCell`),
+    /// so this test stands or falls with the routing being in the reader at all: it is not a second
+    /// copy of the arithmetic living only in the tests.
+    func testThePreGuardOffersThePanelCellAndNotThePicture() {
+        let geometry = logBoxAt40x15()
+        let chrome = Chrome()
+        func owns(_ row: Int, _ col: Int) -> Bool {
+            chrome.route(row: row, col: col, geometry: geometry) != .picture
+        }
+
+        // pixel mode (`?1016h`): px(160,112) is row 8, col 21 at the tty's 8x16 cell, and row 8 is
+        // inside the open box — `owns` says yes and the panel takes the report.
+        let overPanel = InputReader.chromeCell(row: 112, col: 160, pixelMouse: true, wheel: -1,
+                                               cellSize: ttyCell, owns: owns)
+        XCTAssertEqual(overPanel?.row, 8)
+        XCTAssertEqual(overPanel?.col, 21)
+
+        // The same pixel report one row up: py 8 is row 1, the single row of picture in this
+        // geometry, so the route says `.picture` and the chrome is not offered the report at all —
+        // the desktop keeps its scroll.
+        XCTAssertEqual(InputReader.cell(forPixel: 160, 8, cellSize: ttyCell).row, 1)
+        XCTAssertNil(InputReader.chromeCell(row: 8, col: 160, pixelMouse: true, wheel: -1,
+                                            cellSize: ttyCell, owns: owns))
+
+        // Cell mode: a terminal that ignored `?1016h` sends the cell itself, and it is passed
+        // through un-divided — row 6 is the box, row 1 is the picture.
+        XCTAssertEqual(InputReader.chromeCell(row: 6, col: 21, pixelMouse: false, wheel: -1,
+                                              cellSize: ttyCell, owns: owns)?.row, 6)
+        XCTAssertNil(InputReader.chromeCell(row: 1, col: 21, pixelMouse: false, wheel: -1,
+                                            cellSize: ttyCell, owns: owns))
     }
 
     // MARK: (b) cell mode

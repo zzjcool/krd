@@ -439,12 +439,18 @@ final class Chrome {
     /// clickable text (`statusRow`, `barRow`); everything else is a rectangle.
     func route(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeRoute {
         if Chrome.panelRect(geometry, row: row, col: col) { return .panel }
+        // One snapshot of the grid, because `resize` runs on the main queue and replaces `cells`,
+        // `cols` and `rows` one field at a time while this runs on the reader thread. Reading them
+        // again inside the index expression is a race that can trap (an index past the end of the
+        // array the other fields still describe); bound once, the three agree by construction, and
+        // a snapshot taken mid-resize is simply the older grid — the one the report was made over.
+        let cells = self.cells, cols = self.cols, rows = self.rows
         let y = row - 1, x = col - 1
-        // `cells.count` is the invariant that makes the index safe rather than `rows`/`cols`: the
-        // reader thread and the main queue both hold this object, and `resize` writes all three
-        // fields one at a time. An inconsistent snapshot answers "nobody's" instead of reading a
-        // cell that the new grid no longer has.
-        guard cells.count == cols * rows, cols > 0,
+        // Not a substitute for the snapshot, a check that the snapshot is not *torn*: `cells` and
+        // `cols`/`rows` are three separate loads, so a resize between them can still leave this
+        // thread holding the new grid's size with the old grid's array. That answers "nobody's"
+        // instead of reading a cell the array does not have.
+        guard cols > 0, rows > 0, cells.count == cols * rows,
               y >= 0, y < rows, x >= 0, x < cols else { return .picture }
         if y == geometry.statusRow || y == geometry.barRow {
             let id = cells[y * cols + x].hit
