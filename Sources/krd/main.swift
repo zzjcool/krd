@@ -1065,20 +1065,26 @@ final class Desk {
         // Diagnostics never go over the picture: they land in a file instead.
         // `--stats-json` implies stats, and stats must never land on the tty: without an
         // explicit destination they go to a temp file like `--debug` does.
-        // Wall mode is in the list for its own reason: the pane *is* the wall, so a diagnostic must
-        // not reach it at all — `Log`'s fallback sink is stderr, i.e. the pane, and one line there
-        // scrolls the picture off its own grid (CONTRIBUTING.md rule 1). The reader's own
-        // `input:` lines are gated separately (`InputReader(forward:)`); this half catches the rest
-        // (a warning, the focus seam's line, the "no physical key for this character" notice).
+        // The rule is `paintsThePane`: whenever the pane *is* the output, a diagnostic must not
+        // reach it — `Log`'s fallback sink is stderr, i.e. the pane, and one line there scrolls the
+        // picture off its own grid (CONTRIBUTING.md rule 1). Too long told as a list of flags: the
+        // wall was in it (the reader's `input:` lines are gated separately in `InputReader`), the
+        // mirror was *not*, so the round-trip probe's `krd: rtt 12.1 ms (CSI 5n round trip)` printed
+        // on top of the desktop every ~2 s — one line in the one mode whose whole output is an
+        // image. Same bug, same rule, so the rule is asked once and of every path.
+        // The notice below is *not* printed for the implicit file: a sentence about the log is
+        // itself a diagnostic, and the pane it would be printed on is the picture. Only a run that
+        // asked (`--debug`/`--log`/`--stats-json`) — and the wall, whose footer reads the line back
+        // out of the file — says where it went.
+        let askedForALog = options.debug || options.logPath != nil || options.statsJSON != nil
         Log.configure(explicitPath: options.logPath,
-                      wantsLogging: options.debug || options.logPath != nil
-                        || options.statsJSON != nil || options.wall)
+                      wantsLogging: askedForALog || Self.paintsThePane(options))
         if let where_ = Log.path {
             // Told to the log rather than to stderr in wall mode: this one line has a `\n` in it,
             // and on the wall that newline on the last row scrolls everything.
             if options.wall {
                 Log.write("krd: logging to \(where_)\n")
-            } else {
+            } else if askedForALog {
                 FileHandle.standardError.write(Data("krd: logging to \(where_)\n".utf8))
             }
         }
@@ -2279,6 +2285,26 @@ final class Desk {
         options.listOnly && options.replay == nil && !options.mock
     }
 
+    /// Whether this run paints a picture into the pane it was handed - i.e. whether the pane *is*
+    /// the output, and a diagnostic written to stderr therefore lands on the picture.
+    ///
+    /// `Log`'s fallback sink is stderr, and stderr is the tty: one line written there moves the
+    /// cursor, and a line on the last row scrolls the grid, which slides the tiles out from under
+    /// their absolute cell positions (CONTRIBUTING.md rule 1). So every path that paints owes its
+    /// diagnostics a **file**, not the tty. The wall was put in that list for its own reason (a
+    /// keypress used to emit `input: key code=12 ...` onto the last row -- `WallProcessTests`), and
+    /// the *mirror* was the one left out: the round-trip probe's `krd: rtt 12.1 ms (CSI 5n round
+    /// trip)` printed over the picture once every 2 s, on the one mode whose whole output is an
+    /// image. It is the same bug and it wants the same rule, so the rule is stated once here and
+    /// asked of both.
+    ///
+    /// The question is "does it paint", not "is it a test path": `--replay` inside a pty paints
+    /// the recorded frames, `--mock` paints without a screen, `--selftest` paints into `--pane`.
+    /// Only a listing exits after printing (see `listsOnly`). Pure, so the decision is a test.
+    static func paintsThePane(_ options: Options) -> Bool {
+        !listsOnly(options)
+    }
+
     /// Whether the placeholder transport has to be given the picture's whole cell box (issue #86).
     ///
     /// WHY this is a second question and not part of `scaleNeedsPixelPlacements`: a placeholder grid
@@ -2806,13 +2832,15 @@ final class Desk {
     /// the `--quality` refusal. A replay that stops without a word is the failure this module exists
     /// to refuse, so every refusal in `runReplay` leaves through here.
     ///
-    /// Both destinations, nothing said twice: `Log` has a file only when `--debug`/`--log`/
-    /// `--stats-json`/wall mode gave it one, and its sink *is* stderr otherwise (see the body).
+    /// Both destinations, nothing said twice: `Log` has a file whenever this path paints
+    /// (`paintsThePane`, so a replay always has one), and its sink *is* stderr only on a listing /
+    /// a plain `--list` (see the body).
     private func failReplay(_ message: String) -> Never {
         Log.write("krd: \(message)\n")
-        // `Log`'s sink is stderr unless `--debug`/`--log`/`--stats-json`/wall mode gave it a file --
-        // and without a file the write above already reached the reader, so writing both would print
-        // the sentence twice (measured with `--replay --mirror`).
+        // `Log`'s sink is a file for every path that paints -- `--debug`/`--log`/`--stats-json`
+        // named it, and `paintsThePane` supplied one otherwise -- so the sentence has to be said on
+        // stderr too, and only once (measured with `--replay --mirror`, which used to print it
+        // twice when the log and the tty were the same place).
         if Log.path != nil { FileHandle.standardError.write(Data("krd: \(message)\n".utf8)) }
         exit(1)
     }

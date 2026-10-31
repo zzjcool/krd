@@ -147,4 +147,28 @@ final class DiagnosticsTests: XCTestCase {
         m.capMs = 40
         XCTAssertEqual(m.capLabel, "40.0")
     }
+
+    /// Where a diagnostic goes is one decision (`Desk.paintsThePane`), and the decision is "does
+    /// this command paint the pane": `Log`'s fallback sink is stderr, stderr *is* the pane, and one
+    /// newline on the last row scrolls the grid the tiles are placed on (CONTRIBUTING.md rule 1).
+    ///
+    /// The mirror is why the predicate exists: the old rule was a list of flags
+    /// (`--debug`/`--log`/`--stats-json`/`--wall`) and the plain `krd` was not in it, so the
+    /// round-trip probe's `krd: rtt 12.1 ms (CSI 5n round trip)` printed over the desktop every 2 s.
+    /// Pinned here rather than in a pty test because a pty cannot answer `CSI 5n`, i.e. it cannot
+    /// provoke the line whose destination this pins — `WallProcessTests` has the bytes half.
+    func testEveryPathThatPaintsOwesItsDiagnosticsAFile() throws {
+        for argv in [["krd"], ["krd", "--wall"], ["krd", "--mock"], ["krd", "--selftest"],
+                     ["krd", "--replay", "/tmp/krd-replay"], ["krd", "--wall-at", "0:0"],
+                     ["krd", "--no-input"], ["krd", "--dev"]] {
+            XCTAssertTrue(Desk.paintsThePane(try parseArguments(argv)),
+                          argv.joined(separator: " ") + " paints into its pane")
+        }
+        // A listing is the one path that exits after printing: stdout is the answer, there is no
+        // picture to protect, and a refusal has to reach the reader on stderr.
+        for argv in [["krd", "--list"], ["krd", "--list", "--json"]] {
+            XCTAssertFalse(Desk.paintsThePane(try parseArguments(argv)),
+                           argv.joined(separator: " ") + " only prints a listing")
+        }
+    }
 }

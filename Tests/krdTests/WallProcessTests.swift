@@ -1,16 +1,20 @@
 import XCTest
 import Darwin
 
-/// The wall's byte discipline, seen from outside the process: **the tty gets the paint and nothing
+/// The pane's byte discipline, seen from outside the process: **the tty gets the paint and nothing
 /// else.**
 ///
 /// WHY this test spawns a process: the invariant is about the bytes that reach the terminal, and
 /// there is no in-process way to see them. `Log`'s sink is stderr, and stderr *is* the tty unless
-/// `--debug`/`--log` configured a file — so a keypress used to emit `input: key code=12 flags=0\n`
+/// a file was configured — so a keypress used to emit `input: key code=12 flags=0\n`
 /// there (`handleMouse`/`postKey` log on `dryRun || trace`, and `--wall` passed `dryRun: true`). The
 /// `\n` landed on the last row of the pane and scrolled the whole wall, which is why the review saw
 /// a broken picture and no test caught it: every existing wall test looks at the canvas, and the
 /// canvas was never wrong. Only a pty can answer "what did the terminal receive".
+///
+/// The same question is asked of the **mirror** (`testABareMirrorPaintsWithoutASingleNewline`): it
+/// was the path left out of `paintsThePane`, so the round-trip probe's `krd: rtt … ms` line printed
+/// on top of the picture every 2 s. Same invariant, same instrument.
 ///
 /// The run is one keystroke of each kind: `q` (a printable key, i.e. `.text` → `postUnicode`) and
 /// then `Ctrl-\` (0x1C → quit). Whatever the wall prints for them on the pane is a bug.
@@ -105,6 +109,86 @@ final class WallProcessTests: XCTestCase {
         let log = NSTemporaryDirectory() + "krd-\(child.processIdentifier).log"
         XCTAssertTrue(FileManager.default.fileExists(atPath: log),
                       "--wall must configure a log file so no diagnostic can reach the pane; "
+                      + "expected \(log)")
+    }
+
+    /// The other path that owns the pane, and for a long time the only one outside the rule:
+    /// `paintsThePane` was a list of flags (`--debug`/`--log`/`--stats-json`/`--wall`) and a plain
+    /// `krd` was not in it, so `Log` kept its fallback sink — stderr, which *is* the picture. The
+    /// round-trip probe writes one line every ~2 s (`krd: rtt 12.1 ms (CSI 5n round trip)`), so the
+    /// mirror painted a line of text onto its own frame, on a loop, and the newline on the last row
+    /// scrolled the grid the tiles were placed on.
+    ///
+    /// `--mock` is the capture source on purpose: the invariant is about *our* bytes, and a real
+    /// ScreenCaptureKit capture would ask for a permission no test can grant.
+    func testABareMirrorPaintsWithoutASingleNewline() throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        // The mirror, with the pixel source mocked out (`--pane` keeps the numbers deterministic).
+        child.arguments = ["--mock", "--pane", "60x24"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)                                    // the child holds its own copy now
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+
+        // A graphics APC says the picture is owned, the mouse-mode enable says the tty is raw — so
+        // the `0x1C` below is a byte for the reader, not `SIGQUIT` for the line discipline.
+        let painted = pump(master, into: &stream, timeoutMs: 5_000) { bytes in
+            let text = String(decoding: bytes, as: UTF8.self)
+            return text.contains("\u{1B}_G") && text.contains("\u{1B}[?1003h")
+        }
+        let soFar = String(decoding: stream, as: UTF8.self)
+        XCTAssertTrue(painted, "no mirror frame + input install within 5 s; the pane has \(stream.count) B, tail: "
+                      + String(soFar.suffix(300)).debugDescription)
+        guard painted else { return }
+
+        // Two probe intervals' worth of silence first: `rtt` is written from the 1 Hz tick, so a
+        // single frame is not enough time for the line this test exists to catch.
+        _ = pump(master, into: &stream, timeoutMs: 2_500) { _ in false }
+        writeAll(master, [0x1C])
+
+        let deadline = Date().addingTimeInterval(5)
+        while child.isRunning && Date() < deadline {
+            _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        }
+        guard !child.isRunning else {
+            XCTFail("the mirror did not exit within 5 s of Ctrl-\\; the defer kills it")
+            return
+        }
+        _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationStatus, 0,
+                       "the mirror did not exit on Ctrl-\\ (status \(child.terminationStatus))")
+
+        XCTAssertFalse(stream.contains(0x0A),
+                       "the mirror put a 0x0A on the tty (\(stream.filter { $0 == 0x0A }.count) of them): "
+                       + "one newline on the last row scrolls the picture off its own grid")
+        let text = String(decoding: stream, as: UTF8.self)
+        XCTAssertFalse(text.contains("krd:"),
+                       "the mirror wrote a `krd:` diagnostic onto its own pane")
+
+        // The sink itself: `paintsThePane` gives every painting path a file, which is what makes
+        // "nothing on the pane" true for the lines this test cannot provoke (the rtt probe needs a
+        // terminal that answers `CSI 5n`, and a pty does not).
+        let log = NSTemporaryDirectory() + "krd-\(child.processIdentifier).log"
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log),
+                      "a bare mirror must configure a log file so no diagnostic can reach the pane; "
                       + "expected \(log)")
     }
 
