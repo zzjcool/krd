@@ -1402,6 +1402,12 @@ final class Desk {
                                   windows: wallModel.windows.count,
                                   stageAspect: stageAspect(wallModel, state),
                                   cellAspect: pane.cellAspect)
+        // The layout clamps both offsets to what this pane and this model can show, so its answer is
+        // the page the reader is about to see. Write it back: `⤢` changes the page size without
+        // touching the model or the pane, and `refreshWall` returns before its own clamp while those
+        // two stand still, so a step made after a row-width click would otherwise start from the page
+        // the state remembers rather than the one on screen (`WallState.adopt`).
+        wallState?.adopt(layout)
         let model = wallModel
         let panels = wallPanels(layout: layout, model: model, pane: pane)
         guard !panels.isEmpty else {
