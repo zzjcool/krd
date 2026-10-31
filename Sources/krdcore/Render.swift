@@ -162,6 +162,23 @@ public final class ScreenWriter {
 
     // MARK: session
 
+    /// What this session does about the terminal's grapheme clustering (`DECRQM 2027`).
+    ///
+    /// The mode decides who ends a grapheme cluster: the terminal, or the program laying the cells
+    /// out. Ghostty starts with it set and Rex with it reset, so the same picture is a different
+    /// number of cells on each until somebody says which one they meant. `.enableAndReset` is the
+    /// session saying "the terminal's answer, for as long as I am here", and it is the only mode
+    /// here that is turned *on* by krd and chosen by a probe rather than by a flag.
+    ///
+    /// `.leave` is the default, and it emits nothing at all — every recorded byte stream (the wall
+    /// fixtures, the selftest dumps) depends on that.
+    public enum GraphemeMode: Equatable {
+        /// Touch nothing, in either direction: the pane's mode is not ours to change.
+        case leave
+        /// On in `beginSession`, off in `endSession`/`restoreGraphemeMode` — but only if we set it.
+        case enableAndReset
+    }
+
     /// Heal a pane whose parser was left mid-sequence by a killed predecessor:
     /// ST closes a dangling APC (which would otherwise swallow every later byte),
     /// and 2026l closes a dangling synchronized-update block (which would freeze drawing).
@@ -176,7 +193,54 @@ public final class ScreenWriter {
         // Alternate screen: keeps scrollback clean and makes the terminal hand us wheel
         // events instead of scrolling itself.
         // Mouse reporting is enabled later, by InputReader, once it knows stdin is readable.
-        write(healSequence + "\u{1B}[?1049h\u{1B}[2J\u{1B}[H\u{1B}[?25l")
+        // Grapheme clustering goes on in the *same* write, immediately after the alternate screen:
+        // a terminal that lays flags out as two letters (Rex: 2027 reset) is told once, before the
+        // first cell is drawn, and the arm flag below is what lets the teardown know it was ours.
+        graphemeModeArmed = graphemeClustering == .enableAndReset
+        write(healSequence + "\u{1B}[?1049h" + (graphemeModeArmed ? Self.graphemeEnable : "")
+              + "\u{1B}[2J\u{1B}[H\u{1B}[?25l")
+    }
+
+    /// What this session asked the terminal for, on the one question text layout depends on: does the
+    /// *terminal* decide where a grapheme cluster ends?
+    ///
+    /// Ghostty 1.4.0 starts with `DECRQM 2027` set; Rex starts with it reset, so on Rex `☰` and a
+    /// flag are two cells until the session says otherwise (`TermGeometry.query2027`). Enabling it is
+    /// the difference between krd's width arithmetic and the terminal's, so a session that was told
+    /// "it is off" turns it on for its own duration and turns it off again on the way out.
+    ///
+    /// `.leave` (the default) emits nothing at all, which is what keeps every recorded byte stream -
+    /// the wall fixtures, the selftest dumps - byte-identical.
+    public var graphemeClustering: GraphemeMode = .leave
+
+    /// `?2027h` / `?2027l`. Not part of `inputModes`: those are reported to the *remote* desktop and
+    /// reset in the same order they were set, while 2027 is layout, and only ever touched when this
+    /// process is the one that set it.
+    static let graphemeEnable = "\u{1B}[?2027h"
+    static let graphemeReset = "\u{1B}[?2027l"
+
+    /// True while this session is the reason 2027 is on: set in `beginSession`, cleared by
+    /// `restoreGraphemeMode`.
+    ///
+    /// The flag is the whole safety property. A terminal that had 2027 on before krd started
+    /// (Ghostty, permanently) must keep it on after krd leaves, so the teardown cannot send `?2027l`
+    /// unconditionally — and it cannot send `?2027h` either, since a reset saved per-window
+    /// (`CSI ?2027 s`) is what a fresh restore turns *off* (measured: restoring with nothing saved
+    /// turns Ghostty's 2027 off). Only "we turned it on, so we turn it off" is safe from both sides.
+    private var graphemeModeArmed = false
+
+    /// Give the terminal's grapheme clustering back, if this session took it. Idempotent: a second
+    /// call writes nothing until the next `beginSession` re-arms it.
+    ///
+    /// Separate from `endSession` because the session can end *without* a teardown: `handOver`
+    /// `exec`s the mirror into this same process image, the alternate screen is deliberately left
+    /// entered, and `endSession` is never called (the mirror would lose the pane it is about to
+    /// draw on). The next process probes 2027 itself and would read back *our* `?2027h` as the
+    /// terminal's own state — so the mode has to be handed back before the `exec`, every time.
+    public func restoreGraphemeMode() {
+        guard graphemeModeArmed else { return }
+        graphemeModeArmed = false
+        write(Self.graphemeReset)
     }
 
     /// Every DEC private **mouse** mode a session turns on, in the order it turns them on.
@@ -299,6 +363,10 @@ public final class ScreenWriter {
         batchOpen = false
         writeLock.unlock()
         clear()
+        // Before the alternate screen, so the shell behind us never draws a frame with 2027 off and
+        // then on: same write, reset first. `restoreGraphemeMode` is the same one way out, so the
+        // flag cannot be left saying "armed" after the mode is gone.
+        restoreGraphemeMode()
         write(Self.inputReset + "\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)
     }

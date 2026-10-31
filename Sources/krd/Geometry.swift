@@ -227,6 +227,73 @@ extension TermGeometry {
     private static func DeleteProbeImage() {
         GraphicsAPC.write(PlaceholderProbe.delete)
     }
+
+    /// Ask the terminal which grapheme-clustering mode (`DECRQM 2027`) it starts in.
+    ///
+    /// 2027 is DEC's "grapheme clustering" mode, and it is the whole difference between the two
+    /// terminals this is tested against: Ghostty 1.4.0 answers `1` (**set**, and permanently so) and
+    /// Rex answers `2` (recognized, reset). With it set, the *terminal* decides where a grapheme
+    /// cluster ends — VS16, ZWJ, skin-tone modifiers, regional-indicator flags — and draws one glyph
+    /// in the cells it needs; with it reset, each code point is laid out on its own and a flag is two
+    /// separate letters. So `☰` and `🇨🇳` are one cell on a terminal that never asked anybody, and two
+    /// on the same terminal with 2027 off (measured, both terminals, `probe/termcaps.py`).
+    ///
+    /// A session that wants the same cell counts on both turns it on for its own duration and turns
+    /// it off again on the way out — never permanently, because the mode belongs to the pane, not to
+    /// krd, and the shell behind us may be a program that lays out its own clusters.
+    ///
+    /// **One write, two questions.** `DECRQM` and `DA1` leave together, and DA1 is the terminator:
+    /// a terminal that does not implement 2027 answers *nothing* to the first question, so without a
+    /// sentinel the probe would wait out its whole timeout on exactly the terminals that have no
+    /// such mode. Two writes would also cost a round trip each, and over ssh a second round trip is
+    /// 20–40 ms of the probe's budget (`docs/design-ui-v2.zh-CN.md` §2.2).
+    static func query2027(timeoutMs: Int = 300) -> Int?
+    {
+        let reply = ask("\u{1B}[?2027$p\u{1B}[c", timeoutMs: timeoutMs) { text in
+            containsPrimaryAttributes(text)
+        }
+        return graphemeModeVerdict(reply)
+    }
+
+    /// What a `DECRQM 2027` + `DA1` reply means: the mode number (`0`…`4`, DECRQM's `Ps`), or `nil`
+    /// when the terminal said nothing about 2027.
+    ///
+    /// Split out from the probe so the parse is testable without a terminal: `?2027;1$y` (set),
+    /// `?2027;2$y` (reset), `?2027;0$y` (not recognized), DA1 alone (no DECRQM support at all), and
+    /// a reply split across reads all have to land on the same answer.
+    static func graphemeModeVerdict(_ reply: String?) -> Int? {
+        guard let reply, let start = reply.range(of: "\u{1B}[?2027;") else { return nil }
+        let rest = reply[start.upperBound...]
+        guard let end = rest.firstIndex(of: "$") else { return nil }
+        let digits = rest[..<end]
+        // `DECRQM` answers `Ps $ y`; the `$y` has to be there or this was some other report that
+        // happens to start the same way, and a wrong number is worse than no number.
+        guard rest[end...].hasPrefix("$y") else { return nil }
+        guard let value = Int(digits), (0...4).contains(value) else { return nil }
+        return value
+    }
+
+    /// Does this reply carry a `DA1` (`CSI ? … c`)? The sentinel every startup probe ends on, so a
+    /// batched query has one terminator instead of one per question.
+    static func containsPrimaryAttributes(_ text: String) -> Bool {
+        var index = text.startIndex
+        while let start = text.range(of: "\u{1B}[", range: index..<text.endIndex) {
+            var cursor = start.upperBound
+            guard cursor < text.endIndex, text[cursor] == "?" else {
+                index = start.upperBound
+                continue
+            }
+            cursor = text.index(after: cursor)
+            var digits = false
+            while cursor < text.endIndex, text[cursor].isNumber || text[cursor] == ";" {
+                if text[cursor].isNumber { digits = true }
+                cursor = text.index(after: cursor)
+            }
+            if digits, cursor < text.endIndex, text[cursor] == "c" { return true }
+            index = start.upperBound
+        }
+        return false
+    }
 }
 
 extension PaneGeometry {

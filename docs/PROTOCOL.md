@@ -22,6 +22,7 @@ ESC [ ? 1004 l  ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l  
 ESC [ 0 m                            #   SGR reset
 ESC [ ? 25 h                         #   cursor visible during setup
 ESC [ ? 1049 h                       #   alternate screen (no scrollback, wheel events come to us)
+ESC [ ? 2027 h                       #   grapheme clustering ON, only if the terminal reported it off
 ESC [ 2 J  ESC [ H                   #   clear + home
 ESC [ ? 25 l                         #   hide cursor for the whole session
 
@@ -43,6 +44,34 @@ the teardown sends at the end (§4), so no mode can be enabled without the same 
 all three places; `?1004l` is in that list only when the session asked for focus reporting at all
 (§7). Re-running krd fixes such a pane automatically; by hand it is
 `printf '\033\\\033[?2026l\033[?25h'`.
+
+`?2027h` is conditional and it is the only conditional line here. 2027 is DEC's grapheme
+clustering: with it set the *terminal* decides where a cluster ends (VS16, ZWJ, skin tones,
+regional-indicator flags), so `☰` and a flag occupy the cells their glyph does; with it reset every
+code point is laid out alone and a flag is two letters. Ghostty 1.4.0 starts with it **set**
+(`DECRQM 2027` answers `1`, permanently) and Rex starts with it **reset** (`2`), so krd asks once
+per process — `CSI ? 2027 $ p` and `CSI c` in one write, `DA1` being the terminator because a
+terminal with no such mode answers nothing at all — and:
+
+| `DECRQM 2027` answered | `beginSession` sends | teardown sends |
+|---|---|---|
+| `2` (recognized, reset) | `ESC [ ? 2027 h` | `ESC [ ? 2027 l` |
+| `1` (set, permanently) | nothing | nothing |
+| `0`, `3`, `4`, or no answer | nothing | nothing |
+
+The asymmetry is the safety property, not an optimisation: the mode belongs to the *pane*, not to
+krd, so a terminal that already had it on must keep it on after we leave — and an unconditional
+`?2027l` would also turn it off on a terminal that saved the reset state (`CSI ? 2027 s`/`r`: a
+restore with nothing saved turns Ghostty's 2027 **off**, measured). Only "we turned it on, so we turn
+it off" is true from both sides, which is what `ScreenWriter.graphemeModeArmed` records.
+
+**The `exec` boundary.** `handOver` replaces the process with the mirror and deliberately leaves the
+alternate screen entered, so `endSession` never runs there; the mode is handed back by
+`ScreenWriter.restoreGraphemeMode()` immediately before `execv` instead. Without it the next process
+would probe the terminal, read back *our* `?2027h`, conclude "it was already on, leave it alone", and
+the pane would keep a mode it never asked for long after krd is gone. Every process therefore leaves
+2027 exactly as it found it at every exit — teardown, `exec`, or a signal — and no exit path passes
+the state along out of band: each process asks the terminal.
 
 None of these is a kitty graphics APC — the leading `ESC \` is a bare `ST`, not an envelope — so
 tmux passthrough (§6.6) leaves §1 exactly as written.
@@ -127,6 +156,7 @@ end of session (ScreenWriter.endSession):
     ESC _ G a=d,d=a ESC \  ESC [ 2 J             # delete every placement, clear the screen
     ESC [ ? 1004 l  ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l
     ESC [ ? 25 h
+    ESC [ ? 2027 l                               # grapheme clustering off — only if §1 turned it on
     ESC [ ? 1049 l                               # leave the alternate screen
 ```
 
@@ -134,6 +164,11 @@ The input-mode resets are `ScreenWriter.inputReset` — the §7 enable list reve
 the heal sends on the way in (§1) and `writeInputModes(false)` sends when input stops: a mode can
 no longer be enabled without all three resetting it (`?1004l` is on the list only when focus
 reporting is on; §7).
+
+`?2027l` comes **before** `?1049l` on purpose: the shell gets a screen whose mode is already the one
+it started with, so its first frame is laid out the way it expects. It is also the only line here
+that is conditional (§1) — a terminal that had 2027 on when krd started never sees this sequence, in
+either direction.
 
 `a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames. With
 passthrough on it is wrapped like every other APC (§6.6); `?2026l`, `2J` and the input-mode resets
@@ -246,6 +281,7 @@ Deliberately **not** wrapped:
 | `?2026h` / `?2026l` | tmux ≥ 3.7 implements synchronized output itself and before that it has none at all: wrapped, the mode would be forwarded *past* the process that paints the pane instead of honoured by it |
 | the mouse modes (`?1002`/`?1003`/`?1006`/`?1016` and the four resets) | tmux is the thing that reports the mouse, so these have to reach *it*; sent past it, nothing would ever turn tracking on or off |
 | OSC 52 (§7.4) | the clipboard belongs to the terminal krd is attached to — tmux keeps its own buffers and relays with `set-clipboard`, and a read (`out`) sent beyond it could never be answered back on stdin |
+| `?2027h` / `?2027l` | the same shape of reason as the mouse modes: the question is asked of the terminal that will draw the cells, and a multiplexer that keeps its own idea of the mode would answer for a pane it composes itself |
 | the kitty keyboard protocol (`CSI > 15 u`, `CSI ? u`, `CSI < u`) | the answer is what krd gates on, and only tmux — the terminal it is actually talking to — can send one back |
 | the placeholder cells | they are ordinary text (`U+10EEEE` plus diacritics), not escapes: tmux rewrites them like any other cell, and it is the image they point at that needs the envelope |
 
