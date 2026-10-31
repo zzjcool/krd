@@ -902,6 +902,14 @@ final class Desk {
     /// terminal over the same connection the picture goes down.
     private var rttProbe = RTTProbe()
     private var rttRepliesSeen = 0
+    /// The round trip's verdict on the link, decided on the diagnostics tick and published for the
+    /// frame thread (#187). Two reasons it is a `Bool` here and not a live read of `rttProbe`:
+    /// `RTTProbe` is a struct holding a `Series`, mutated on the main-queue tick while `noteFrame`
+    /// runs on the frame thread (no lock can cover a value read across a struct copy), and the
+    /// question itself is a *rule* over the probe's history ("the last two answers were both over
+    /// budget"), not a peek at its latest sample. Guarded by `stateLock`; `false` until the probe
+    /// knows enough to say otherwise.
+    private var rttLinkLate = false
     private var lastRates = Rates()
     private var rateCounters = Rates.Counters()
     private var rateSampleAt = Double(0)
@@ -2859,6 +2867,12 @@ final class Desk {
         return sourceRect
     }
 
+    /// The link's verdict, for the frame thread (see `rttLinkLate` and issue #187).
+    private func currentRTTLate() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return rttLinkLate
+    }
+
     /// ScreenCaptureKit wants the crop relative to the filter's content: the window frame for a
     /// window filter, the display for a display filter. A full-frame capture sends nil so the
     /// terminal keeps getting exactly what it got before zoom existed.
@@ -2895,8 +2909,14 @@ final class Desk {
         let target = options.qualityAuto ? effectiveFps : options.fps
         // `writeMs` only fires once sshd has stopped reading, i.e. after seconds of picture have
         // piled up in its userspace buffer. The round trip sees the same congestion earlier, because
-        // its own answer queues behind those bytes (issue #52).
-        let rttLate = rttProbe.lastMs > rttBudgetMs
+        // its own answer queues behind those bytes (issue #52) -- but only once it has seen it
+        // *twice*: a single 258 ms DSR answer is a real round trip on ssh (OpenSSH 10's
+        // `ObscureKeystrokeTiming` re-bases an 18-22 ms grid, docs/design-ui-v2.zh-CN.md §2.2, §7.1),
+        // it is not congestion, and it used to hold the newest-sample slot for 2 s -- 31 of 61 frames
+        // at 20 fps, a majority of the 3 s window, one rung down. So the rule lives on the probe
+        // (`isLate`), it is decided on the diagnostics tick, and this thread only reads the published
+        // `Bool` (issue #187). `writeMs` is untouched: a blocked pipe still fires on the first frame.
+        let rttLate = currentRTTLate()
         // One rule, kept in `krdcore` so a test can feed it a synthetic timeline (issue #93). A frame
         // whose `write` blocked for 2.5 s is **one** late frame but **2.5 s** of wall clock, and the
         // ladder has to see the seconds: counting frames, the burst of fast frames that follows the
@@ -3566,6 +3586,20 @@ final class Desk {
             } else {
                 Log.write("krd: probe unanswered (CSI 5n) — retrying\n")
             }
+        }
+        // Publish the verdict for the frame thread (#187). Decided here, once per tick, from the
+        // probe's own history: one outlier answer is not congestion, and one that stopped answering
+        // says nothing at all. A `Bool` under `stateLock` is also what keeps `noteFrame` out of
+        // `rttProbe` — a struct with a `Series` in it, mutated on this queue.
+        let late = rttProbe.isLate(budgetMs: rttBudgetMs)
+        stateLock.lock()
+        let flipped = rttLinkLate != late
+        rttLinkLate = late
+        stateLock.unlock()
+        if flipped {
+            Log.write(late
+                ? "krd: link late — the last two round trips were over \(Int(rttBudgetMs)) ms\n"
+                : "krd: link no longer late — under \(Int(rttBudgetMs)) ms again, or no answer to say\n")
         }
     }
 
