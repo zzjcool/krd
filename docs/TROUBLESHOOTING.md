@@ -316,22 +316,25 @@ krd: mirror grid 118x38 cells at 17x33 px, pane 118x73, src 1920x1200 px, fit 1.
 krd: frame 1920x1200 px, grid wants 1920x1200 px (118x38 cells of 17.0x33.0 px, 15x10 tiles)
 ```
 
-A 118x38 cell box at 17x33 px is 2006x1254 px. When the frame is the *source's* pixels instead (1920x1200),
-each tile's pixel rect is a proportional slice of 1920x1200 while its cells are `8x4` of 17x33 = 136x132 px.
-A terminal that draws one image pixel per device pixel (Rex) cannot stretch the difference, so the bottom
-~12 px of every tile row shows the background: ten tile rows, nine seams.
+**Historical: this is the diagnosis before #121 (`645592c`).** A 118x38 cell box at 17x33 px is
+2006x1254 px, and *while* the frame was the *source's* pixels instead (1920x1200), each tile's pixel rect
+was a proportional slice of 1920x1200 while its cells were `8x4` of 17x33 = 136x132 px. A terminal that
+draws one image pixel per device pixel (Rex) cannot stretch the difference, so the bottom ~12 px of every
+tile row showed the background: ten tile rows, nine seams.
 
-Fix: the frame **is** the cell box (`TileGrid.make`). The stream upscales to the request — measured
-1920x1200 -> 2006x1254, no dropped frames. A screenshot cannot (it pads with black, §23e), which is why
-the wall caps its request and upscales itself; two transports, two rules.
+Fix (#121): a tile's pixel rect **is that tile's own cell box** now (`TileGrid.rect`), never a slice of
+the frame, and the frame **is** the cell box too (`TileGrid.make`; `--scale` still applies where the cell
+arrived in points - see `ARCHITECTURE.md` §6, Capture scale). The stream upscales to the request —
+measured 1920x1200 -> 2006x1254, no dropped frames. A screenshot cannot (it pads with black, §23e), which
+is why the wall caps its request and upscales itself; two transports, two rules.
 
 | what you see | what it means |
 |---|---|
 | thin seams **every tile row** (10 rows → 9 lines), evenly spaced | frame shorter than the cell box: `grid wants` and `frame` disagree in the log |
-| thin seams **every tile column** (15 columns → 14 lines) at exactly one tile width's spacing, vertical only | each tile's image is narrower than the cells it sits on. Check `s=` against `c=` in a `KRD_DUMP`: on the placeholder transport `s` must be `c` x the cell - a frame below the cell box (`--scale < 1` on a terminal that draws one image pixel per device pixel) or a fractional cell used to break that (issue #86). A gap that survives a full repaint is not this one: a repaint re-places every tile at the same rects, so only a stale placement is what a resize clears |
+| thin seams **every tile column** (15 columns → 14 lines) at exactly one tile width's spacing, vertical only | each tile's image is narrower than the cells it sits on. Check `s=` against `c=` in a `KRD_DUMP`: on the placeholder transport `s` must be `c` x the cell - a frame below the cell box (only on a terminal whose cell arrived in points, which stretches it back; #121 keeps the box on a device-pixel one) or a fractional cell used to break that (issue #86). A gap that survives a full repaint is not this one: a repaint re-places every tile at the same rects, so only a stale placement is what a resize clears |
 | seams only at the picture's right/bottom edge | the whole picture is short, not per tile: the placement is smaller than the box (§23e) |
 | one black band along one edge | aspect mismatch, which is the terminal's own cells - not a seam |
-| seams in **both** directions (14 vertical + 9 horizontal on a 118x38-cell page), picture "cut up" | this is `--scale < 1` on a terminal that draws one image pixel per device pixel: every tile shows at `scale` of its slot. The placeholder grid cannot stretch; the pixel placement path can. `--scale < 1` now picks it automatically (`ScaleTransportTests`); run `--no-placeholders` by hand if you have an older build |
+| seams in **both** directions (14 vertical + 9 horizontal on a 118x38-cell page), picture "cut up" | before #121, `--scale < 1` on a terminal that draws one image pixel per device pixel: every tile showed at `scale` of its slot; the build now clamps `--scale` to 1 there and says so in the log. The placeholder grid cannot stretch; the pixel placement path can. `--scale < 1` now picks it automatically (`ScaleTransportTests`); run `--no-placeholders` by hand if you have an older build |
 
 
 ### 23e. The picture fills part of its box / sits in the top-left corner
