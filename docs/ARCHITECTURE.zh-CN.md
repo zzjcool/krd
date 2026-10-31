@@ -103,7 +103,10 @@ trace 与 `Tests/krdcoreTests/Fixtures/input-trace.dump` 逐字节比对。重�
 共享状态（`grid`、`viewport`、`previousFrame`、`lastDirtyCount`）由 `Desk` 里一把 `NSLock` 保护。
 `ScreenWriter` 故意不加锁：稳态下它只有一个生产者，就是采集队列。两个例外是输入启动时写
 `?1003h/?1002h/?1006h/?1016h`（走静态方法里的直接 `write(2)`，不经过 writer）以及 resize 时的
-`writer.clear()`（可能和一帧正在发出的瓦片交错）；最坏情况是多一次整帧重绘。
+`writer.clear()`（可能和一帧正在发出的瓦片交错）；最坏情况是多一次整帧重绘。#203 的焦点变化那一对
+（失焦 `?1003l`、获得焦点 `?1003h`）走同一条静态路径、拿 `flushLocked` 手里的那把 `outLock`，所以它
+劈不开一次 `write(2)`。它能保证的也就到此为止：终端眼里的「块」不归这把锁管，`flushLocked` 自己的
+注释里就写着，主队列的 chrome flush 本来就会落在某个 APC 的开关之间。
 
 ## 4. 启动
 
@@ -339,10 +342,12 @@ pane    137 × 73 格               单元格 17 × 33 px
 5. **`nudge()`**（`ESC[?25l`）只在一帧采到了、但没有任何脏瓦片时发：有的终端要等到下一次输出周期
    才提交 placement，这一字节让管道继续走，顺便再次确认光标隐藏。
 6. **进入时自愈。** `beginSession()` 以 `ESC \`（补上被前一个被杀进程留下的 APC 结束符，否则它会吞掉
-   之后所有字节）+ `?2026l`（补上没结束的同步块）+ 四条鼠标复位 `?1016l ?1006l ?1002l ?1003l`
-   （`ScreenWriter.mouseReset`，PROTOCOL §7 的启用列表反过来）+ `ESC[0m` + `?25h` 开头，然后切备用屏。
+   之后所有字节）+ `?2026l`（补上没结束的同步块）+ `ScreenWriter.inputReset`（四条鼠标复位
+   `?1016l ?1006l ?1002l ?1003l` —— PROTOCOL §7 的**模式全表**反过来，只有会话确实开过焦点上报时前面
+   才多一条 `?1004l`；这份表不按当前焦点过滤，所以 pane 失焦时照样发 `?1003l`：这个模式前一刻可能
+   还是开的，#134/#203）+ `ESC[0m` + `?25h` 开头，然后切备用屏。
 7. **显式收尾。** `endSession()`：`ESC \` + `?2026l` → 删掉全部 placement（`a=d,d=a`）+ `2J` →
-   同一份 `mouseReset` + `?25h ?1049l`。
+   同一份不过滤的 `inputReset` + `?25h ?1049l`。
 
 ## 8. resize 与退出
 
