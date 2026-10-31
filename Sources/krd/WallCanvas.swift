@@ -198,9 +198,12 @@ enum WallInput {
 /// payloads are indices into the *whole* list, never page slots — `WallLayout.action` resolves the
 /// page arithmetic, so nothing downstream has to repeat it.
 struct WallState: Equatable {
-    /// Cards **per row** — the reader's number, the one the band header prints (`⤢ 3`). One page is
-    /// `per x cardRowCount` cards; the layout decides the rows, because the band's height is the
-    /// pane's business and not a setting.
+    /// Cards **per row** — the reader's *request*. Where the control is drawn, the band header
+    /// prints the width the layout resolved from it (the layout lowers it rather than draw a card under `minCardCols`, until one
+    /// card is all that is left), and a click on that glyph sets this to the next width the pane
+    /// honours (`WallLayout.perChoices`). The page that resolved width produces is `WallLayout`'s
+    /// `capacity`, which also counts the rows of previews the band fits, so the layout decides both;
+    /// the band's height is the pane's business and not a setting.
     var per: Int = 3
     var stageStart: Int = 0
     var cardStart: Int = 0
@@ -271,6 +274,15 @@ struct WallState: Equatable {
             cardStart = Self.clamp(cardStart + d, 0, lastPage)
         case .cardJump(let i):
             cardStart = Self.clamp(i, 0, lastPage)
+        case .cyclePer(let n):
+            // A new row width, and nothing else: `cardStart` is deliberately left alone. The page
+            // size depends on `per` *and* on the rows of previews the band fits, which is the
+            // layout's business, so the clamp that matters is `WallLayout.make`'s `firstCard` — and
+            // `adopt(_:)` is what writes that answer back, because a click does not re-enumerate the
+            // model and so never reaches `refreshWall`'s clamp. The clamp here only keeps a stale or
+            // hostile payload inside `1...perCycle.max()`; `make` lowers it further on a pane that
+            // honours fewer widths.
+            per = Self.clamp(n, 1, WallLayout.perCycle.max() ?? n)
         case .back:
             focus = nil
         }
@@ -278,6 +290,25 @@ struct WallState: Equatable {
 
     private static func clamp(_ value: Int, _ lo: Int, _ hi: Int) -> Int {
         min(max(value, lo), max(lo, hi))
+    }
+
+    /// Take the layout's clamp as the state's own, so the offsets in here are exactly the ones on
+    /// screen.
+    ///
+    /// `WallLayout` is the only place that knows how many cards fit — its answer depends on the
+    /// band's row count as well as on `per` — so it is the authority on which page exists, and
+    /// whoever draws has to write its answer back. That is not pedantry: until `⤢` existed,
+    /// `capacity` could only change together with the model or the pane, and both of those send
+    /// `refreshWall` through `clamp(capacity:)`. A row-width click changes the page size with
+    /// neither, and `refreshWall` returns before its clamp while the model and the pane stand still
+    /// (`main.swift:1364`), so a `cardStart` the layout had already pulled back would stay stale for
+    /// as long as the wall is up — and the next `▲`/`▼` would step from the page the state
+    /// remembers rather than the one on screen, landing on a page the reader never saw (8 windows
+    /// at 137x44, last page at row width 3, click `⤢`, click `▲`: `2–5 / 8`, where one page back
+    /// from the `5–8 / 8` on screen is `1–4 / 8`).
+    mutating func adopt(_ layout: WallLayout) {
+        stageStart = layout.stageStart
+        cardStart = layout.cardStart
     }
 }
 
@@ -445,9 +476,10 @@ final class WallCanvas {
                        paints: WallSlotPaints = WallSlotPaints()) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
-        // Order matters only where two elements share a row: the footer and the band header draw
-        // their left-hand text first and the right-aligned tail second, so the tail always wins the
-        // cells it needs if a degenerate pane makes them collide.
+        // Order matters only where two elements share a row: the footer and the band header place
+        // their right-aligned tail first and draw the left-hand text second, into the budget the
+        // tail leaves, so the tail keeps the cells it needs even if a degenerate pane makes them
+        // collide.
         drawHeader(&grid, model: model, layout: layout)
         drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints)
         drawStageCaption(&grid, model: model, layout: layout)
@@ -557,12 +589,34 @@ final class WallCanvas {
     private func drawBand(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
         let content = min(layout.contentCols, grid.cols)
         // `⤢ per` is the row width - the reader's number - while the range below it is what the
-        // page actually holds (`capacity`), so a tall band shows `1–6 / 7` under a `⤢ 3`.
-        let budget = drawTail(&grid, row: layout.bandRow, content: content,
-                              "\(symbols.perButton) \(layout.per)", .dim)
+        // page actually holds (`capacity`, cut off at `windowCount`), so a tall band shows
+        // `1–6 / 7` under a `⤢ 3`.
+        //
+        // The glyph is written *into* its own rect (`layout.bandTail`) instead of being right-aligned
+        // to the content: `action(row:col:)` answers for exactly that rectangle, so the cells that
+        // show the control and the cells that respond to a click cannot drift apart. An empty rect
+        // means no glyph at all — `WallLayout` empties it whenever the control could not act, or
+        // could not show its number truthfully, and a control that cannot act is not drawn
+        // (design §5: no dead cells that swallow clicks).
+        let tail = layout.bandTail
+        if !tail.isEmpty {
+            // `.dim` is weight, not liveness: the footer's whole `⬅ back` row is dim and live. What
+            // marks a control the reader cannot press is that its own glyph is not drawn at all —
+            // the way a dead bar segment keeps only its plain `│` and no arrows.
+            grid.text("\(symbols.perButton) \(layout.per)", row: tail.row, col: tail.col, .dim,
+                      limit: tail.cols)
+        }
+        // The glyph keeps its own cells plus the blank column that separates it from the label; with
+        // no glyph the label gets the whole content width back.
+        let budget = tail.isEmpty ? content : max(0, content - tail.cols - 1)
         let range: String
         if layout.windowCount == 0 {
             range = "no windows"
+        } else if layout.cards.isEmpty {
+            // The layout dropped the card section (a pane too short for one), so `capacity` would
+            // name cards the pane does not draw and there is no page to count: say `no room`, the
+            // same honesty `no windows` already had. A pane with no *window* is the branch above.
+            range = "no room"
         } else {
             let first = layout.cardStart + 1
             let last = min(layout.cardStart + layout.capacity, layout.windowCount)

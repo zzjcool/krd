@@ -34,6 +34,7 @@ final class WallLayoutTests: XCTestCase {
         var out: [(String, CellRect)] = [
             ("stage", l.stage), ("stageCaption", l.stageCaption),
             ("bar.stage", l.bar.stage.rect), ("bar.cards", l.bar.cards.rect),
+            ("bandTail", l.bandTail),
         ]
         for (i, r) in l.cards.enumerated() { out.append(("cards[\(i)]", r)) }
         for (i, r) in l.cardCaptions.enumerated() { out.append(("cardCaptions[\(i)]", r)) }
@@ -75,6 +76,20 @@ final class WallLayoutTests: XCTestCase {
             for j in rects.index(after: i)..<rects.endIndex {
                 XCTAssertFalse(rects[i].1.intersects(rects[j].1),
                                "\(label): \(rects[i].0) overlaps \(rects[j].0)", file: file, line: line)
+            }
+        }
+
+        // The band header's `⤢ N`: the cells that answer are exactly the drawn rect, so a click on
+        // the label or on the range cannot rescale the page, and the glyph is never drawn where a
+        // click does nothing (design §5: no dead cells that swallow clicks). Skipped where the pane
+        // is short enough for the band row to be the footer row (`bandRow == footerRow`): there the
+        // back button owns that row, which is older than this control.
+        if l.bandRow != l.footerRow {
+            for col in 1..<max(1, l.barCol) {
+                XCTAssertEqual(l.action(row: l.bandRow, col: col) != nil,
+                               l.bandTail.contains(row: l.bandRow, col: col),
+                               "\(label): band header cell \(col) does not agree with the drawn control",
+                               file: file, line: line)
             }
         }
 
@@ -497,6 +512,7 @@ final class WallLayoutTests: XCTestCase {
             }
             mark(l.stage)
             mark(l.stageCaption)
+            mark(l.bandTail)
             l.cards.forEach(mark)
             l.cardCaptions.forEach(mark)
             // The footer is a back button across the content, but not across the bar.
@@ -529,6 +545,155 @@ final class WallLayoutTests: XCTestCase {
         XCTAssertNil(l.action(row: 24, col: l.barCol), "the footer row is not a bar row")
         XCTAssertNil(l.action(row: 23, col: 1), "the blank row is not the footer")
         XCTAssertNil(l.action(row: 25, col: 1), "there is nothing below the footer")
+    }
+
+    // MARK: the row-width control on the band header (issue #112)
+
+    /// The three cells of `⤢ N` are right-aligned to the content with one blank column before
+    /// them, and they stop short of the bar column. The rectangle is what the painter draws into
+    /// *and* what `action(row:col:)` answers for, so "where the glyph is" and "where a click lands"
+    /// are one thing rather than two that can drift.
+    func testTheBandTailSitsAtTheRightEndOfTheContent() {
+        XCTAssertEqual(WallLayout.perCycle, [2, 3, 4], "design §5's click order")
+        XCTAssertEqual(WallLayout.bandTailCols, 3, "glyph, blank, digit")
+        // The rect reserves one digit, so the cycle must never offer a two-digit row width:
+        // `make` refuses to draw the control for one rather than print a truncated `⤢ 1`.
+        XCTAssertLessThan(WallLayout.perCycle.max() ?? 10, 10, "the tail holds one digit")
+        for pane in panes {
+            for per in pers {
+                let l = layout(pane.cols, pane.rows, windows: 14, per: per)
+                let label = "\(pane.cols)x\(pane.rows) per=\(per)"
+                XCTAssertFalse(l.bandTail.isEmpty, "\(label): a wide pane draws the control")
+                XCTAssertEqual(l.bandTail.row, l.bandRow, "\(label): on the band header")
+                XCTAssertEqual(l.bandTail.rows, 1, "\(label): one row")
+                XCTAssertEqual(l.bandTail.cols, WallLayout.bandTailCols, "\(label): three cells")
+                XCTAssertEqual(l.bandTail.maxCol, l.contentCols,
+                               "\(label): right-aligned to the content")
+                XCTAssertEqual(l.bandTail.col, l.contentCols - WallLayout.bandTailCols + 1,
+                               "\(label): the same three cells whatever `per` asks for")
+                XCTAssertGreaterThan(l.bandTail.col, 1, "\(label): the label still has room at the left")
+                XCTAssertLessThan(l.bandTail.maxCol, l.barCol, "\(label): never the bar column")
+            }
+        }
+    }
+
+    /// Every cell of the rect answers the *same* `.cyclePer`, and the payload is the next width the
+    /// pane honours — resolved here (design §5), so the state never redoes the wrap-around. Four
+    /// pane sizes and three page starts (the landing page, a middle one and a clamped last one): a
+    /// page change does not move the control, and the cells that answer are always the cells that
+    /// are drawn, whatever the page or the pane size (a narrower pane honours fewer widths, so even
+    /// the payload may differ — `nextPer(after: 3)` is 4 at 137 columns and 2 at 30).
+    func testEveryBandTailCellAnswersTheNextRowWidth() {
+        for (cols, rows) in [(137, 44), (240, 60), (100, 36), (60, 24)] {
+            for cardStart in [0, 3, 99] {
+                let l = layout(cols, rows, windows: 14, per: 3, cardStart: cardStart)
+                let label = "\(cols)x\(rows) cardStart=\(cardStart)"
+                let want = WallLayout.nextPer(after: l.per, paneCols: cols)
+                XCTAssertEqual(want, 4, "\(label): 3 -> 4 on a pane that fits all three widths")
+                XCTAssertEqual(l.bandTail, CellRect(col: l.contentCols - 2, row: l.bandRow,
+                                                    cols: 3, rows: 1),
+                               "\(label): the control does not move with the page")
+                for row in l.bandTail.row...l.bandTail.maxRow {
+                    for col in l.bandTail.col...l.bandTail.maxCol {
+                        XCTAssertEqual(l.action(row: row, col: col), want.map(WallAction.cyclePer),
+                                       "\(label): (\(row),\(col)) is inside the drawn glyph")
+                    }
+                }
+                // …and the cells around it belong to the wall, not to a second, wider target.
+                XCTAssertNil(l.action(row: l.bandRow, col: l.bandTail.col - 1), "\(label): the blank column")
+                XCTAssertNil(l.action(row: l.bandRow, col: 1), "\(label): the label")
+            }
+        }
+    }
+
+    /// `perChoices` is exactly the set of widths `make` would **not** lower: `cardWidth` shrinks as
+    /// the row width grows, so it is a prefix of `perCycle`, and every member survives a real layout
+    /// untouched while every non-member comes back smaller. Clicking a width the layout silently
+    /// shrinks would repaint the glyph that was already there.
+    func testPerChoicesAreTheWidthsTheLayoutHonours() {
+        var shapes = Set<Int>()
+        for cols in 4...300 {
+            let choices = WallLayout.perChoices(paneCols: cols)
+            shapes.insert(choices.count)
+            XCTAssertEqual(choices, Array(WallLayout.perCycle.prefix(choices.count)),
+                           "\(cols) columns: the choices are a prefix of the cycle")
+            for n in WallLayout.perCycle {
+                let asked = layout(cols, 24, windows: 14, per: n)
+                if choices.contains(n) {
+                    XCTAssertEqual(asked.per, n,
+                                   "\(cols) columns: \(n) is offered, so the layout honours it")
+                } else {
+                    XCTAssertLessThan(asked.per, n,
+                                      "\(cols) columns: \(n) is not offered, so `make` lowers it")
+                }
+            }
+            XCTAssertEqual(WallLayout.nextPer(after: 2, paneCols: cols) != nil, choices.count >= 2,
+                           "\(cols) columns: a click needs a second width to go to")
+        }
+        XCTAssertEqual(shapes, [0, 1, 2, 3], "all four shapes of the set occur")
+    }
+
+    /// The cycle follows the pane: 2 -> 3 -> 4 -> 2 where all three fit, 2 -> 3 -> 2 where four is
+    /// too narrow, and no click at all where only one width is honoured (there the glyph is not
+    /// drawn either, see `testABandHeaderWithoutAControlIsEntirelyDead`).
+    func testNextPerWrapsAroundTheWidthsThisPaneHonours() {
+        XCTAssertEqual(WallLayout.perChoices(paneCols: 137), [2, 3, 4])
+        XCTAssertEqual(WallLayout.nextPer(after: 2, paneCols: 137), 3)
+        XCTAssertEqual(WallLayout.nextPer(after: 3, paneCols: 137), 4)
+        XCTAssertEqual(WallLayout.nextPer(after: 4, paneCols: 137), 2, "wrap-around")
+        // A 30-column pane: 13 / 8 / 6 cells, so four is not a choice (contract: 2 -> 3 -> 2).
+        XCTAssertEqual(WallLayout.perChoices(paneCols: 30), [2, 3])
+        XCTAssertEqual(WallLayout.nextPer(after: 2, paneCols: 30), 3)
+        XCTAssertEqual(WallLayout.nextPer(after: 3, paneCols: 30), 2)
+        // Fewer than two widths: nowhere to cycle to, so no control at all.
+        XCTAssertEqual(WallLayout.perChoices(paneCols: 20), [2])
+        XCTAssertNil(WallLayout.nextPer(after: 2, paneCols: 20))
+        XCTAssertEqual(WallLayout.perChoices(paneCols: 13), [])
+        XCTAssertNil(WallLayout.nextPer(after: 2, paneCols: 13))
+        // A `per` outside the cycle — a wide pane keeps a requested 5, a hostile 0 is lowered to 1 —
+        // still moves *into* it, at the first width above it and wrapping at the top.
+        XCTAssertEqual(WallLayout.nextPer(after: 1, paneCols: 137), 2)
+        XCTAssertEqual(WallLayout.nextPer(after: 5, paneCols: 137), 2)
+    }
+
+    /// The glyph is drawn ⇔ the rect is non-empty ⇔ a click there does something (design §5's "no
+    /// dead cells that swallow clicks" — the same reason a dead bar segment draws no arrows). Three
+    /// conditions, and each has a pane that reaches it: no card band to change the width of (40x15,
+    /// 137x7), fewer than two honoured widths (20x24, 7x24), and a row width whose number does not
+    /// fit the cells the control reserves (a `per` above 9, which no click can ask for but `make`
+    /// accepts). The fourth — no room for the glyph plus the blank column before it — is subsumed by
+    /// the second (`honouredWidths` needs `(content - 2 gap) / 3 >= minCardCols`, i.e. 26 content
+    /// columns at a one-cell gap) and stays as the guard that keeps a hostile pane inside its own
+    /// content.
+    func testABandHeaderWithoutAControlIsEntirelyDead() {
+        let cases = [("40x15", layout(40, 15, windows: 7, per: 3)),
+                     ("137x7", layout(137, 7, windows: 14, per: 3)),
+                     ("20x24", layout(20, 24, windows: 7, per: 3)),
+                     ("7x24", layout(7, 24, windows: 7, per: 3)),
+                     ("137x44 per=10", layout(137, 44, windows: 14, per: 10))]
+        for (label, l) in cases {
+            XCTAssertTrue(l.bandTail.isEmpty, "\(label): no control, no rect")
+            XCTAssertTrue(l.cards.isEmpty || l.per > 9
+                          || WallLayout.nextPer(after: l.per, paneCols: l.cols) == nil,
+                          "\(label): the control is missing for one of the three reasons")
+            for col in 1..<max(1, l.cols) where col != l.barCol {
+                XCTAssertNil(l.action(row: l.bandRow, col: col),
+                             "\(label): band header cell \(col) answers")
+            }
+        }
+        // …and the widths are not what the control would offer: a two-digit row width is one the
+        // three reserved cells cannot spell, so it draws nothing rather than `⤢ 1`.
+        let wide = layout(137, 44, windows: 14, per: 10)
+        XCTAssertEqual(wide.per, 10, "a 137-column pane honours ten in a row")
+        XCTAssertEqual(WallLayout.nextPer(after: wide.per, paneCols: 137), 2,
+                       "…so a click would have somewhere to go")
+        XCTAssertTrue(wide.bandTail.isEmpty, "…but `⤢ 10` does not fit three cells")
+        XCTAssertTrue(layout(40, 15, windows: 7, per: 3).cards.isEmpty, "40x15 draws no card")
+        XCTAssertNotNil(WallLayout.nextPer(after: 3, paneCols: 40),
+                        "…although 40 columns honour three widths: the missing band is the reason")
+        // …while a pane that honours a single width still draws its cards: "no band" and "too
+        // narrow to cycle" are separate reasons, and both leave the header dead.
+        XCTAssertFalse(layout(20, 24, windows: 7, per: 3).cards.isEmpty)
     }
 
     // MARK: pages and starts

@@ -831,6 +831,288 @@ final class WallCanvasTests: XCTestCase {
         }
     }
 
+    // MARK: the row-width control on the band header (issue #112)
+
+    /// The control the band header promises: the three cells of `layout.bandTail` are exactly the
+    /// drawn `⤢ 3` / `> 3` — glyph, blank, digit — in both symbol tables, the cell to their left is
+    /// the blank column that keeps the glyph off the label, and those three cells are exactly the
+    /// ones `action(row:col:)` answers. The defect was a glyph with no rectangle, so the rect, the
+    /// glyph and the click are all pinned here, at three pane sizes.
+    func testTheBandTailCellsAreTheDrawnRowWidthControl() {
+        let model = model()
+        for (cols, rows) in [(137, 44), (100, 36), (60, 24)] {
+            for symbols in WallSymbols.allCases {
+                let layout = fixtureState().layout(cols: cols, rows: rows,
+                                                  displays: model.displays.count,
+                                                  windows: model.windows.count)
+                let label = "\(cols)x\(rows) \(symbols.rawValue)"
+                XCTAssertFalse(layout.bandTail.isEmpty, "\(label): a wide pane draws the control")
+                let line = WallCanvas(symbols: symbols)
+                    .lines(cols: cols, rows: rows, model: model, layout: layout,
+                           focus: nil)[layout.bandRow - 1]
+                XCTAssertEqual(cellAt(line, layout.bandTail.col), symbols.perButton.first,
+                               "\(label): the glyph sits on the rect's first cell")
+                XCTAssertEqual(cellAt(line, layout.bandTail.col + 1), " ",
+                               "\(label): the rect's middle cell is the blank")
+                XCTAssertEqual(cellAt(line, layout.bandTail.maxCol), Character("\(layout.per)"),
+                               "\(label): the digit sits on the rect's last cell")
+                XCTAssertEqual(cellAt(line, layout.bandTail.col - 1), " ",
+                               "\(label): one blank column keeps the glyph off the label")
+                // …and the cells that show the control are exactly the cells that answer.
+                let want = WallLayout.nextPer(after: layout.per, paneCols: cols)
+                for col in layout.bandTail.col...layout.bandTail.maxCol {
+                    XCTAssertEqual(layout.action(row: layout.bandRow, col: col),
+                                   want.map(WallAction.cyclePer),
+                                   "\(label): (\(layout.bandRow),\(col)) shows the control")
+                }
+                XCTAssertNil(layout.action(row: layout.bandRow, col: layout.bandTail.col - 1),
+                             "\(label): the blank column before the glyph is not a target")
+            }
+        }
+    }
+
+    /// The issue's three clicks: at 137x44 the control walks `⤢ 3 → ⤢ 4 → ⤢ 2` and the page follows,
+    /// because `capacity = per x cardRowCount` and the band's row count is not what changed. Four
+    /// windows, so the range says what the page holds and a reader can watch a row of three become a
+    /// row of four.
+    func testACycleMovesTheGlyphThePageAndTheRange() {
+        var model = model()
+        model.windows = Array(model.windows.prefix(4))
+        let cols = 137, rows = 44
+        let displays = model.displays.count, windows = model.windows.count
+        // The glyph's number, the page size, how many cards are drawn and the range beside it.
+        let expected: [(per: Int, capacity: Int, cards: Int, range: String)] = [
+            (3, 3, 3, "1–3 / 4"),
+            (4, 4, 4, "1–4 / 4"),
+            (2, 2, 2, "1–2 / 4"),
+            (3, 3, 3, "1–3 / 4"),
+        ]
+        // Both symbol tables: the ascii mode spells the same glyph and the same dash, and a cycle
+        // that only worked on `⤢` would be a cycle that only worked on one terminal.
+        for symbols in WallSymbols.allCases {
+            var state = fixtureState()
+            let canvas = WallCanvas(symbols: symbols)
+            for (i, want) in expected.enumerated() {
+                let layout = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+                let label = "\(symbols.rawValue) click \(i): per \(want.per)"
+                XCTAssertEqual(layout.per, want.per, label)
+                XCTAssertEqual(layout.capacity, want.capacity, "\(label): the page follows the row width")
+                XCTAssertEqual(layout.cards.count, want.cards, "\(label): \(want.cards) cards are drawn")
+                let line = canvas.lines(cols: cols, rows: rows, model: model, layout: layout,
+                                        focus: nil)[layout.bandRow - 1]
+                XCTAssertTrue(line.contains("\(symbols.perButton) \(want.per)"),
+                              "\(label): the header is \(line.debugDescription)")
+                XCTAssertTrue(line.contains(want.range.replacingOccurrences(of: "–",
+                                                                         with: symbols.enDash)),
+                              "\(label): the range is \(line.debugDescription)")
+                guard i + 1 < expected.count else { break }
+                guard let action = layout.action(row: layout.bandRow, col: layout.bandTail.col) else {
+                    return XCTFail("\(label): the control answers nothing")
+                }
+                XCTAssertEqual(action, .cyclePer(expected[i + 1].per),
+                               "\(label): the glyph asks for the next width the pane honours")
+                state.apply(action, displays: displays, windows: windows, capacity: layout.capacity)
+            }
+            // A payload outside the cycle is clamped rather than trusted: the layout lowers what it
+            // must anyway, but the state never stores a width wider than the cycle allows; `make`
+            // lowers whatever this pane cannot honour.
+            state.apply(.cyclePer(9), displays: displays, windows: windows, capacity: 3)
+            XCTAssertEqual(state.per, 4, "clamped to the widest row the cycle offers")
+        }
+    }
+
+    /// A cycle does not move the shelf: the page size depends on the band's row count as well, and
+    /// `WallLayout.make` already clamps `cardStart` on every draw (`firstCard`). So the page after a
+    /// cycle is never empty, and the last page is still reachable with the bar's own
+    /// `.cardStep(capacity)` — the naive `per % 4 + 1` clamp the contract rejects would lose it.
+    func testACycleKeepsThePageValidAndTheLastPageReachable() {
+        let model = model()                                  // 7 windows, 3 displays
+        let cols = 137, rows = 44
+        let displays = model.displays.count, windows = model.windows.count
+        var state = fixtureState()
+        // Page two of three at per 3 (the landing page is 0…2), then widen the row.
+        state.cardStart = 3
+        state.apply(.cyclePer(4), displays: displays, windows: windows, capacity: 3)
+        XCTAssertEqual(state.per, 4)
+        XCTAssertEqual(state.cardStart, 3, "the state does not move the shelf")
+        let wider = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+        XCTAssertEqual(wider.capacity, 4)
+        XCTAssertEqual(wider.cardStart, 3, "and the layout's own clamp leaves it there")
+        XCTAssertEqual(wider.cards.count, 4, "the page is not empty: windows 3, 4, 5, 6")
+        XCTAssertEqual(wider.bar.cards.maxStart, windows - wider.capacity)
+        XCTAssertEqual(state.cardStart, wider.bar.cards.maxStart, "…and it is the last page")
+
+        // From the landing page, one page forward lands on that same last page with four cards.
+        var landing = fixtureState()
+        landing.apply(.cyclePer(4), displays: displays, windows: windows, capacity: 3)
+        landing.apply(.cardStep(wider.capacity), displays: displays, windows: windows,
+                      capacity: wider.capacity)
+        XCTAssertEqual(landing.cardStart, windows - wider.capacity)
+        let last = landing.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+        XCTAssertEqual(last.cards.count, 4)
+        XCTAssertEqual(last.cardStart + last.cards.count, windows,
+                       "the last page ends on the last window")
+        let line = WallCanvas(symbols: .emoji)
+            .lines(cols: cols, rows: rows, model: model, layout: last,
+                   focus: nil)[last.bandRow - 1]
+        XCTAssertTrue(line.contains("4–7 / 7"),
+                      "the range follows the page it is on: \(line.debugDescription)")
+    }
+
+    /// The review's repro, and the reason a draw writes the layout's clamp back before it paints.
+    ///
+    /// `apply(.cyclePer)` leaves `cardStart` alone on purpose, and `WallLayout.make` is what pulls it
+    /// back when a wider row leaves fewer windows after it. `refreshWall` skips its clamp while the
+    /// model and the pane stand still (`main.swift:1364`), and a click changes neither — so without `adopt` the
+    /// state would keep stepping from the offset the reader has left behind, and the next `▲`/`▼`
+    /// would land on a page nobody was shown.
+    func testTheStateAdoptsThePageTheDrawPutOnScreen() {
+        var model = model()
+        model.windows.append(model.windows[0])       // 8 windows: (7 + a duplicate) of ids
+        let cols = 137, rows = 44
+        let displays = model.displays.count, windows = model.windows.count
+        func bandLine(_ state: WallState) -> String {
+            let layout = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+            return WallCanvas(symbols: .emoji)
+                .lines(cols: cols, rows: rows, model: model, layout: layout,
+                       focus: nil)[layout.bandRow - 1]
+        }
+
+        var state = fixtureState()
+        state.cardStart = 5                          // the last page at row width 3 (capacity 3)
+        let before = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+        XCTAssertEqual(before.capacity, 3)
+        XCTAssertEqual(before.cardStart, 5)
+        XCTAssertTrue(bandLine(state).contains("6–8 / 8"), "\(bandLine(state).debugDescription)")
+
+        state.apply(.cyclePer(4), displays: displays, windows: windows, capacity: before.capacity)
+        XCTAssertEqual(state.per, 4)
+        XCTAssertEqual(state.cardStart, 5, "`apply` does not move the shelf: the layout does")
+        let wider = state.layout(cols: cols, rows: rows, displays: displays, windows: windows)
+        XCTAssertEqual(wider.capacity, 4, "the wider row holds one card more")
+        XCTAssertEqual(wider.cardStart, 4, "so the last page starts one window earlier")
+        XCTAssertTrue(bandLine(state).contains("5–8 / 8"),
+                      "and that is what is on screen: \(bandLine(state).debugDescription)")
+
+        // Without the write-back the next page step starts from 5 — the page the reader was on one
+        // frame ago, when the row held three (`6–8 / 8`) — while the screen shows the page that
+        // starts at 4. Four back from 5 is start index 1, so the step lands on `2–5 / 8`, which
+        // shares exactly one card (window 5) with the `5–8 / 8` on screen.
+        var stale = state
+        stale.apply(.cardStep(-wider.capacity), displays: displays, windows: windows,
+                    capacity: wider.capacity)
+        XCTAssertEqual(stale.cardStart, 1, "stepping from the offset the reader has left behind")
+        XCTAssertTrue(bandLine(stale).contains("2–5 / 8"), "\(bandLine(stale).debugDescription)")
+
+        // What `drawWall` does, and what the reader gets instead.
+        state.adopt(wider)
+        XCTAssertEqual(state.cardStart, 4, "the state holds the page on screen")
+        state.apply(.cardStep(-wider.capacity), displays: displays, windows: windows,
+                    capacity: wider.capacity)
+        XCTAssertEqual(state.cardStart, 0, "one page back from the page that is on screen")
+        XCTAssertTrue(bandLine(state).contains("1–4 / 8"), "\(bandLine(state).debugDescription)")
+    }
+
+    /// The other half of the issue: at 40x15 the layout drops the card section, so the header used to
+    /// promise `1–3 / 7` and a `⤢ 3` over a pane drawing zero cards (the issue's own photograph has
+    /// four windows, hence its `1–3 / 4`). Now it says `no room`, prints no range and draws no
+    /// control — and the cells that used to carry the glyph answer nothing.
+    func testAPaneWithoutACardBandSaysNoRoomAndDrawsNoControl() {
+        let model = model()
+        let cols = 40, rows = 15
+        let layout = fixtureState().layout(cols: cols, rows: rows,
+                                          displays: model.displays.count,
+                                          windows: model.windows.count)
+        XCTAssertEqual(layout.cardBandRows, 0, "40x15 has no card band")
+        XCTAssertTrue(layout.cards.isEmpty)
+        XCTAssertTrue(layout.bandTail.isEmpty, "no card to change the width of, so no control")
+        for symbols in WallSymbols.allCases {
+            let line = WallCanvas(symbols: symbols)
+                .lines(cols: cols, rows: rows, model: model, layout: layout,
+                       focus: nil)[layout.bandRow - 1]
+            XCTAssertTrue(line.contains("no room"),
+                          "\(symbols.rawValue): the header is \(line.debugDescription)")
+            XCTAssertFalse(line.contains(symbols.perButton),
+                           "\(symbols.rawValue): a control that cannot act is not drawn")
+            XCTAssertFalse(line.contains(" / "),
+                           "\(symbols.rawValue): and no range: \(line.debugDescription)")
+            XCTAssertFalse(line.contains(symbols.enDash),
+                           "\(symbols.rawValue): not even a dash: \(line.debugDescription)")
+        }
+        for col in 1..<cols {
+            XCTAssertNil(layout.action(row: layout.bandRow, col: col), "band header cell \(col)")
+        }
+    }
+
+    /// …and the *other* reason a control can be missing: a pane that honours a single row width has
+    /// nowhere to cycle to, so the glyph goes even though the band — and its range — are on screen.
+    /// This is the pane the review's mutant fooled: a painter that fell back to right-aligning the
+    /// glyph when the rect was empty drew `⤢ 2` over cells that answer nothing, i.e. exactly the
+    /// defect #112 is about. Both panes here draw cards, so `no room` must **not** appear.
+    func testAPaneWithOneHonouredWidthDrawsNoControlButKeepsItsRange() {
+        let model = model()
+        for (cols, rows) in [(20, 24), (26, 24)] {
+            let layout = fixtureState().layout(cols: cols, rows: rows,
+                                              displays: model.displays.count,
+                                              windows: model.windows.count)
+            let label = "\(cols)x\(rows)"
+            XCTAssertEqual(WallLayout.perChoices(paneCols: cols).count, 1, "\(label): one row width")
+            XCTAssertFalse(layout.cards.isEmpty, "\(label): the band is on screen")
+            XCTAssertTrue(layout.bandTail.isEmpty, "\(label): so the control is not")
+            for symbols in WallSymbols.allCases {
+                let line = WallCanvas(symbols: symbols)
+                    .lines(cols: cols, rows: rows, model: model, layout: layout,
+                           focus: nil)[layout.bandRow - 1]
+                XCTAssertFalse(line.contains(symbols.perButton),
+                               "\(label) \(symbols.rawValue): no glyph over a dead rect: "
+                               + "\(line.debugDescription)")
+                XCTAssertFalse(line.contains("no room"),
+                               "\(label) \(symbols.rawValue): the band is there: "
+                               + "\(line.debugDescription)")
+                XCTAssertTrue(line.contains("\(layout.cardStart + 1)"),
+                              "\(label) \(symbols.rawValue): the range is not: "
+                              + "\(line.debugDescription)")
+            }
+            // Every cell of that row is wall: nothing pretends to be pressable.
+            for col in 1..<cols where col != layout.barCol {
+                XCTAssertNil(layout.action(row: layout.bandRow, col: col),
+                             "\(label): band header cell \(col)")
+            }
+        }
+    }
+
+    /// The header's own budget: the glyph keeps its cells plus the blank column before it, so a range
+    /// long enough to reach the right edge must be truncated *before* it, not painted over the
+    /// control. Only an absurd window count makes the range that long, which is exactly why nothing
+    /// else notices if the budget is wrong.
+    func testALongRangeNeverPaintsOverTheControl() {
+        let model = model()
+        let cols = 30, rows = 24
+        let layout = WallLayout.make(paneCols: cols, paneRows: rows, displayCount: 1,
+                                     windowCount: 123_456_789, per: 3, stageStart: 0, cardStart: 0)
+        XCTAssertFalse(layout.bandTail.isEmpty, "30x24 honours two row widths, so there is a control")
+        for symbols in WallSymbols.allCases {
+            let line = WallCanvas(symbols: symbols)
+                .lines(cols: cols, rows: rows, model: model, layout: layout,
+                       focus: nil)[layout.bandRow - 1]
+            // Glyph, blank, digit: the three cells the control reserved, none of them touched by
+            // the range. With the budget wrong, the range reaches `bandTail.col` and `bandTail.col
+            // + 1` and the row reads `… 123456 ⤢ 3` — a live cell with the wrong glyph on it.
+            XCTAssertEqual(cellAt(line, layout.bandTail.col), symbols.perButton.first,
+                           "\(symbols.rawValue): the glyph is still there: \(line.debugDescription)")
+            XCTAssertEqual(cellAt(line, layout.bandTail.col + 1), " ",
+                           "\(symbols.rawValue): its blank is still blank: \(line.debugDescription)")
+            XCTAssertEqual(cellAt(line, layout.bandTail.maxCol), Character("\(layout.per)"),
+                           "\(symbols.rawValue): the digit is still the row width: "
+                           + "\(line.debugDescription)")
+            XCTAssertTrue(line.contains("12345"),
+                          "\(symbols.rawValue): the range is truncated, not dropped: "
+                          + "\(line.debugDescription)")
+            XCTAssertFalse(line.contains("123456789"),
+                           "\(symbols.rawValue): it does not fit: \(line.debugDescription)")
+        }
+    }
+
     // MARK: helpers
 
     private func retitled(_ window: OrderedWindow, _ title: String?) -> OrderedWindow {

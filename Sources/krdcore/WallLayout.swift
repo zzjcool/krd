@@ -101,6 +101,7 @@ public enum WallAction: Equatable {
     case cardStep(Int)     // ±capacity: one page (design §5 — a page of cards is one step)
     case cardJump(Int)     // payload = the index that becomes the first card of the page
     case stageJump(Int)    // payload = the display that becomes the visible one
+    case cyclePer(Int)     // payload = the row width that becomes `per`, a member of `perCycle`
     case back              // the footer row
 }
 
@@ -118,6 +119,11 @@ public struct WallLayout: Equatable {
     public let dividerRow: CellRect
     /// The "recent" band header row, always present.
     public let bandRow: Int
+    /// The cells of the band header's `⤢ N`, i.e. of the row-width control (design §5). Empty
+    /// exactly when the control is not drawn, so "the glyph is on screen" and "a click there does
+    /// something" are the same question — `action(row:col:)` answers for this rect and, whenever the
+    /// rect is non-empty, for nothing else on the row.
+    public let bandTail: CellRect
     /// This page only: `min(capacity, windowCount - cardStart)` rects, none when there is no room.
     public let cards: [CellRect]
     /// Parallel to `cards`, exactly one row each.
@@ -129,8 +135,10 @@ public struct WallLayout: Equatable {
     public let per: Int
     /// Rows of cards on a page: how many rows of `per` the band fits. `0` when the band is dropped.
     public let cardRowCount: Int
-    /// **Cards per page** = `per x cardRowCount`: what one step of the shelf moves by, what the
-    /// bar's lower segment shows as visible, and the width of its thumb's track.
+    /// **Cards per page** = `per x max(1, cardRowCount)`: what one step of the shelf moves by,
+    /// what the bar's lower segment shows as visible, and the width of its thumb's track. (`max(1,
+    /// …)` because a pane that drops the band still has a page of one row's width; nothing is drawn
+    /// from it.)
     public let capacity: Int
     /// Cells between two neighbouring cards on this pane (`cardGap(content)`).
     public let cardGap: Int
@@ -211,6 +219,15 @@ public struct WallLayout: Equatable {
     public static let minCardRows = 3
     public static let minStageRows = 3
     public static let minCardCols = 8
+    /// The row widths the band header's `⤢` cycles through (design §5: 2 / 3 / 4 per row), in click
+    /// order. Since #137 `per` is cards per row, so a click on the glyph sets a row width.
+    public static let perCycle = [2, 3, 4]
+    /// Cells the row-width control reserves for its label: the glyph, a blank, and the digit of
+    /// `per`. This is a *reservation*, not a measurement: `krdcore` has no symbol table, so the
+    /// painter must fit its label inside it — `WallCanvasTests` pins one cell per glyph in both
+    /// symbol tables, and `make` refuses to draw the control for a row width that needs a second
+    /// digit (a truncated `⤢ 1` would be a lie about the row).
+    public static let bandTailCols = 3
     /// Width / height of a card (design §6.5).
     public static let cardAspect = 1.62
     /// Cells are twice as tall as they are wide — the geometry the 14-row card at 44 cells was
@@ -221,7 +238,10 @@ public struct WallLayout: Equatable {
 
     /// - Parameters:
     ///   - per: **cards per row.** The reader's number; the layout only lowers it when a card would be
-    ///     narrower than `minCardCols`. One page is `per x cardRowCount` cards (`capacity`).
+    ///     narrower than `minCardCols`. The page it produces is `capacity`: that width times
+    ///     `max(1, cardRowCount)`, so a pane that drops the card band still has a page of one row's
+    ///     width — which the header answers with `no room` rather than a range (and with `no windows`
+    ///     where there is no window either).
     ///   - stageAspect: the stage picture's own width/height, when the caller knows it. A tall pane's
     ///     budget gives the stage more rows than a 16:10 picture can use, and the band used to keep
     ///     them: the picture was fitted inside a band 11 rows taller than itself, which reads as "the
@@ -365,6 +385,24 @@ public struct WallLayout: Equatable {
         let bandRow = row
         row += 1
 
+        // The row-width control on the band header (design §5): drawn, clickable and meaningful
+        // are one decision, so every case that makes it meaningless produces the same empty rect.
+        // No card band means there is no width to change (`drawBand` says `no room`, or `no
+        // windows` when the band is empty because there is nothing to show); fewer than two
+        // honoured widths means the click would redraw the glyph it is standing on; a row width of
+        // two digits does not fit the cells the control reserves; and `content <= bandTailCols`
+        // leaves nothing for the glyph plus the blank column that keeps it off the label. A
+        // control that cannot act is not drawn at all, and neither is one whose label it cannot
+        // show truthfully.
+        let bandTail: CellRect
+        if cardH > 0, perPage < 10, content > Self.bandTailCols,
+           Self.honouredWidths(content: content, gap: gap).count >= 2 {
+            bandTail = CellRect(col: content - Self.bandTailCols + 1, row: bandRow,
+                                cols: Self.bandTailCols, rows: 1)
+        } else {
+            bandTail = CellRect(col: 1, row: bandRow, cols: 0, rows: 0)
+        }
+
         // Where the card band would start: the bar's lower segment sits on exactly these rows even
         // when the band is dropped (then it has 0 rows and does not exist).
         let cardsTop = row
@@ -428,6 +466,7 @@ public struct WallLayout: Equatable {
             stageCaption: stageCaption,
             dividerRow: dividerRow,
             bandRow: bandRow,
+            bandTail: bandTail,
             cards: cards,
             cardCaptions: cardCaptions,
             footerRow: footerRow,
@@ -459,6 +498,33 @@ public struct WallLayout: Equatable {
     /// for it.
     static func cardGap(_ content: Int) -> Int { max(1, content / 45) }
 
+    /// The members of `perCycle` a content width and a gap can honour: a width is a choice only
+    /// when it would not be lowered for `minCardCols`. `cardWidth` decreases with `n`, so the answer
+    /// is a prefix of `perCycle` — `[2, 3, 4]`, `[2, 3]`, `[2]` or `[]`. A width the layout would
+    /// quietly shrink is not a choice the control may offer: clicking it would repaint the same
+    /// glyph.
+    static func honouredWidths(content: Int, gap: Int) -> [Int] {
+        perCycle.filter { cardWidth(content, $0, gap: gap) >= minCardCols }
+    }
+
+    /// The same set, from the pane's width alone.
+    public static func perChoices(paneCols: Int) -> [Int] {
+        let content = max(1, max(1, paneCols) - 2)
+        return honouredWidths(content: content, gap: cardGap(content))
+    }
+
+    /// The row width a click on `⤢` asks for: the next member of `perChoices` after `per`, wrapping
+    /// to the first at the end. `nil` when this pane honours fewer than two widths — then the cycle
+    /// has nowhere to go and no control is drawn to ask for it.
+    public static func nextPer(after per: Int, paneCols: Int) -> Int? {
+        let choices = perChoices(paneCols: paneCols)
+        guard choices.count >= 2 else { return nil }
+        // `per` is not always a member of the cycle: a caller can ask `make` for more than four, and
+        // a hostile 0 is lowered to 1. Both move *into* the cycle at the first width above them,
+        // wrapping at the top, so the answer is never the width the glyph already shows.
+        return choices.first(where: { $0 > per }) ?? choices[0]
+    }
+
     private static func clamp(_ value: Int, _ lo: Int, _ hi: Int) -> Int {
         min(max(value, lo), max(lo, hi))
     }
@@ -480,14 +546,23 @@ public struct WallLayout: Equatable {
     }
 
     /// The click table. Cards and captions both enter their item (design §1: "点图或点说明都进入"),
-    /// the bar's arrows step, its shaft jumps, the footer goes back, and everything else — header,
-    /// band, blank row, the gap column, the caps, a segment with nothing to scroll — is nil, i.e.
-    /// swallowed by the wall rather than forwarded to the remote desktop.
+    /// the bar's arrows step, its shaft jumps, the band header's `⤢ N` cycles the row width, the
+    /// footer goes back, and everything else — header, the rest of the band, blank row, the gap
+    /// column, the caps, a segment with nothing to scroll — is nil, i.e. swallowed by the wall
+    /// rather than forwarded to the remote desktop.
     public func action(row: Int, col: Int) -> WallAction? {
         // The bar is checked first: it owns the last column, and `barAction` decides which of its
         // rows are live, so a cap row or the footer row can never fall through to a
         // neighbouring band.
         if col == barCol { return barAction(row: row) }
+        // Only the three cells of `bandTail` answer — the glyph, its blank and the digit. The label
+        // and the digits of the range are wall, and so is the blank column before the glyph, so a
+        // click that merely lands on the same row cannot rescale the page. `bandTail` is empty
+        // whenever the control could not act, so a non-empty rect is only ever answered with a
+        // width this pane honours.
+        if row == bandRow, bandTail.contains(row: row, col: col) {
+            return Self.nextPer(after: per, paneCols: cols).map(WallAction.cyclePer)
+        }
         if let slot = slot(row: row, col: col) {
             switch slot {
             case .stage: return .enterStage(stageStart)

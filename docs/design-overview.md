@@ -27,8 +27,8 @@ English | [简体中文](design-overview.zh-CN.md)
 
 - **Top:** the stage. **One display at a time, filling the stage**; the rest are reached by scrolling the
   right-edge bar.
-- **Bottom:** the most recently used windows, same bar, with `⤢` switching 2 / 3 / 4 per row and the band
-  holding as many rows of them as fit.
+- **Bottom:** the most recently used windows, same bar, with `⤢` a control you click to switch 2 / 3 / 4 per
+  row, and the band holding as many rows of them as fit.
 - **Right edge:** one **bar as tall as the pane**, in two segments - the upper one for displays, the lower one
   for windows. `▲` at the top, `▼` at the bottom, a `█` thumb in between; click a plain cell to jump there.
   **No more little `◀ ▶` triangles.**
@@ -91,9 +91,9 @@ English | [简体中文](design-overview.zh-CN.md)
 | click a window card (or its caption) | enter that window (single-window mirror, 20 fps) |
 | click the display on the stage | mirror the whole screen |
 | click `▲` / `▼` in the upper segment | previous / next display |
-| click `▲` / `▼` in the lower segment | previous / next page of windows (one page = `per × rows`) |
+| click `▲` / `▼` in the lower segment | previous / next page of windows (one page = `per × cardRowCount`) |
 | click a `│` in the middle | jump proportionally (the `█` thumb shows where you are) |
-| click `⤢` | cycle 2 → 3 → 4 windows per screen |
+| click `⤢` | cycle the row width 2 → 3 → 4 → 2 cards per row; only the widths this pane can honour are offered (a card never falls under `minCardCols`), and a width that drops out of the list is skipped |
 | click `⬅ 🖥 back` | return to the landing screen |
 | any key | forwarded to the remote desktop |
 
@@ -154,6 +154,18 @@ picture cannot use back to the card section, which spends them on more *rows* of
   same page holds three windows at 137×44 (where the band is exactly one preview tall) and six at
   118×73. `capacity = per × cardRowCount` is what the bar's `▼` steps by, what the title range prints
   (`1–6 / 7`) and what the thumb's track is measured against.
+- **The `⤢ N` at the band header's right end is a real control.** Its three cells are `WallLayout.bandTail`, the
+  same rectangle `action(row:col:)` answers for, so the glyph can never be drawn where a click does not land. A
+  click cycles the row width through the widths this pane honours (`perChoices(paneCols:)`), and `capacity` -
+  hence the page, the bar's thumb track and the `1–N / M` range - follows it. A cycle does not move the page
+  start: only when the wider row leaves fewer than `capacity` windows after it does the layout pull the page
+  back. Where the control has no second row width to cycle to, or its number needs a second digit that three
+  cells cannot spell, it is not drawn - a control that cannot act, or cannot say what it would do, is not drawn
+  at all. When the pane is too short for a card band the header prints `no room` in place of the range instead
+  of naming cards nobody can see (a pane with no *window* at all says `no windows`). It is **dim**, the same
+  weight as the footer's live `⬅ 🖥 back`: weight alone does not say whether a cell answers - what does is that
+  a control which cannot act here draws no glyph of its own, the way a dead bar segment keeps only its plain
+  `│` instead of arrows.
 - **A card is one slot of `per`, whatever the page holds.** A page of one used to blow its card up to
   the whole band - a 115×29 box around an 11-row picture, reported as "the preview is much too big,
   three to a row is enough" ("窗口的预览可以再小一点…一排可以显示三个窗口"). The slot's width decides the
@@ -399,8 +411,13 @@ Restart-path facts already hit once (do not relearn them):
 - **No Screen Recording** → captions lose their title, but order and sizes are unaffected; entering produces the
   permission error at `main.swift:506`.
 - **One panel fails to capture** → that panel draws a mask, the layout does not move, clicking retries.
-- **No windows** → `▣ recent   no windows`; the display strip remains.
-- **Tiny pane** → 3 → 2 → 1 per screen; smaller still hides `⤢` and the position counter, leaving `◀ ▶`.
+- **No windows** → `▣ recent    no windows`; the display strip remains.
+- **Pane too short for a card band** → no card is drawn at all, so the band header says
+  `▣ recent    no room` in place of the range (a range would name cards the pane does not draw) and draws
+  no `⤢`.
+- **Tiny pane** → the row width drops 3 → 2 (and to 1 on the narrowest panes) as the pane narrows; below
+  two honoured widths the `⤢` is gone as well (there is nowhere to cycle to), a two-digit row width is never
+  drawn, and the bar's own arrows are what scrolls.
 - **`--mock`** → a fixed fake window list, `MockCanvas` still frames (`Mock.swift:157`), no screen and no
   permission needed; `KRD_DUMP` captures the bytes.
 
