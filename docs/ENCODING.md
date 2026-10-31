@@ -187,7 +187,11 @@ the next quiet window by 3. A link that cannot hold a rung therefore settles ins
 than its own period (cheap, per frame, but only after sshd's buffer is full), or the terminal's answer
 to a 4-byte `CSI 5n` probe took longer than `KRD_RTT_BUDGET_MS` (250 ms by default — it queues behind
 the picture, so it sees the backlog earlier). A terminal without DSR turns the probe off and leaves
-the governor with write latency, which is what it had before.
+the governor with write latency, which is what it had before. The round trip needs the last two
+answers over the budget before it calls the link late: one is noise (obfuscated keystrokes re-base a
+held reply by a whole 20 ms interval, so a 25 ms link answers 258 ms now and then), and the answers
+are two seconds apart, which under a one-sample rule made that single answer look like 40 late
+frames — a rung spent on a quarter second of jitter (issue #187).
 
 A sample is **wall time, not a frame** (issue #93). Counting late frames is self-defeating on a pipe
 that stalls: a frame whose `write(2)` blocks for 2.5 s removes exactly the frames that would have been

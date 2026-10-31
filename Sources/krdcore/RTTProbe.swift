@@ -44,6 +44,31 @@ public struct RTTProbe: Equatable {
     public var p99Ms: Double { series.percentile(0.99) }
     public var p50Ms: Double { series.percentile(0.5) }
 
+    /// The frame path's lateness question about the link: "is the round trip bad enough that the next
+    /// frame should count as late" (#52, #187).
+    ///
+    /// **Two** answers have to be over budget, not one. On OpenSSH 10 the terminal holds the `CSI 0n`
+    /// reply behind `ObscureKeystrokeTiming`, so a single answer came back at 258 ms on a link whose
+    /// round trip is 25 ms. The probe goes out every 2 s and the tick that consumes it runs at 1 Hz,
+    /// so that one answer was "the latest" for ~2 s: read as `lastMs > budget`, it made every frame
+    /// written in those seconds late — 31 of 61 at 20 fps, a majority, which spent a rung of the
+    /// quality ladder on a link that was never congested. A round trip that is genuinely too long is
+    /// a *sustained* condition; one outlier is a batching artefact, not a pipe that is behind.
+    ///
+    /// Not late while the probe is measuring nothing, either: no answer yet, switched off
+    /// (`unavailable`), or the newest probe expired unanswered — the freshest sample is then stale.
+    /// `expire()` leaves `series` alone on purpose (the report still wants the history), so the last
+    /// number that happened to land can sit in `lastMs` for good; that is the `rtt —` case in the
+    /// panel once the probe switches itself off, and it is not a measurement of anything.
+    ///
+    /// This is the second opinion `QualityGovernor.frameSample(writeMs:targetFps:rttLate:)` takes;
+    /// `writeMs` stays the immediate signal, and #93's span weighting decides how much a late frame
+    /// weighs. The fix is upstream of `late`, so those rules are untouched.
+    public func isLate(budgetMs: Double) -> Bool {
+        guard isMeasuring, misses == 0, series.count >= 2 else { return false }
+        return series.all.suffix(2).allSatisfy { $0 > budgetMs }
+    }
+
     /// Should a probe be written now? A query only: pair it with `sent(at:)` once the bytes are out,
     /// so a probe that could not be written (a frame batch was open) is retried next tick.
     public func due(at now: Double) -> Bool {
