@@ -955,6 +955,10 @@ final class Desk {
     /// One snapshot of the pane this wall draws into: the layout and every capture size come from
     /// it, and nothing else may measure the terminal (design §6.9).
     private var wallPane: PaneGeometry?
+    /// The pictures the wall already captured, and where it already put them (issue #100). One per
+    /// process, cleared whenever the terminal's images are dropped (`runWall`), never per paint: a
+    /// page step is exactly the case where the previous paint's pictures are still the right ones.
+    private let wallPictureCache = WallPictures.PanelCache()
     /// The transport the wall's pictures actually use, decided once: `--placeholders` if given,
     /// otherwise by probing the terminal (see `TermGeometry.supportsPlaceholders`).
     private var wallPlaceholders = false
@@ -1633,6 +1637,10 @@ final class Desk {
         // leaves images alone, so without this the mirror's last picture stays on top of the wall -
         // measured: after a return, Safari's window covered the cards and the captions underneath.
         writer.clear()
+        // The same statement for the memo: `clear` drops every image the terminal holds, so the
+        // pictures cached from a previous wall (or from the mirror this pane just left) are no
+        // longer on screen and must not be reused as if they were.
+        wallPictureCache.reset()
         installSignalCleanup()
         installResizeHandler()
         // The desk is built *before* input: `startInput()` decides the wall's key policy from wall
@@ -1901,6 +1909,11 @@ final class Desk {
     /// through here — the enumeration path and the relayout path — so there is one definition of
     /// how many cards fit.
     private func clampAndDraw(model: WallModel, pane: PaneGeometry) {
+        // The desk changed (or the pane did), so the one panel whose picture has no age signal in
+        // its key — the display — is re-photographed on the repaint that follows. A page step that
+        // changes nothing in the world does not land here (a click that found the model unchanged
+        // returns before this), which is what keeps it free.
+        wallPictureCache.forgetStage()
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
         // offsets still point past the end; clamping here is what keeps the shelf from going blank.
         // The clamp takes the layout's *effective page size*: below 28 columns `WallLayout.make`
@@ -2011,7 +2024,11 @@ final class Desk {
             return
         }
         wallPaintTask = Task { [weak self] in
-            let result = await WallPictures.capture(panels)
+            // The capture's own wall-clock, reported in the paint's one summary line: it is the
+            // number a page step is about, so it is measured where the step happens.
+            let captureStart = Date()
+            let result = await WallPictures.capture(panels, cache: self?.wallPictureCache)
+            let captureMs = Date().timeIntervalSince(captureStart) * 1000
             // A plain `let` before the hop: capturing the weak binding itself into the main-actor
             // closure is what the compiler warns about, and a race here would be a wall painted
             // from a freed Desk.
@@ -2041,7 +2058,9 @@ final class Desk {
                     Log.write("krd: wall capture failed for \(result.failures.count) panel(s) - \(reasons)\n")
                 }
                 desk.paintWall(layout: layout, model: model, panels: panels,
-                               pictures: result.pictures, failures: result.failures)
+                               pictures: result.pictures, failures: result.failures,
+                               reused: result.reused, photographed: result.photographed,
+                               captureMs: captureMs)
                 if desk.wallDirtyWhilePainting, !desk.cleanedUp {
                     desk.wallDirtyWhilePainting = false
                     // A repaint, not a re-enumeration: everyone who can set this flag already read
@@ -2076,7 +2095,11 @@ final class Desk {
             // A display with no id cannot be captured; asking for id 0 would only produce a mask.
             if display.id != 0, display.width > 0, display.height > 0 {
                 stage = PanelSource(kind: .display(display.id),
-                                    aspect: Double(display.width) / Double(display.height))
+                                    aspect: Double(display.width) / Double(display.height),
+                                    // The pixels of a display depend on its resolution: a display
+                                    // that changed size is a different picture (issue #100).
+                                    stamp: PanelSourceStamp(kind: .display(width: display.width,
+                                                                           height: display.height)))
             }
         }
         let cards: [PanelSource?] = layout.cards.indices.map { slot in
@@ -2086,7 +2109,13 @@ final class Desk {
             let width = window.bounds.width, height = window.bounds.height
             guard width >= 1, height >= 1 else { return nil }
             return PanelSource(kind: .window(window.windowID),
-                               aspect: Double(width) / Double(height))
+                               aspect: Double(width) / Double(height),
+                               // A window that moved, resized or was retitled shows something else;
+                               // the same window on another card is the same picture (issue #100).
+                               stamp: PanelSourceStamp(kind: .window(x: window.bounds.x,
+                                                                    y: window.bounds.y,
+                                                                    width: width, height: height,
+                                                                    title: window.title)))
         }
         // One rule for both transports: capture at `pane.dpr` device pixels per *reported* cell, i.e.
         // at the pane's real resolution when the terminal answered in points (`dpr` 2) and 1:1 when it
@@ -2096,8 +2125,33 @@ final class Desk {
         // has to be the same number. `--dpr` overrides both.
         let scale = options.dpr ?? pane.dpr
         let cell = pane.pictureCell(scale: scale)
-        return WallPanels.plan(layout: layout, cellW: cell.w, cellH: cell.h,
-                               stageSource: stage, cardSources: cards)
+        let panels = WallPanels.plan(layout: layout, cellW: cell.w, cellH: cell.h,
+                                     stageSource: stage, cardSources: cards)
+        // `--debug`: which window is in which slot, one line per panel. The slot number is what
+        // every other wall line is keyed by (reuse, payload, capture failures), so this is the line
+        // that turns "slot 2 was reused" into "slot 2 is Safari's window" - it is how the page-step
+        // measurement reads the mapping back out of a log.
+        if options.debug {
+            for panel in panels {
+                switch panel.source {
+                case let .display(id):
+                    guard model.displays.indices.contains(layout.stageStart) else { continue }
+                    let display = model.displays[layout.stageStart]
+                    Log.write("krd: wall slot \(panel.slot) <- display \(id) "
+                              + "\(display.width)x\(display.height) pt\n")
+                case let .window(id):
+                    guard let window = model.windows.first(where: { $0.windowID == id }) else {
+                        continue
+                    }
+                    let bounds = window.bounds
+                    Log.write("krd: wall slot \(panel.slot) <- window \(id) "
+                              + "\"\(window.title ?? "")\" "
+                              + "\(Self.trim(bounds.width))x\(Self.trim(bounds.height)) "
+                              + "@ \(Self.trim(bounds.x)),\(Self.trim(bounds.y))\n")
+                }
+            }
+        }
+        return panels
     }
 
     /// Integer when the number is one, otherwise one decimal: the footer has room for a number, not
@@ -2108,6 +2162,12 @@ final class Desk {
     }
 
     /// Paint the text, then the pictures on the cells the text was told to leave alone.
+    ///
+    /// `reused` is what the capture did not have to photograph (issue #100), `photographed` how old
+    /// each slot's pixels are (`capture`'s answer, handed to the cache so a placement expires with
+    /// its pixels) and `captureMs` how long it took; together they are the one summary line per paint
+    /// at the end. All are defaulted so a paint with no pictures at all (the phase-1 placeholder
+    /// wall) is still one call.
     @discardableResult
     /// `resendPictures` is what keeps a pointer affordable. The pictures are kitty images, and the
     /// wall re-sends them on every paint that reaches this function — 18 KB for four cards at
@@ -2118,7 +2178,9 @@ final class Desk {
     private func paintWall(layout: WallLayout, model: WallModel, panels: [WallPanel],
                            pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError],
                            resendPictures: Bool = true,
-                           reusing: WallSlotPaints? = nil) -> Bool {
+                           reusing: WallSlotPaints? = nil,
+                           reused: Set<Int> = [], photographed: [Int: TimeInterval] = [:],
+                           captureMs: Double = 0) -> Bool {
         guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else {
             Log.write("krd: wall frame not written (canvas, pane or state missing)\n")
             return false
@@ -2131,6 +2193,10 @@ final class Desk {
             if let failure = failures[panel.slot] {
                 paints.mark(slot: panel.slot, .mask)
                 paints.maskReasons[panel.slot] = failure.maskLabel
+                // A mask means the picture is *not* on those cells any more, so the cache may not
+                // think it is: the next paint of the same window would otherwise skip the emit and
+                // leave the mask on top of nothing (issue #100).
+                wallPictureCache.forget(slot: panel.slot)
             } else {
                 paints.mark(slot: panel.slot, .picture)
                 if panel.slot > 0 { paints.cardPictureCells[panel.slot] = panel.rect }
@@ -2142,7 +2208,7 @@ final class Desk {
             // pixels, and which transport the pictures went out on.
             let scale = options.dpr ?? pane.dpr
             let cell = "cell \(Self.trim(pane.cellW))x\(Self.trim(pane.cellH))"
-            let stage = panels.first { $0.slot == 0 }.map {
+            let stage = panels.first { $0.slot == WallPanels.stageSlot }.map {
                 "pic \($0.rect.cols)x\($0.rect.rows)c \($0.fit.contentWidth)x\($0.fit.contentHeight)px"
             } ?? "no stage"
             let dot = options.symbols.dot
@@ -2175,58 +2241,112 @@ final class Desk {
         // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
         // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
         if reusing == nil { wallLastPaints = paints }
-        let wrote = !text.isEmpty
+        // Whether a frame went out (#183/#99): the text diff, or any picture bytes below.
+        var sentBytes = !text.isEmpty
         writer.writeChrome(text)
-        // Nothing about the pictures changed, so nothing about them goes out (see `resendPictures`).
-        guard resendPictures, !pictures.isEmpty else { return wrote }
-        // The same frame contract the tile path uses: `emitPanel` only appends, `endFrame`
-        // flushes. Without the pair the pictures would sit in the writer's buffer forever - which
-        // is exactly what the first live run looked like: blank panels and no bytes on the wire.
-        writer.beginFrame()
-        for picture in pictures {
-            // `panel.rect` is the picture's own rectangle (WallPanels.make), so mask, placeholder,
-            // caption and picture are one box, and the cells outside it stay unpainted.
-            // With placeholders the terminal fits the image into this exact cell rectangle, so the
-            // picture lands where the layout says whatever the terminal claims its cell is. The
-            // pixel-sized path stays behind the flag: it is the only way to tell which of the two
-            // misbehaved when a terminal refuses placeholders.
-            let bytes: Int
-            if wallPlaceholders {
-                bytes = writer.emitPanelAsPlaceholder(id: picture.panel.imageID,
-                                                      placementID: picture.panel.placementID,
-                                                      row: picture.panel.rect.row,
-                                                      col: picture.panel.rect.col,
-                                                      cols: picture.panel.rect.cols,
-                                                      rows: picture.panel.rect.rows,
-                                                      pixels: picture.pixels, width: picture.width,
-                                                      height: picture.height, level: Self.wallPanelLevel,
-                                                      paneCols: pane.cols, paneRows: pane.rows,
-                                                      format: .rgba, sync: writer.perTileSync)
-            } else {
-                bytes = writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
-                                         row: picture.panel.rect.row, col: picture.panel.rect.col,
-                                         cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
-                                         pixels: picture.pixels, width: picture.width,
-                                         height: picture.height, level: Self.wallPanelLevel,
-                                         // RGBA: the bars are transparent so the wall's own background shows
-                                         // through (design §6.6) - the mirror's tiles stay opaque RGB.
-                                         format: .rgba, sync: writer.perTileSync)
+        let emitStart = Date()
+        var emitted = 0, skipped = 0, payloadBytes = 0
+        if resendPictures, !pictures.isEmpty {
+            // The same frame contract the tile path uses: `emitPanel` only appends, `endFrame`
+            // flushes. Without the pair the pictures would sit in the writer's buffer forever - which
+            // is exactly what the first live run looked like: blank panels and no bytes on the wire.
+            writer.beginFrame()
+            for picture in pictures {
+                // `panel.rect` is the picture's own rectangle (WallPanels.make), so mask, placeholder,
+                // caption and picture are one box, and the cells outside it stay unpainted.
+                // With placeholders the terminal fits the image into this exact cell rectangle, so the
+                // picture lands where the layout says whatever the terminal claims its cell is. The
+                // pixel-sized path stays behind the flag: it is the only way to tell which of the two
+                // misbehaved when a terminal refuses placeholders.
+                let panel = picture.panel
+                // What this picture is and where it is: the two facts the wire rule needs. A panel
+                // whose key *and* rectangle are already on screen costs nothing - the terminal holds
+                // both the payload and the placement, and a page step is exactly the case where the
+                // stage's key did not change (issue #100).
+                // Derived exactly as `capture` derives it (`WallPictures.quality`/`.square`), not
+                // from `options` a second time: two derivations that ever disagree make
+                // `isOnScreen` never match, and the wire saving vanishes with no failure anywhere.
+                let key = panel.key(quality: WallPictures.quality.value, rounded: !WallPictures.square)
+                if wallPictureCache.isOnScreen(slot: panel.slot, key: key, rect: panel.rect) {
+                    // A placeholder picture *is* its cells. `WallCanvas` diffs runs, so a cell whose
+                    // text did not change is not rewritten and its grid survives — but a card whose
+                    // caption changed has its cells rewritten, and the cursor-addressed grid is what
+                    // draws the image there. Rewriting the grid is ~2-9 KB against a 132 KB payload,
+                    // so the cheap-and-always-safe half wins over guessing which of the two happened.
+                    // A pixel-sized placement is not text and survives a repaint untouched, which is
+                    // why that transport sends nothing at all.
+                    if wallPlaceholders {
+                        writer.placePanelAsPlaceholder(id: panel.imageID,
+                                                       placementID: panel.placementID,
+                                                       row: panel.rect.row, col: panel.rect.col,
+                                                       cols: panel.rect.cols, rows: panel.rect.rows,
+                                                       paneCols: pane.cols, paneRows: pane.rows,
+                                                       sync: writer.perTileSync)
+                        // The cells went out, so a frame did go out. Only here: on the pixel-sized
+                        // transport a skip writes nothing at all.
+                        sentBytes = true
+                    }
+                    skipped += 1
+                    continue
+                }
+                let bytes: Int
+                if wallPlaceholders {
+                    bytes = writer.emitPanelAsPlaceholder(id: panel.imageID,
+                                                          placementID: panel.placementID,
+                                                          row: panel.rect.row,
+                                                          col: panel.rect.col,
+                                                          cols: panel.rect.cols,
+                                                          rows: panel.rect.rows,
+                                                          pixels: picture.pixels, width: picture.width,
+                                                          height: picture.height, level: Self.wallPanelLevel,
+                                                          paneCols: pane.cols, paneRows: pane.rows,
+                                                          format: .rgba, sync: writer.perTileSync)
+                } else {
+                    bytes = writer.emitPanel(id: panel.imageID, placementID: panel.placementID,
+                                             row: panel.rect.row, col: panel.rect.col,
+                                             cols: panel.rect.cols, rows: panel.rect.rows,
+                                             pixels: picture.pixels, width: picture.width,
+                                             height: picture.height, level: Self.wallPanelLevel,
+                                             // RGBA: the bars are transparent so the wall's own background shows
+                                             // through (design §6.6) - the mirror's tiles stay opaque RGB.
+                                             format: .rgba, sync: writer.perTileSync)
+                }
+                // This picture is on screen now: the next paint may skip it if nothing about it
+                // changed (that is the whole cache, and it is recorded whether or not this emit
+                // went out as a full panel or was reused from the capture cache).
+                // Stamped with the *pixels'* age, not this instant: a paint that puts a cached
+                // picture on the wire must not make old pixels look fresh (see `isOnScreen`).
+                if bytes > 0 {
+                    wallPictureCache.didPlace(slot: panel.slot, key: key, rect: panel.rect,
+                                              at: photographed[panel.slot] ?? WallPictures.clock())
+                    sentBytes = true
+                }
+                emitted += 1
+                payloadBytes += bytes
+                // The landing screen's own unit of cost (issue #88): one line per panel, saying how many
+                // pixels it was and how many bytes zlib made of them at this `--wall-quality`. `--demo`
+                // is what makes the number reproducible without a desktop - same pattern, same path, same
+                // encoder - and `--wall-quality 100` beside it is the before/after pair.
+                if options.demo || options.debug, bytes > 0 {
+                    // `bytes` is the zlib payload, not the whole wire (the escapes and the placeholder
+                    // grid are the transport's), so the line says payload.
+                    Log.write("krd: wall slot \(panel.slot) picture "
+                              + "\(picture.width)x\(picture.height) px -> \(bytes) B payload "
+                              + "at --wall-quality \(options.wallQuality.value) "
+                              + "(\(options.wallQuality.label))\n")
+                }
             }
-            // The landing screen's own unit of cost (issue #88): one line per panel, saying how many
-            // pixels it was and how many bytes zlib made of them at this `--wall-quality`. `--demo`
-            // is what makes the number reproducible without a desktop - same pattern, same path, same
-            // encoder - and `--wall-quality 100` beside it is the before/after pair.
-            if options.demo || options.debug, bytes > 0 {
-                // `bytes` is the zlib payload, not the whole wire (the escapes and the placeholder
-                // grid are the transport's), so the line says payload.
-                Log.write("krd: wall slot \(picture.panel.slot) picture "
-                          + "\(picture.width)x\(picture.height) px -> \(bytes) B payload "
-                          + "at --wall-quality \(options.wallQuality.value) "
-                          + "(\(options.wallQuality.label))\n")
-            }
+            writer.endFrame()
         }
-        writer.endFrame()
-        return true
+        // One line, every paint, `--debug` or not: what a repaint cost is the number this issue is
+        // about, and a number that only exists under a flag is a number nobody measures. `captured`
+        // counts the panels a capture had to photograph (a cached picture is not one), `skipped` the
+        // ones the terminal already had - the target shape of a page step is 0 captured, 0 emitted.
+        let ms = captureMs + Date().timeIntervalSince(emitStart) * 1000
+        Log.write("krd: wall paint \(pictures.count - reused.count) captured, \(reused.count) reused, "
+                  + "\(emitted) emitted, \(skipped) skipped, \(payloadBytes) B payload, "
+                  + "\(String(format: "%.2f", ms)) ms\n")
+        return sentBytes
     }
 
     /// Is this slot's failure specifically "the grant is missing"?
@@ -2550,8 +2670,11 @@ final class Desk {
     /// Take the pane back and put the wall on it again (only reached when `exec` failed).
     private func resumeWall() {
         writer.beginSession()
-        // Same reason as `runWall`: the images in this pane belong to whatever drew before it.
+        // Same reason as `runWall`: the images in this pane belong to whatever drew before it — and
+        // the picture memo goes with them, or the repaint below would skip the emits that put them
+        // back.
         writer.clear()
+        wallPictureCache.reset()
         wallPaintedOnce = false
         refreshWall(force: true)
         startInput()
@@ -3897,8 +4020,12 @@ final class Desk {
             // keeps attached to the cell it was placed on; after a resize a terminal may keep the
             // old one there, so the wall would show the old picture under the new one ("缩放的时候
             // 不支持"). One escape, and the repaint below re-transmits every panel anyway - so this
-            // cannot lose anything, it can only remove what would otherwise be stale.
+            // cannot lose anything, it can only remove what would otherwise be stale. That promise
+            // is now the cache's to keep: the placements are gone, so the memo of what is placed
+            // goes too (a resize that changes no measurement would otherwise skip every emit and
+            // leave a blank pane).
             writer.clear()
+            wallPictureCache.reset()
             refreshWall(force: true)
             return
         }
