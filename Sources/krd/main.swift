@@ -2080,9 +2080,10 @@ final class Desk {
                                                        cols: panel.rect.cols, rows: panel.rect.rows,
                                                        paneCols: pane.cols, paneRows: pane.rows,
                                                        sync: writer.perTileSync)
+                        // The cells went out, so a frame did go out. Only here: on the pixel-sized
+                        // transport a skip writes nothing at all.
+                        sentBytes = true
                     }
-                    // The cells went out, so a frame did go out.
-                    sentBytes = true
                     skipped += 1
                     continue
                 }
