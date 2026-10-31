@@ -805,9 +805,23 @@ final class Desk {
     /// The notifications that can move the window list (issue #141). The wall enumerates when one of
     /// them fires, and not otherwise — the 1 s timer below never touches the window server.
     private var wallWatch: WallWatch?
+    /// The bounded-staleness poll (issue #169 review). Every `WallSource.pollInterval` seconds it
+    /// takes a *fingerprint* of the window list and enumerates only when the fingerprint moved.
+    /// This is the one trigger that can see a window opening or closing inside the app that is
+    /// already frontmost — AppKit posts nothing for that — so it is what turns "stale until the next
+    /// unrelated system event" into "stale for at most `WallSource.pollInterval`".
+    private var wallPollTimer: DispatchSourceTimer?
+    /// The fingerprint the last enumeration was taken against. `nil` = nothing enumerated yet.
+    /// Both the poll and the wall's own input ask *this* whether the world moved, so the click path
+    /// can afford to resync before it hit-tests a window id.
+    private var wallFingerprint: WallFingerprint?
     /// Every window-server enumeration this session made. The count is the point of issue #141: an
     /// idle wall must not add to it, and `--debug --log` prints it so a probe can read it back.
     private var wallEnumerations = 0
+    /// `--demo`'s window list is four constants (`WallSource.demoModel`): it cannot move, so its
+    /// fingerprint is a constant and the poll costs a comparison instead of a window-server call.
+    private static let demoFingerprint = WallFingerprint(windows: WallSource.demoModel().windows.count,
+                                                          ids: 0, frontmost: 0, displays: [])
     /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
     /// answer to "would the wall look different?".
     /// One snapshot of the pane this wall draws into: the layout and every capture size come from
@@ -1324,7 +1338,9 @@ final class Desk {
                                          dpr: options.dpr) { Log.write($0) }
         guard fresh != pane else { return }
         wallPane = fresh
-        refreshWall(force: true)
+        // No refresh here: the only caller is `handleResize`, which clears the screen and forces its
+        // own enumeration on the next line. That is what makes one resize enumerate exactly once
+        // (issue #169 review: it was three — this one, `handleResize`'s, and the paint redo's).
     }
 
     /// Start the landing screen: alternate screen, resize handler, input, one enumeration and a
@@ -1398,8 +1414,41 @@ final class Desk {
         wallMode = true
         startInput()
         refreshWall(force: true)
+        startWallTriggers()
+    }
+
+    /// Everything that can move the window list, in one place: the 1 s grid tick, the 2 s staleness
+    /// poll, and the system's own notifications. One definition, so `handOver` cannot stop two of the
+    /// three and leave the wall enumerating for a pane a child mirror owns.
+    private func startWallTriggers() {
         startWallTimer()
         startWallWatch()
+        startWallPoll()
+    }
+
+    private func stopWallTriggers() {
+        wallTimer?.cancel()
+        wallTimer = nil
+        wallPollTimer?.cancel()
+        wallPollTimer = nil
+        wallWatch?.stop()
+        wallWatch = nil
+    }
+
+    /// The bounded-staleness poll (issue #169 review): `nil` is not the answer for "a window closed
+    /// inside the frontmost app", because nothing announces it. So the wall asks a *fingerprint* of
+    /// the world — a window count, a sum of window ids, the frontmost app, the display ids — at a
+    /// low rate, and pays for a real enumeration only when the answer moved. The staleness bound is
+    /// exactly `WallSource.pollInterval` seconds, and an idle wall pays one fingerprint per interval
+    /// (measured and logged) instead of one enumeration per second.
+    private func startWallPoll() {
+        wallPollTimer?.cancel()
+        let interval = WallSource.pollInterval
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in self?.refreshWall(force: false, trigger: .poll) }
+        timer.resume()
+        wallPollTimer = timer
     }
 
     /// The wall's 1 s timer. Only the *grid* is its business (an ioctl, no query): what the timer
@@ -1463,18 +1512,39 @@ final class Desk {
         guard !cleanedUp, wallState != nil else { return }
         guard trigger.enumerates, let stored = wallPane else { return }
         let pane = paneFromTTY(stored)
+        // The gate (issue #169 review): a trigger that fired does not mean the world moved. The poll
+        // and the wall's own input pay for an enumeration only when the fingerprint says so — that
+        // is what makes the poll cheap enough to bound staleness with, and what lets a click resync
+        // before it hit-tests a window id. `.world` and `.explicit` skip the gate on purpose: a
+        // notification can precede the window it announces, and the wall asking itself is a request.
+        let fingerprint = options.demo ? Self.demoFingerprint : timedFingerprint()
+        guard force || WallRefresh.shouldEnumerate(trigger, now: fingerprint,
+                                                   drawn: wallFingerprint) else { return }
+        wallFingerprint = fingerprint
         // The one enumeration in the wall, and it is counted: an idle wall's count must not move.
         let model = options.demo ? WallSource.demoModel() : WallSource.model()
         wallEnumerations += 1
         if options.debug {
             Log.write("krd: wall enumeration \(wallEnumerations) (trigger "
-                      + (force ? "forced" : "world") + ")\n")
+                      + "\(trigger)" + (force ? " forced" : "") + ")\n")
         }
         guard WallRefresh.needsRepaint(current: model, drawn: wallModel, pane: pane,
                                        drawnPane: wallPane, force: force) else { return }
         wallModel = model
         wallPane = pane
         clampAndDraw(model: model, pane: pane)
+    }
+
+    /// `WallSource.fingerprint()` with its own cost on the debug log. "Well under the old 1.24 ms per
+    /// second" is a claim about a number, so the number is printed rather than asserted — a probe
+    /// reads it back and a reviewer can check it against the rate.
+    private func timedFingerprint() -> WallFingerprint {
+        guard options.debug else { return WallSource.fingerprint() }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let fingerprint = WallSource.fingerprint()
+        let micros = Double(DispatchTime.now().uptimeNanoseconds &- started) / 1_000
+        Log.write(String(format: "krd: wall fingerprint %.1f us\n", micros))
+        return fingerprint
     }
 
     /// Clamp the state against this model and pane, then paint. Both callers of a repaint go
@@ -1554,7 +1624,11 @@ final class Desk {
                                pictures: result.pictures, failures: result.failures)
                 if desk.wallDirtyWhilePainting, !desk.cleanedUp {
                     desk.wallDirtyWhilePainting = false
-                    desk.refreshWall(force: true)
+                    // A repaint, not a re-enumeration: everyone who can set this flag already read
+                    // the world (a trigger enumerated, `wallTick` adopted the grid, a click resynced),
+                    // and `drawWall` paints the model the desk holds now. This used to be
+                    // `refreshWall(force: true)` — the *third* enumeration of a single resize (#169).
+                    desk.drawWall()
                 }
             }
         }
@@ -1886,12 +1960,9 @@ final class Desk {
     private func handOver(_ arguments: [String]) {
         guard !mirroring else { return }
         mirroring = true
-        wallTimer?.cancel()
-        wallTimer = nil
-        // The child owns the pane; a notification landing after `exec` would enumerate for a wall
-        // that is no longer on screen.
-        wallWatch?.stop()
-        wallWatch = nil
+        // The child owns the pane: a trigger landing after `exec` would enumerate for a wall that is
+        // no longer on screen.
+        stopWallTriggers()
         input?.stop()
         input = nil
         writer.clear()
@@ -1915,8 +1986,7 @@ final class Desk {
         wallPaintedOnce = false
         refreshWall(force: true)
         startInput()
-        startWallTimer()
-        startWallWatch()
+        startWallTriggers()
     }
 
     /// Replace this process with `krd <arguments>`. Returns only when the image could not be started.
@@ -3702,6 +3772,13 @@ final class Desk {
     /// The wheel only carries a direction here, not a distance: one notch is one display or one
     /// card, because a page per notch makes a trackpad flick skip most of the shelf.
     private func wallClick(row: Int, col: Int, wheel: Int = 0) {
+        // Resync before the gesture (issue #169 review). A click hit-tests a *window id* out of the
+        // cached model, and `enterFocus(.window)` hands that id to a mirror: a window that closed
+        // since the last enumeration would be hit-tested dead, and the mirror would be exec'd with an
+        // id the window server no longer has. The fingerprint gate is what makes that affordable on
+        // the input path — an unchanged world costs one fingerprint and no enumeration, and the card
+        // under the cursor is still the card on screen.
+        refreshWall(force: false, trigger: .input)
         guard var state = wallState, let pane = wallPane else { return }
         let displays = wallModel.displays.count
         let windows = wallModel.windows.count
@@ -3751,10 +3828,7 @@ final class Desk {
         diagnosticsTimer = nil
         // The wall's 1 s tick holds the desk (and the model) alive: without this, a torn-down wall
         // keeps enumerating the window server and painting into a session that is already gone.
-        wallTimer?.cancel()
-        wallTimer = nil
-        wallWatch?.stop()
-        wallWatch = nil
+        stopWallTriggers()
         mock?.stop()
         mock = nil
         // The card is a 110 ms timer of its own: without this it keeps clearing rows after

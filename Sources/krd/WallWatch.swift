@@ -15,11 +15,23 @@ import Foundation
 /// - the active space changed (the on-screen set is per-space),
 /// - the display configuration changed (`NSScreen.screens` and the stage's aspect).
 ///
-/// A new window inside an app that is *already* frontmost while the wall's terminal sits behind it
-/// is the one case AppKit does not announce; it is reconciled by the next trigger, and the wall's
-/// own input goes through that same trigger before it hit-tests a click. The alternative — a
-/// per-second enumeration that throws its answer away — is the bug this file removes (issue #141:
-/// 1.24 ms median / 1.52 ms p95 of wall time, every second, to conclude `unchanged`).
+/// A window that closes or opens inside an app that is *already* frontmost while the wall's
+/// terminal sits behind it is the one case AppKit does not announce. Two things cover it, and both
+/// are gated on `WallSource.fingerprint()` (issue #169 review):
+///
+/// - `wallClick` takes the fingerprint **itself**, before it hit-tests the point, with trigger
+///   `.input` — so a click can never land on a window id the window server no longer has. (Nothing
+///   about a click reaches this file: `WallWatch` only observes notifications; the resync is the
+///   click's own, one fingerprint and, only if it moved, one enumeration.)
+/// - Everything else is bounded by the fingerprint poll: `WallSource.pollInterval` (2.0 s) takes one
+///   fingerprint and enumerates only when it moved, so a card this file's events missed is stale
+///   for **at most 2.0 s**. That bound is hard for any change the fingerprint can see, and it sees
+///   every membership change — the window count *and* the sum of window numbers, which a close plus
+///   an open cannot cancel.
+///
+/// The alternative — a per-second enumeration that throws its answer away — is the bug this file
+/// removes (issue #141: 1.24 ms median / 1.52 ms p95 of wall time, every second, to conclude
+/// `unchanged`).
 final class WallWatch {
     private var tokens: [NSObjectProtocol] = []
 
@@ -36,9 +48,16 @@ final class WallWatch {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
         let workspace = NSWorkspace.shared.notificationCenter
+        // The fingerprint's cached halves: a launch/terminate is the only way the regular-pid set can
+        // move, and screen parameters are the only way the display ids can. Dropping the caches here
+        // is what lets the 2 s poll read both for free (`WallSource.invalidateFingerprint`).
+        let invalidate: (Notification) -> Void = { _ in WallSource.invalidateFingerprint() }
         for name in [NSWorkspace.didLaunchApplicationNotification,
-                     NSWorkspace.didTerminateApplicationNotification,
-                     NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.didTerminateApplicationNotification] {
+            tokens.append(workspace.addObserver(forName: name, object: nil, queue: .main,
+                                               using: invalidate))
+        }
+        for name in [NSWorkspace.didActivateApplicationNotification,
                      NSWorkspace.didDeactivateApplicationNotification,
                      NSWorkspace.didHideApplicationNotification,
                      NSWorkspace.didUnhideApplicationNotification,
@@ -51,7 +70,10 @@ final class WallWatch {
         }
         tokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main) { _ in fire() })
+            object: nil, queue: .main) { _ in
+                WallSource.invalidateFingerprint()
+                fire()
+            })
     }
 
     func stop() {

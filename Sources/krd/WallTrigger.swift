@@ -19,11 +19,49 @@ enum WallTrigger: Equatable {
     /// Something the system said moved the window list: an app launched, quit, activated, hidden or
     /// unhidden, the active space changed, or the display configuration changed.
     case world
+    /// The bounded-staleness poll (issue #169 review): every `WallSource.pollInterval` seconds the
+    /// wall takes a fingerprint and enumerates only when it moved. This is the *upper bound* on
+    /// staleness for the one change AppKit does not announce — a window that closes or opens inside
+    /// the app that is already frontmost.
+    case poll
+    /// The wall's own input (a click or a wheel event) reaching for the window it is about to
+    /// hit-test. It takes the fingerprint itself for exactly that reason: a card whose window is
+    /// gone must not be clicked on, and no notification announces that close.
+    case input
     /// A refresh the wall asked of itself: the first paint, a return from a mirror, a resize.
     case explicit
 
-    /// Does this trigger ask the window server? `.tick` must stay `false` — that is the fix.
+    /// May this trigger ask the window server? A necessary condition, not a sufficient one —
+    /// `WallRefresh.shouldEnumerate` has the final say, and for `.poll`/`.input` that answer is
+    /// "only when the fingerprint moved". `.tick` must stay `false`: that is the fix of #141.
     var enumerates: Bool { self != .tick }
+}
+
+/// A cheap summary of the world, compared instead of the model (issue #169 review).
+///
+/// The poll that bounds the wall's staleness runs for the wall's whole life, so what it costs per
+/// interval *is* the design: enumerating every 2.0 s (`CGWindowListCopyWindowInfo` bridged to
+/// `[[String: Any]]` plus the `WindowOrder` rules) would give back half of issue #141 (1.24 ms per
+/// second becomes 1.24 ms every 2 s). `WallSource.fingerprint()` reads the same window list as CF
+/// objects, without bridging it, and keeps only these four values — enough that any change the cards
+/// could show moves at least one of them:
+///
+/// - `windows` and `ids` are deliberately redundant: window numbers are never reused, so "one
+///   window closed while another opened" moves `ids`; a bare count would cancel that out.
+/// - `frontmost` covers a pure reorder (the same set of windows, a different z order/focus) — and it
+///   is what makes a click that changed focus reconcile.
+/// - `displays` covers a plug/unplug/rearrange, which changes the stage and every panel's fit.
+struct WallFingerprint: Equatable {
+    /// On-screen layer-0 windows owned by a regular app. This is `WindowOrder`'s primary membership
+    /// rule (`regularPIDs`) without its belt-and-braces name blocklist: a fingerprint does not have
+    /// to match the card list, only to move whenever the card list would.
+    var windows: Int
+    /// The sum of those windows' numbers — see above: a close and an open must not cancel.
+    var ids: Int
+    /// The frontmost app's pid, `0` when there is none.
+    var frontmost: Int32
+    /// The active display ids, sorted — so a reordered `CGGetActiveDisplayList` is not a change.
+    var displays: [UInt32]
 }
 
 /// The tick's decision, before anything is touched.
@@ -48,6 +86,37 @@ enum WallRefresh {
     static func tick(drawn: PaneGeometry, pty: PaneGeometry, pinned: Bool) -> WallTick {
         guard !pinned, pty.cols != drawn.cols || pty.rows != drawn.rows else { return .idle }
         return .relayout(cols: max(1, pty.cols), rows: max(1, pty.rows))
+    }
+
+    /// Does this trigger ask the window server before anything is repainted — the one gate the
+    /// bounded-staleness poll and the wall's own input share with the notifications (issue #169
+    /// review).
+    ///
+    /// `drawn` is the fingerprint the model currently on screen was enumerated against; `nil` means
+    /// nothing has been enumerated yet, so "the fingerprint did not move" cannot be claimed and any
+    /// trigger allowed to ask must ask.
+    static func shouldEnumerate(_ trigger: WallTrigger, now: WallFingerprint,
+                                drawn: WallFingerprint?) -> Bool {
+        switch trigger {
+        case .tick:
+            // The 1 s timer owns the pty grid and nothing else. An idle second must cost an ioctl,
+            // not a window-server round-trip: this is #141 itself.
+            return false
+        case .world, .explicit:
+            // The notification rate is human-scale (a launch, a focus change, a space switch, a
+            // resize), so paying the enumeration is cheap in aggregate — and a notification can
+            // arrive *before* the window it announces, so comparing fingerprints here could skip
+            // the enumeration the event is asking for. `.explicit` is the wall asking itself (first
+            // paint, a return from a mirror, a resize): there is nothing trustworthy on screen to
+            // compare against, and a repaint after a cleared terminal is free to be right.
+            return true
+        case .poll, .input:
+            // Both exist only to catch what no notification announced (a window closing inside the
+            // already-frontmost app), so they may not answer "unchanged" from memory — but they
+            // also run at a rate the reader feels (every 2.0 s, every click), so an unchanged world
+            // must cost the fingerprint and no enumeration. `drawn == nil` is the first one.
+            return drawn == nil || drawn != now
+        }
     }
 
     /// Does a trigger that already holds its model repaint?
