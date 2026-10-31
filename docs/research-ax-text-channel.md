@@ -382,12 +382,16 @@ krd ax watch --out events.ndjson    # AXObserver 事件流
 | 阶段 | 内容 | 验收（用实测口径） |
 |---|---|---|
 | **P0（已完成）** | [`probe/ax_probe.swift`](../probe/ax_probe.swift)：warm-up 陷阱、窗口清单、逐窗口节点数/walk 耗时、剪枝前后体积（只读） | 本文 §2 的数字，可复现 |
-| **P1（已落地）** | `krd ax doctor` / `windows` / `tree --app <q> [--pid] [--window] [-d] [-i] [--all] [--menubar] [--max] [--json]` / `screen`；预检在最前面，失败给出可执行提示 | 单窗口 < 450 token、< 300 ms；慢 app 不超时 |
+| **P1（已落地）** | `krd ax doctor` / `windows` / `tree --app <q> [--pid] [--window] [-d] [-i] [--all] [--menubar] [--max] [--json]` / `screen`；失败给出可执行提示 | 单窗口 < 450 token、< 300 ms；慢 app 不超时 |
 | **P2（1~2 天）** | ref + `find` / `press` / `set`（带 `IsAttributeSettable` 预检）+ `--dry-run` + 动作后回读 | Finder/Notes/Xcode 各跑通"找→按→校验" |
 | **P3（1 天）** | `wait`、`at`、`--menubar`、跨 Space 兜底、慢 app 超时降级 | 端到端不确定场景（等保存完成）能过 |
 | **P4** | `watch`（AXObserver → NDJSON）、`--marks`、`--headless` 常驻、CDP 通道（Chrome） | 事件流不阻塞渲染；画面编号与 ref 一致 |
 
 P0 已完成且**不动主链路一行代码**——这也是为什么它应该第一个做。
+
+> **更正（#103）**：P1 落地时是「预检在最前面」——每个动词都先花 ~50 ms 查授权/窗口清单/
+> systemwide 往返，然后除 `doctor` 外把结果丢掉。这条结论后来被推翻：**预检改在动词有东西要报时
+> 才跑**（成功路径 0 次；失败或空结果 1 次，且整进程至多 1 次）。见 §2.2 的实测与 issue #103。
 
 ## 13. 待验证清单
 

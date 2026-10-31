@@ -6,15 +6,18 @@
 //
 // The diagnosis is deliberately loud. Two different failures look identical from the outside
 // (an empty tree and "you never granted anything"), and the difference costs users an hour, so
-// the check is always made *before* either is reported -- but it is made when a verb has
-// something to report, not before every verb does anything: the grant, the window list and the
-// systemwide round trip cost ~50 ms of setting up two connections, and a successful `tree` pays
-// none of it (issue #103). See docs/research-ax-text-channel.md §2.2 for the measurements.
+// either report is preceded by the check -- but the check is made when a verb has something to
+// report, not before every verb does anything: the grant, the window list and the systemwide
+// round trip cost ~50 ms of setting up two connections, and a successful `tree` pays none of it
+// (issue #103). See docs/research-ax-text-channel.md §2.2 for the measurements.
 //
 // Where the guarantee went: every verb still exits 3 on an ungranted Mac and 4 on a Mac whose
-// window server does not answer, because a verb that failed, or that read nothing, asks
-// `measure()` and the answer it gets is the same sentence (and the same code) the preflight
-// used to throw up front. `staged(_:…)` is the only path that decides it.
+// window server does not answer, because a verb that failed, or that read nothing, asks for the
+// diagnosis and the answer it gets is the same sentence (and the same code) the preflight used to
+// throw up front. `dispatch(_:_:diagnose:_:)` is the only path that decides it, and it **asks at
+// most once per process**: the verb's own question and the decision that follows its failure are
+// the same question about the same Mac, and asking it twice is what made the deferred preflight
+// slower than the eager one it replaced (issue #103 review).
 
 import AppKit
 import ApplicationServices
@@ -53,16 +56,23 @@ enum AXFailure: Error {
 
     /// Whether a missing Accessibility grant (or a window server that stopped answering) could
     /// have produced this failure. Only failures that answer "yes" are worth the ~50 ms
-    /// diagnosis: `usage` was decided before any accessibility call was made, and
-    /// `notActionable` means the API answered -- the node, not the Mac, refused.
+    /// diagnosis: `usage` was decided before any accessibility call was made, so it is the one
+    /// code that cannot be a grant.
     ///
-    /// `notFound` is in on purpose. "Nothing matched" is exactly what an ungranted Mac says
-    /// about every query, every app and every ref, so a 5 that was really a 3 is the one
-    /// mis-diagnosis that costs a user an hour (which is why the check used to run up front).
+    /// `notFound` and `notActionable` are both in, and both for the same reason: a dead element
+    /// does not say "I am dead", it answers **nothing**.
+    ///
+    /// - "Nothing matched" is exactly what an ungranted Mac says about every query, every app and
+    ///   every ref, so a 5 that was really a 3 is the one mis-diagnosis that costs a user an hour.
+    /// - A revoked grant plus a ref from a persisted snapshot gets to `press`/`set` as an element
+    ///   whose chain is empty and which answers no actions, which reads as "this node refuses"
+    ///   (`notActionable`, 6) when the truth is "this Mac refuses" (3). It cannot be told apart
+    ///   from a real refusal without asking, so it is asked; a genuine refusal on a granted Mac
+    ///   still exits 6, it just pays the measurement to prove it.
     var mayBeTheGrant: Bool {
         switch self {
-        case .permission, .environment, .notFound: return true
-        case .usage, .notActionable: return false
+        case .permission, .environment, .notFound, .notActionable: return true
+        case .usage: return false
         }
     }
 }
@@ -272,21 +282,14 @@ enum AXCommand {
         do {
             let options = try parse(args)
             requestedJSON = options.json
-            // Every verb but `doctor` runs through `staged`: it is the one place that decides,
-            // after the fact, whether a failure was the Mac's fault (exit 3 / 4) or the verb's.
-            switch options.verb {
-            case "windows": exit(try staged(options, retrying: false) { try windows(options) })
-            case "tree": exit(try staged(options) { try tree(options) })
-            case "screen": exit(try staged(options) { try screen(options) })
-            case "doctor": exit(try doctor(options))
-            case "find": exit(try staged(options) { try find(options) })
-            // Writes are never retried: an `AXPress` that returned `cannotComplete` may have
-            // landed, and a retry would be a second click on whatever is there now.
-            case "press": exit(try staged(options, retrying: false) { try press(options) })
-            case "set": exit(try staged(options, retrying: false) { try set(options) })
-            default:
+            // One funnel, no literals: whether a verb is staged, and whether it may be retried,
+            // is `plan(for:)` -- a value the tests read. Every verb but `doctor` is staged,
+            // because `dispatch` is the one place that decides, after the fact, whether a failure
+            // was the Mac's fault (exit 3 / 4) or the verb's.
+            guard let plan = plan(for: options.verb), let body = body(for: options.verb) else {
                 throw AXFailure.usage("unknown command \"\(options.verb)\" (try `krd ax --help`)")
             }
+            exit(try dispatch(plan, options, body))
         } catch let failure as AXFailure {
             exit(fail(failure, json: requestedJSON))
         } catch {
@@ -559,45 +562,96 @@ enum AXCommand {
                            first: first, final: final, retried: second != nil, sample: sample)
     }
 
-    /// The preflight's question, asked at the one moment the answer changes anything: a verb that
-    /// has a failure in hand. Throws the canonical 3 / 4 failure when the Mac is the reason, and
-    /// returns the measurement when it is not (so "nothing matched" keeps its own code).
-    @discardableResult
-    static func requireReady() throws -> AXDiagnosis {
-        configure()
-        let diagnosis = measure()
-        if let failure = diagnosis.failure { throw failure }
-        return diagnosis
+    /// How one verb reaches its exit code, as a value.
+    ///
+    /// `main()` used to spell this out as six `staged(…, retrying: …)` literals, which is a table
+    /// only a human could check -- and one row of it (`windows` not retrying, `screen` retrying)
+    /// was wrong for a while because nobody could. The table is now `plan(for:)`, a pure function,
+    /// and `AXPreflightTests` reads it.
+    struct AXPlan: Equatable {
+        /// Whether the verb runs under `dispatch`, which is the only place a failure becomes 3 / 4.
+        /// Only `doctor` is out: it reports the diagnosis instead of failing on it.
+        var staged: Bool = true
+        /// Whether a green diagnosis plus an environment failure runs the body once more. Reads
+        /// only -- an `AXPress` that returned `cannotComplete` may have landed.
+        var retrying: Bool
+
+        static let read = AXPlan(staged: true, retrying: true)
+        static let write = AXPlan(staged: true, retrying: false)
+        static let direct = AXPlan(staged: false, retrying: false)
     }
 
-    /// Run one verb with the guarantee the preflight gave, without paying for it when nothing is
-    /// wrong.
+    /// The one table: verb → how it is run. `nil` is not a verb (`usage`, exit 2).
+    static func plan(for verb: String) -> AXPlan? {
+        switch verb {
+        case "windows", "screen", "tree", "find": return .read
+        case "press", "set": return .write
+        case "doctor": return .direct
+        default: return nil
+        }
+    }
+
+    /// A verb's work, and the preflight's question handed to it for the rare case it cannot tell
+    /// "nothing to report" from "nothing was ever read".
+    typealias AXBody = (AXOptions, () throws -> Void) throws -> Int32
+
+    /// verb → its work. Separate from `plan(for:)` so the two can be checked against each other:
+    /// every planned verb has a body, every body has a plan.
+    static func body(for verb: String) -> AXBody? {
+        switch verb {
+        case "windows": return { try windows($0, ready: $1) }
+        case "screen": return { try screen($0, ready: $1) }
+        case "tree": return { options, _ in try tree(options) }
+        case "find": return { options, _ in try find(options) }
+        case "press": return { options, _ in try press(options) }
+        case "set": return { options, _ in try set(options) }
+        case "doctor": return { options, _ in try doctor(options) }
+        default: return nil
+        }
+    }
+
+    /// Run one verb with the guarantee the preflight gave, paying for it only when it buys
+    /// something.
     ///
     /// A successful answer is returned untouched and costs no diagnosis. A failure is diagnosed
     /// only when a missing grant could have produced it (`usage` was decided before any
-    /// accessibility call, and `notActionable` means the API answered), because the alternative
-    /// is the hour-long confusion the loud preflight existed to prevent: an ungranted Mac saying
-    /// "nothing matched" about everything, at exit 5.
+    /// accessibility call), because the alternative is the hour-long confusion the loud preflight
+    /// existed to prevent: an ungranted Mac saying "nothing matched" about everything, at exit 5.
+    ///
+    /// **The measurement runs at most once per process.** `ready()` is the same question `dispatch`
+    /// asks about a caught failure, so the answer is kept and the second asker is free; without
+    /// that, a verb that asked and threw (`windows` with nothing to report on an ungranted Mac)
+    /// paid twice -- 286 ms of diagnosis became 451 ms, which is worse than the preflight this
+    /// replaced (issue #103 review). Nothing here can go stale: one process, one answer, exit.
     ///
     /// A *green* diagnosis plus an environment failure is startup noise, so the body is run a
     /// second time -- `measure()` has just touched the window server, which is exactly the retry
-    /// the preflight used to make up front. Reads only: an `AXPress` that returned
-    /// `cannotComplete` may have landed, and a second one would be a second click.
-    static func staged(_ options: AXOptions, retrying: Bool = true,
-                       diagnose: () -> AXDiagnosis = measure,
-                       _ body: () throws -> Int32) throws -> Int32 {
+    /// the preflight used to make up front.
+    static func dispatch(_ plan: AXPlan, _ options: AXOptions,
+                         diagnose: @escaping () -> AXDiagnosis = measure,
+                         _ body: AXBody) throws -> Int32 {
         if options.prompt {
             let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
             _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
         }
         configure()
+        // `doctor` reports a diagnosis; it is not run under the decision that produces one.
+        guard plan.staged else { return try body(options, {}) }
+
+        var asked: AXDiagnosis?
+        /// Throws the canonical 3 / 4 when the Mac is the reason, and returns when it is not, so
+        /// "nothing matched" keeps its own code. Asked at most once per process.
+        let ready: () throws -> Void = {
+            if asked == nil { asked = diagnose() }
+            if let reason = asked?.failure { throw reason }
+        }
+
         do {
-            return try body()
+            return try body(options, ready)
         } catch let failure as AXFailure where failure.mayBeTheGrant {
-            configure()
-            if let reason = diagnose().failure { throw reason }
+            try ready()
             // Green: the Mac is fine, so the failure came from this process's own first call.
-            if retrying, case .environment = failure { return try body() }
+            if plan.retrying, case .environment = failure { return try body(options, ready) }
             throw failure
         }
     }
@@ -717,7 +771,7 @@ enum AXCommand {
                               json: json, exit: diagnosis.exit)
     }
 
-    static func windows(_ options: AXOptions) throws -> Int32 {
+    static func windows(_ options: AXOptions, ready: () throws -> Void) throws -> Int32 {
         // One window list, once: the preflight read one and threw it away, and `onScreenApps`
         // read another (issue #103).
         let list = onScreenApps(windows: windowList())
@@ -735,12 +789,12 @@ enum AXCommand {
             // An empty list is the answer only if the Mac is answering: `--json` must not report
             // zero windows on a Mac that never granted the read (exit 3), nor one whose window
             // server is gone (exit 4). Same question the preflight asked, asked only here.
-            if rows.isEmpty { try requireReady() }
+            if rows.isEmpty { try ready() }
             print(jsonString(success(["windows": rows.map { $0.dictionary }])))
             return AXExit.ok.rawValue
         }
         if rows.isEmpty {
-            try requireReady()
+            try ready()
             print("# no on-screen windows with an accessibility tree")
             return AXExit.ok.rawValue
         }
@@ -756,7 +810,7 @@ enum AXCommand {
         return AXExit.ok.rawValue
     }
 
-    static func screen(_ options: AXOptions) throws -> Int32 {
+    static func screen(_ options: AXOptions, ready: () throws -> Void) throws -> Int32 {
         let apps = onScreenApps(windows: windowList())
         var out: [String] = []
         var jsonApps: [[String: Any]] = []
@@ -798,7 +852,7 @@ enum AXCommand {
         // Zero apps with a readable window is either the truth (a Mac with nothing on screen) or
         // a read that never happened -- the same two failures the preflight separated, separated
         // here because this is where the two are indistinguishable.
-        if jsonApps.isEmpty { try requireReady() }
+        if jsonApps.isEmpty { try ready() }
         if options.json {
             print(jsonString(success(["apps": jsonApps, "focus": focus])))
         } else {
