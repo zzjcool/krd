@@ -286,7 +286,10 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(parser.resolveStall(now: 100), .sequence)
 
         var block = [UInt8](repeating: 0x41, count: 16 << 10)   // 16 KiB a read, no `ST` anywhere
-        for _ in 0..<6 { parser.feed(block) }
+        // 4 × 16 KiB is still inside the 65,536 B cap; the fifth read crosses it and the sequence is
+        // dropped whole. (A sixth read would be *input*: past the cap the keyboard is back, which is
+        // the point of the cap.)
+        for _ in 0..<5 { parser.feed(block) }
         XCTAssertEqual(notices(events).count, 1, "the byte cap never tripped: \(trace(events))")
 
         events.removeAll()
@@ -480,5 +483,88 @@ final class GraphicsReplyTests: XCTestCase {
                        "an over-cap reply leaked into input: \(trace(events))")
         XCTAssertEqual(notices(events), ["string sequence dropped: over cap"])
         XCTAssertEqual(replies(events).count, 0, "a dropped reply is not a parsed one")
+    }
+}
+
+/// **Round 6: the two things the gate measured.** A discard that ran out of budget used to end the
+/// *discard* but not the *sequence*: the keyboard came back mid-reply and the rest of that same body
+/// was typed (7 keys, `SECRET` + Alt-`\`, from both introducers). And the deadline was only looked at
+/// on a `poll` timeout, so any byte arriving faster than that starved the check: a latched discard
+/// lived 3440 ms and ate 60 keystrokes at 50 ms.
+extension GraphicsReplyTests {
+    /// The invariant, stated once: **a byte that arrived inside a sequence that began as a reply head
+    /// is never typed** — the sequence's own ending is swallowed however late it arrives. Both
+    /// introducers, because both leaked the same 7 keys.
+    func testALateReplyTailIsNeverTyped() {
+        for head in ["\u{1B}_Gi=31;", "\u{1B}]52;c;"] {
+            let parser = InputParser()
+            var events: [Event] = []
+            parser.onEvent = { events.append($0) }
+
+            parser.feed(Array(head.utf8), now: 0)
+            XCTAssertEqual(parser.resolveStall(now: 0), .sequence, head)
+            XCTAssertEqual(parser.resolveStall(now: 1_600), .abandoned, head)
+            events.removeAll()
+
+            // +1700 ms: the rest of the *same* body, terminator included.
+            parser.feed(Array("SECRET\u{1B}\\".utf8), now: 1_700)
+            XCTAssertEqual(injected(events).count, 0,
+                           "\(head): the reply's late tail was typed: \(trace(events))")
+            XCTAssertFalse(parser.isDiscarding, head)
+        }
+    }
+
+    /// The other side of the same rule, and the reason the deadline still means something: a read
+    /// that does **not** complete the sequence is input, and everything after it is too. Otherwise the
+    /// keyboard would be gone for as long as the typist kept typing.
+    func testPastTheDeadlineAReadThatDoesNotCompleteTheSequenceIsInput() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+
+        parser.feed(Array("\u{1B}]52;c;".utf8), now: 0)
+        XCTAssertEqual(parser.resolveStall(now: 0), .sequence)
+        XCTAssertEqual(parser.resolveStall(now: 1_600), .abandoned)
+        events.removeAll()
+
+        parser.feed(Array("SECRET".utf8), now: 1_700)
+        XCTAssertEqual(injected(events).count, 6,
+                       "a read that does not finish the sequence is not payload: \(trace(events))")
+    }
+
+    /// Gap 2: the bound is checked on **every** `feed`, not only on a `poll` timeout. 60 keystrokes
+    /// at 50 ms used to starve the idle tick completely; now the discard ends at its 1500 ms anchor
+    /// and the keys after that boundary are typed.
+    func testTheDeadlineIsEvaluatedOnEveryFeedNotOnlyOnAnIdleTick() {
+        let parser = InputParser()
+        var events: [Event] = []
+        parser.onEvent = { events.append($0) }
+
+        parser.feed(Array("\u{1B}]52;c;".utf8), now: 0)
+        XCTAssertEqual(parser.resolveStall(now: 0), .sequence)
+
+        var typed = 0
+        for step in 1...60 {                            // 50 ms apart, so no idle tick ever fires
+            events.removeAll()
+            parser.feed(Array("a".utf8), now: Double(step) * 50)
+            typed += injected(events).count
+        }
+        XCTAssertFalse(parser.isDiscarding, "the discard outlived its deadline (starved by typing)")
+        XCTAssertEqual(parser.lastDiscard?.end, .deadline)
+        XCTAssertEqual(parser.lastDiscard?.livedMs, 1_500, "the anchor moved")
+        // Keys 1…29 arrived inside the budget and are payload; the boundary lands on key 30, which
+        // and everything after it is input — 31 of the 60.
+        XCTAssertEqual(typed, 31, "keys after the 1500 ms boundary were not typed")
+    }
+
+    /// The wall clock and the caller's clock are the same clock in `krd`; a discard's anchor is kept
+    /// in both so a check driven by a read can never compare against a different time base than one
+    /// driven by the idle tick.
+    func testADiscardsAnchorSurvivesAReadDrivenCheck() {
+        let parser = InputParser()
+        parser.feed(Array("\u{1B}_Gi=31;".utf8), now: 0)
+        XCTAssertEqual(parser.resolveStall(now: 0), .sequence)
+        parser.feed(Array("x".utf8))                    // a read with no clock of its own
+        XCTAssertTrue(parser.isDiscarding, "a read ended a discard it had no clock for")
     }
 }

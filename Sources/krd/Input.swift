@@ -73,6 +73,8 @@ final class InputReader {
     /// With --debug every recognised event is logged, so "nothing happens" can be split
     /// into "the terminal never sent it" vs "the click went to the wrong place".
     var trace = false
+    /// The last discard the trace has already reported (`InputParser.discardEndSerial`).
+    private var loggedDiscardSerial = 0
     /// Prefix-mode byte handling for the TUI layer (`--dev`). Returns true when the byte belongs
     /// to the chrome, i.e. must not reach the remote desktop.
     var onChromeKey: ((UInt8) -> Bool)?
@@ -89,6 +91,18 @@ final class InputReader {
 
     private func log(_ text: String) {
         Log.write("input: " + text + "\n")
+    }
+
+    /// The one line that says what a discard did: which introducer, how many bytes, and which of the
+    /// three conditions ended it. It replaces a line that guessed "a reply that stopped arriving"
+    /// for **every** latch — including the user's own Alt-`]` — and sent the reader after a terminal
+    /// bug that does not exist (issue #109, round 6).
+    private func logDiscardEnd() {
+        guard trace, parser.discardEndSerial != loggedDiscardSerial,
+              let report = parser.lastDiscard else { return }
+        loggedDiscardSerial = parser.discardEndSerial
+        log("discard ended at \(report.end.rawValue): \(report.dropped) B dropped, "
+            + "\(Int(report.livedMs)) ms, from \(report.introducer.rawValue)")
     }
     /// The CSI/SS3 state machine, in krdcore (issue #45). It owns the byte buffer; this class owns
     /// the tty, the `CGEvent`s and every decision about what a parsed event means.
@@ -222,12 +236,18 @@ final class InputReader {
                     case .released:
                         log("released a stalled `ESC ]` as the Alt+] keystroke")
                     case .sequence:
-                        // A reply latched a discard; half a keystroke simply went away.
-                        log(held.count >= 2 && (InputParser.isReplyCandidate(held) || held[1] == 0x5D)
-                            ? "discarded the rest of a reply that stopped arriving (\(held.count) B)"
-                            : "dropped an unterminated escape sequence (\(held.count) B)")
+                        // A reply latched a discard; half a keystroke simply went away. What is
+                        // logged here is the *start*; `logDiscardEnd` reports how it ended, and
+                        // that is the line to read when a discard ate something unexpected.
+                        if let introducer = parser.discardIntroducer {
+                            log("discard opened by \(introducer.rawValue), \(held.count) B held; "
+                                + "it swallows to its terminator")
+                        } else {
+                            log("dropped an unterminated escape sequence (\(held.count) B)")
+                        }
                     }
                 }
+                logDiscardEnd()
                 continue
             }
             let n = Darwin.read(STDIN_FILENO, &chunk, chunk.count)
@@ -238,6 +258,7 @@ final class InputReader {
             }
             readAt = benchNowMs()
             parser.feed(chunk[0..<n])
+            logDiscardEnd()
         }
     }
 

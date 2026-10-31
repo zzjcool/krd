@@ -261,9 +261,12 @@ Two things worth knowing:
 
 **Cause.** Protocol replies arrive on stdin, which is in raw mode and parsed as input; the first
 byte sequence looked like Alt-`G` and the rest became text. Fixed by issue #109: the graphics `APC`
-(`ESC _ G … ST`) is parsed into a typed reply event, counted and logged, and is never injected —
-including a reply that stops arriving half-way, whose tail is swallowed to its terminator. `DCS`,
-`SOS` and `PM` are deliberately *not* parsed: those prefixes are Alt+P, Alt+X and Alt+^ too.
+(`ESC _ G … ST`) is parsed into a typed reply event, counted and logged, and never injected.
+A reply that stops arriving half-way is swallowed up to `ST`, a 65,536 B cap or a 1500 ms deadline
+anchored at the byte that started the discard; past the deadline the keyboard is back, and only the
+read that completes the sequence is still swallowed — any other read is typed, which is the price
+named in `PROTOCOL.md` §8. `DCS`, `SOS` and `PM` are deliberately *not* parsed: those prefixes are
+Alt+P, Alt+X and Alt+^ too.
 **Fix.** Update. In a build without the fix: only use `KRD_Q=0` with `--no-input`, or inspect
 `KRD_DUMP` offline.
 
