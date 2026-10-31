@@ -1006,7 +1006,10 @@ final class Desk {
     private var chromeEnabled: Bool { options.dev && !options.noChrome && !options.wall }
     /// The mirror's own top bar (design §6.8). Independent of `--dev`: that is a diagnostic surface
     /// at the bottom, this is the window's furniture at the top.
-    private var barEnabled: Bool { options.bar ?? (options.wallAt != nil) }
+    ///
+    /// `wallAt` alone is not enough: a wall remembers its page with the same flag, and a wall has no
+    /// bar of its own (the same confusion that made a returned wall re-exec itself, `returnsToWall`).
+    private var barEnabled: Bool { options.bar ?? Self.returnsToWall(options) }
     /// Chrome bytes are drawn whenever *either* layer is on: one painter, one geometry, one write
     /// path, so the bar cannot end up in a different coordinate space than the status line.
     private var chromeAvailable: Bool { chromeEnabled || barEnabled }
@@ -2318,6 +2321,27 @@ final class Desk {
     /// Only a listing exits after printing (see `listsOnly`). Pure, so the decision is a test.
     static func paintsThePane(_ options: Options) -> Bool {
         !listsOnly(options)
+    }
+
+    /// Whether leaving means *returning* to the wall (`exec`) rather than exiting: only a mirror the
+    /// wall handed its pane to has a wall to go back to.
+    ///
+    /// `--wall-at` cannot answer that on its own, although it reads like it should. One flag, two
+    /// readers (`Options.wallAt`): a wall uses it to remember which page to land on, and
+    /// `wallArguments` writes it into the argv of the wall a mirror returns to. So a wall can carry
+    /// `--wall-at` -- in fact every wall a reader has visited a card from does. Read as "I am a
+    /// returning mirror", it made that wall `exec` itself on every `shutdown()`: `Ctrl-\\` and `q`
+    /// painted the same wall again instead of leaving, and SIGHUP when the terminal closed re-exec'd
+    /// it into an orphan (PPID 1) that kept the pty and held ScreenCaptureKit, so the next krd got
+    /// no stream (`-3805`). Measured on the tart VM: a 13-minute orphan whose argv was exactly
+    /// `--wall --wall-at 0:2 --quality 90 --eager --fps-pinned`.
+    ///
+    /// `options.wall` is the mode decision `run()` already makes: set by `--wall` and by argv[0] ==
+    /// "wall", cleared only by `--window` and `--mirror` (main.swift's parser). `wallMode` says the
+    /// same thing at runtime but is set slightly later, after the signal handlers; the parsed flag
+    /// has no such window. Pure, so the one decision is a test.
+    static func returnsToWall(_ options: Options) -> Bool {
+        !options.wall && options.wallAt != nil
     }
 
     /// Whether the placeholder transport has to be given the picture's whole cell box (issue #86).
@@ -4860,7 +4884,11 @@ final class Desk {
         // good). Leaving the alternate screen before the exec tears down the screen the pictures
         // were attached to; the wall builds a new one. The price is one frame of the shell between
         // the two modes — the alternative was a picture no delete could remove.
-        if let at = options.wallAt {
+        //
+        // Only a *mirror* returns (`returnsToWall`): a wall that carries `--wall-at` to remember its
+        // page used to exec itself here, so Ctrl-\\ looked dead and SIGHUP left it orphaned with the
+        // capture stream still open.
+        if Self.returnsToWall(options), let at = options.wallAt {
             writer.endSession()
             Self.execSelf(Self.wallArguments(at: at, exit: exitStatus, said: failureSaid,
                                              sticky: Self.stickyArguments(options)))
@@ -4933,7 +4961,9 @@ Task {
         Log.write("krd: \(error)\n")
         // A mirror that never started still owes the reader their wall back: same sentence, same
         // footer, instead of an exit that leaves them looking at a terminal that is no longer krd's.
-        if let at = options.wallAt {
+        // A wall that failed has no wall to go back to, and re-exec'ing it here was an infinite
+        // remount of the same failure (`returnsToWall`).
+        if Desk.returnsToWall(options), let at = options.wallAt {
             Desk.execSelf(Desk.wallArguments(at: at, exit: 1, said: "\(error)",
                                              sticky: Desk.stickyArguments(options)))
         }

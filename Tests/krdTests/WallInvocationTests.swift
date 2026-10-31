@@ -123,6 +123,30 @@ final class WallReturnTests: XCTestCase {
         XCTAssertEqual(options.said?.exit, 7)
         XCTAssertEqual(options.said?.text, "")
     }
+
+    /// The page flag is not a mode flag. `wallArguments` gives `--wall-at` to the wall it returns to,
+    /// so every wall a reader has visited a card from carries it — and reading it as "I am a
+    /// returning mirror" made `shutdown()` `exec` that wall again instead of leaving (`Ctrl-\` a
+    /// repaint, SIGHUP an orphan with the capture stream still open). The mode is `options.wall`,
+    /// the same bit `run()` uses to pick the page.
+    func testAReturnedWallIsStillAWall() throws {
+        let returned = try parseArguments(["krd"] + Desk.wallArguments(at: (0, 2)))
+        XCTAssertTrue(returned.wall)
+        XCTAssertEqual(returned.wallAt?.card, 2, "the page still has to be restored")
+        XCTAssertFalse(Desk.returnsToWall(returned),
+                       "a wall has no wall to return to; exec'ing it made Ctrl-\\ a repaint")
+
+        // The two ways into a mirror are the two ways that *do* return to the wall.
+        XCTAssertTrue(Desk.returnsToWall(try parseArguments(
+            ["krd"] + Desk.mirrorArguments(windowID: nil, cell: nil, at: (0, 2)))))
+        XCTAssertTrue(Desk.returnsToWall(try parseArguments(
+            ["krd"] + Desk.mirrorArguments(windowID: 30, cell: nil, at: (1, 4)))))
+
+        XCTAssertFalse(Desk.returnsToWall(try parseArguments(["krd", "--mirror"])),
+                       "a mirror typed by hand has no page to go back to: Ctrl-\\ exits")
+        XCTAssertFalse(Desk.returnsToWall(try parseArguments(["krd"])),
+                       "and a wall typed by hand never returns to itself")
+    }
 }
 
 /// `<stage>:<card>` is written by krd for krd, so a malformed one is a bug in the hand-over and not a

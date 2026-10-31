@@ -112,15 +112,33 @@ final class WallProcessTests: XCTestCase {
                       + "expected \(log)")
     }
 
+    /// A wall may carry `--wall-at` and still be the wall: that is how it remembers its page, and
+    /// `wallArguments` writes the flag into the argv of every wall a mirror hands the pane back to.
+    /// Read as "I am a returning mirror", it made `shutdown()` `exec` the wall again — so `Ctrl-\`
+    /// painted the same wall instead of leaving (the reader's "no way out"), and the SIGHUP of a
+    /// terminal close re-exec'd it into an orphan that kept the pty and held ScreenCaptureKit, so
+    /// the next krd died with `-3805` (measured on the tart VM: a 13-minute orphan whose argv was
+    /// exactly `--wall --wall-at 0:2 --quality 90 --eager --fps-pinned`).
+    ///
+    /// Both ways out go through `shutdown()`, so both are pinned here: a keypress and the signal a
+    /// pty teardown sends. The failure mode is identical — the pid stays alive and the pane gets
+    /// another `?1049h` after its `?1049l`, i.e. the wall re-entered the alternate screen.
+    func testAReturnedWallStillLeaves() throws {
+        try assertReturnedWallLeaves("Ctrl-\\") { master, _ in self.writeAll(master, [0x1C]) }
+        try assertReturnedWallLeaves("SIGHUP") { _, pid in _ = kill(pid, SIGHUP) }
+    }
+
     /// The other path that owns the pane, and for a long time the only one outside the rule:
-    /// `paintsThePane` was a list of flags (`--debug`/`--log`/`--stats-json`/`--wall`) and a plain
-    /// `krd` was not in it, so `Log` kept its fallback sink — stderr, which *is* the picture. The
+    /// `paintsThePane` was a list of flags (`--debug`/`--log`/`--stats-json`/`--wall`) and the
+    /// mirror was not in it, so `Log` kept its fallback sink — stderr, which *is* the picture. The
     /// round-trip probe writes one line every ~2 s (`krd: rtt 12.1 ms (CSI 5n round trip)`), so the
     /// mirror painted a line of text onto its own frame, on a loop, and the newline on the last row
     /// scrolled the grid the tiles were placed on.
     ///
-    /// `--mock` is the capture source on purpose: the invariant is about *our* bytes, and a real
-    /// ScreenCaptureKit capture would ask for a permission no test can grant.
+    /// `--mirror` is spelled out: plain `krd` is the *wall* now (phase 4), and a wall already had a
+    /// log file — a test that spawned `--mock` alone was testing the wall and would have passed
+    /// with the mirror bug intact. `--mock` is the capture source on purpose: the invariant is about
+    /// *our* bytes, and a real ScreenCaptureKit capture would ask for a permission no test can grant.
     func testABareMirrorPaintsWithoutASingleNewline() throws {
         let binary = Bundle(for: Self.self).bundleURL
             .deletingLastPathComponent()
@@ -135,7 +153,7 @@ final class WallProcessTests: XCTestCase {
         let child = Process()
         child.executableURL = binary
         // The mirror, with the pixel source mocked out (`--pane` keeps the numbers deterministic).
-        child.arguments = ["--mock", "--pane", "60x24"]
+        child.arguments = ["--mirror", "--mock", "--pane", "60x24"]
         let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         child.standardInput = pane
         child.standardOutput = pane
@@ -352,9 +370,10 @@ final class WallProcessTests: XCTestCase {
         var stream: [UInt8] = []
         let child = Process()
         child.executableURL = binary
-        // `--wall-at` is the whole switch: it is what a mirror handed over by the wall carries, and
-        // it is what turns the bar on by default (`barEnabled`).
-        child.arguments = ["--mock", "--wall-at", "0:0", "--pane", "60x24", "--cell", "8x20"]
+        // A handed-over mirror is `--mirror` + `--wall-at`; plain `krd --mock` is a wall with mock
+        // pictures (phase 4), and `--wall-at` alone only says which page that wall is on.
+        child.arguments = ["--mirror", "--mock", "--wall-at", "0:0", "--pane", "60x24",
+                           "--cell", "8x20"]
         let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         child.standardInput = pane
         child.standardOutput = pane
@@ -384,6 +403,66 @@ final class WallProcessTests: XCTestCase {
     }
 
     // MARK: pty plumbing
+
+    /// One spawn of a returned wall (`--wall-at 0:2`), one way out, one assertion that it left.
+    /// `stop` gets the pty master and the child pid.
+    private func assertReturnedWallLeaves(_ name: String,
+                                          stop: @escaping (Int32, Int32) -> Void) throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        // The page a returned wall carries; `--demo`/`--pane` keep the paint deterministic.
+        child.arguments = ["--wall", "--demo", "--pane", "60x24", "--wall-at", "0:2"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+
+        let painted = pump(master, into: &stream, timeoutMs: 3_000) { bytes in
+            let text = String(decoding: bytes, as: UTF8.self)
+            return text.contains(" windows") && text.contains("\u{1B}[?1003h")
+        }
+        let soFar = String(decoding: stream, as: UTF8.self)
+        XCTAssertTrue(painted, "\(name): no wall paint + input install within 3 s; the pane has "
+                      + "\(stream.count) B, tail: " + String(soFar.suffix(300)).debugDescription)
+        guard painted else { return }
+
+        // Only bytes after this point can be the answer to the key/signal.
+        let before = stream.count
+        stop(master, child.processIdentifier)
+
+        let deadline = Date().addingTimeInterval(5)
+        while child.isRunning && Date() < deadline {
+            _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        }
+        guard !child.isRunning else {
+            XCTFail("\(name): the returned wall did not leave within 5 s — shutdown() exec'd it again")
+            return
+        }
+        _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationStatus, 0,
+                       "\(name): the returned wall exited \(child.terminationStatus) instead of 0")
+        let after = String(decoding: stream.dropFirst(before), as: UTF8.self)
+        XCTAssertFalse(after.contains("\u{1B}[?1049h"),
+                       "\(name): the wall re-entered the alternate screen — it re-exec'd itself "
+                       + "instead of leaving (the --wall-at wall loop)")
+    }
 
     /// A pty with a real window size, already raw on our side: the child sets its own termios when
     /// input starts, but the pty must not echo or cook what the test writes before/after that.
