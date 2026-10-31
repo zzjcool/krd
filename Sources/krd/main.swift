@@ -715,6 +715,13 @@ final class Desk {
     private var lastDirtyCount = 0
     /// Frames that reached the encoder, not tiles: the number a human means by "fps".
     private var framesHandled = 0
+    /// Frames ScreenCaptureKit handed us (`captureFps` is this one's rate), and of those, the ones
+    /// that changed nothing. Both used to live on `Capturer`; they moved here with the decision
+    /// that produces them, which is the one scan in `handleFrame` (issue #95). Drawn frames are
+    /// `framesHandled` above, so `skipped` counts no-ops and `delivered` counts callbacks that got
+    /// past the frame-rate governor — three different numbers, as they were before.
+    private var framesSkipped = 0
+    private var framesDelivered = 0
     private var chromeSampleFrames = 0
     private var chromeSampleDelivered = 0
 
@@ -2723,12 +2730,14 @@ final class Desk {
         // A frame-rate step from the governor is enforced here, before anything is encoded: the
         // capture still delivers at `--fps` (ScreenCaptureKit's cadence is not worth reconfiguring
         // mid-stream), and the frames the loop declines cost no zlib, no bytes and no `dirty` pass.
-        if options.qualityAuto, effectiveFps < options.fps {
-            let due = 1000.0 / Double(max(effectiveFps, 1))
-            if started - lastDrawAt < due - 1 { return }
-            lastDrawAt = started
-        }
-        framesHandled += 1
+        // `lastDrawAt` is advanced *below*, once the frame is known to change something: a frame
+        // that changes nothing must not consume the frame-rate slot (#95).
+        let governed = options.qualityAuto && effectiveFps < options.fps
+        if governed, started - lastDrawAt < 1000.0 / Double(max(effectiveFps, 1)) - 1 { return }
+        // Frames ScreenCaptureKit delivered to us, i.e. what `captureFps` is the rate of -- counted
+        // here, before the layout guards, so it stays a different number from `framesHandled`
+        // ("drawn") and from `framesSkipped` ("delivered, and changed nothing"), #95.
+        framesDelivered += 1
         // One line per *change* of frame size, not per frame: whether the stream is delivering the
         // pixels the grid slices. A frame smaller than `pixelW x pixelH` is the black-seam bug -
         // tiles sliced proportionally out of a smaller frame, placed 1:1 on cells they cannot fill.
@@ -2761,9 +2770,11 @@ final class Desk {
         }
         // capture callback -> last byte out: the number that is actually felt (Q4 in
         // docs/BENCHMARK.md). `defer` so every early return is measured too.
+        var dedupedFrame = false
         defer {
-            lastPipeMs = benchNowMs() - started
-            // A deduped frame writes nothing, so it says nothing about the pipe (issue #64).
+            // A frame that changed nothing writes nothing, so it says nothing about the pipe
+            // (issue #64). Those frames used to never reach this function at all (#95).
+            if !dedupedFrame { lastPipeMs = benchNowMs() - started }
             if writer.framesEmitted != emittedBefore {
                 noteFrame(writeMs: writer.lastWriteMs)
             }
@@ -2778,7 +2789,28 @@ final class Desk {
             return
         }
 
-        // Recording happens before the dirty pass, i.e. it captures exactly the frames the
+        // **One scan, both questions** (issue #95). "Is this frame identical to the last one" and
+        // "which tiles changed" come out of the same pass over the pixels: the capture callback
+        // used to answer the first with a whole-frame `Array ==` before delivering (4.06–4.34 ms
+        // at 2329x1452, element-wise for `UInt8`) and this function answered the second by reading
+        // the same 10 MB again (0.47–0.51 ms). A still screen — what a blinking cursor or an idle
+        // window produces — was 4.5 ms of scanning per delivered frame and is now one memcmp row
+        // scan (~0.22 ms).
+        let scan = TileGrid.diff(previous: previousFrame, current: pixels, grid: grid)
+        if scan.identical {
+            // Byte-for-byte the same frame: emit nothing at all, not even the nudge below. This is
+            // the path `Capturer`'s `prev == rgba` used to take, before it ever got here.
+            dedupedFrame = true
+            framesSkipped += 1
+            return
+        }
+        // **`framesHandled` counts frames that reached the encoder**, not callbacks (`Rates.fps`,
+        // the panel's `frames x/y fps` row and `framesTotal` all mean "drawn"), so it advances here
+        // and not above the identical check — a frame that changed nothing is not handled.
+        framesHandled += 1
+        if governed { lastDrawAt = started }
+
+        // Recording happens before the tile pass, i.e. it captures exactly the frames the
         // pipeline would render (post-dedupe, post-resize).
         if let recorder, !recorder.isFull {
             recorder.record(pixels, width: width, height: height, bpp: grid.bpp)
@@ -2793,7 +2825,7 @@ final class Desk {
             || writer.repaintNeeded {
             dirty = Array(0..<grid.count)
         } else {
-            dirty = TileGrid.dirty(previous: previousFrame, current: pixels, grid: grid)
+            dirty = scan.dirty          // the tiles the scan above already found
         }
         stateLock.lock()
         previousFrame = pixels
@@ -3138,9 +3170,9 @@ final class Desk {
     @discardableResult
     private func sampleRates() -> Rates {
         let now = benchNowMs() / 1000.0
-        let current = Rates.Counters(frames: framesHandled, delivered: capturer.framesDelivered,
+        let current = Rates.Counters(frames: framesHandled, delivered: framesDelivered,
                                      tiles: writer.framesEmitted, bytes: writer.totalBytes,
-                                     skipped: capturer.framesSkipped, idle: capturer.idleFrames)
+                                     skipped: framesSkipped, idle: capturer.idleFrames)
         if rateSampleAt > 0 {
             lastRates = Rates(previous: rateCounters, current: current, seconds: now - rateSampleAt)
         }
@@ -3178,7 +3210,7 @@ final class Desk {
         m.scale = effectiveScale
         m.scaleAuto = options.scaleAuto
         chromeSampleFrames = framesHandled
-        chromeSampleDelivered = capturer.framesDelivered
+        chromeSampleDelivered = framesDelivered
         m.kbPerFrame = writer.lastFrameBytes / 1024
         m.quality = writer.quality.value
         m.qualityLabel = writer.quality.label
@@ -3217,8 +3249,8 @@ final class Desk {
         m.writeMaxMs = writer.writeMaxMs
         m.writeOver5 = writer.writeOver5Ms
         m.callbacks = capturer.callbacks
-        m.delivered = capturer.framesDelivered
-        m.skipped = capturer.framesSkipped
+        m.delivered = framesDelivered
+        m.skipped = framesSkipped
         m.idle = capturer.idleFrames
         m.bad = capturer.badFrames
         m.pxW = layout?.pixelW ?? 0

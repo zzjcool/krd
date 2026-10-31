@@ -235,31 +235,107 @@ public struct TileGrid {
         return out
     }
 
-    /// Indices of tiles whose pixels differ.
-    public static func dirty(previous: [UInt8], current: [UInt8], grid: TileGrid) -> [Int] {
-        guard previous.count == current.count else { return Array(0..<grid.count) }
-        var result: [Int] = []
+    /// Both answers one scan of a frame can give: *is it byte-identical to the previous frame* and
+    /// *which tiles changed*.
+    ///
+    /// These are the two questions the pipeline asks about every delivered frame, and they used to
+    /// be answered by two different reads of the same 10 MB: `Capturer` compared the whole buffer
+    /// with `Array ==` (element-wise for `UInt8`, measured 4.06–4.34 ms at 2329x1452) and then
+    /// `TileGrid.dirty` read the same buffer again tile-row by tile-row (0.47–0.51 ms). The frame
+    /// was compared twice, and the two answers could only agree by accident — issue #95.
+    ///
+    /// They cannot disagree here: the tiles partition the frame (see `rect`), so a differing byte
+    /// always lands in some tile, and `identical == dirty.isEmpty` by construction — for a frame of
+    /// this grid. The one branch that cannot promise it is the one that has already found the two
+    /// buffers do not describe this grid (see `diff`), and it says so there.
+    public struct FrameDiff: Equatable {
+        /// Every byte of `previous` and `current` is the same, i.e. exactly `previous == current`.
+        public let identical: Bool
+        /// Indices of tiles whose pixels differ, ascending — the same set `dirty` always returned.
+        public let dirty: [Int]
+
+        public init(identical: Bool, dirty: [Int]) {
+            self.identical = identical
+            self.dirty = dirty
+        }
+    }
+
+    /// One pass over the frame, answering both questions (`FrameDiff`).
+    ///
+    /// The scan is **one `memcmp` per row of the frame** (1452 calls at 2329x1452) instead of one
+    /// per tile row (26,136 calls), and a row that differs is then split across the tile columns
+    /// inside it — but only for the columns not already known dirty, and only for rows that
+    /// actually differ. So a still screen (the common case, and the one that used to cost 4.5 ms)
+    /// reads the frame exactly once, while the tile set stays *exactly* the one the per-tile-row
+    /// `memcmp` produced, order included: over-reporting a tile would re-send bytes the old code
+    /// did not send.
+    ///
+    /// Every tile dirty short-circuits the rest of the scan: nothing left to learn.
+    public static func diff(previous: [UInt8], current: [UInt8], grid: TileGrid) -> FrameDiff {
+        let frameBytes = grid.pixelW * grid.pixelH * grid.bpp
+        // Not two frames of this grid (a resize, or a caller that hands in something else): the
+        // tiles answer is the safe one -- everything -- and the identity question is answered the
+        // plain way, because the tile geometry cannot be trusted for a buffer of the wrong size.
+        // Here `identical` and `dirty` *can* disagree (an identical pair of short buffers is
+        // "identical" and still asks for a full repaint): a caller that wants "nothing to do" must
+        // test `identical`, which is what `handleFrame` does. The guard is also stricter than the
+        // old `dirty`, which only compared the two lengths and then read `pixelW x pixelH x bpp`
+        // bytes out of a short buffer.
+        guard previous.count == current.count, current.count == frameBytes else {
+            return FrameDiff(identical: previous == current, dirty: Array(0..<grid.count))
+        }
+
         let stride = grid.pixelW * grid.bpp
-        let rowBytes = { (r: (x: Int, y: Int, w: Int, h: Int, col: Int, row: Int, cols: Int, rows: Int)) in r.w * grid.bpp }
+        var mask = [Bool](repeating: false, count: grid.count)
+        var dirty: [Int] = []
+        var identical = true
+        var unchanged = grid.count
+
         previous.withUnsafeBufferPointer { prev in
             current.withUnsafeBufferPointer { cur in
+                // Cannot happen (the counts above are non-zero), and if it ever did, "everything
+                // changed" is the safe answer: "identical" would drop a frame that has content.
+                guard let p = prev.baseAddress, let c = cur.baseAddress else {
+                    identical = false
+                    dirty = Array(0..<grid.count)
+                    return
+                }
                 for ty in 0..<grid.tilesY {
-                    for tx in 0..<grid.tilesX {
-                        let r = grid.rect(tx, ty)
-                        var differs = false
-                        let bytes = rowBytes(r)
-                        for row in 0..<r.h {
-                            let off = (r.y + row) * stride + r.x * grid.bpp
-                            if memcmp(prev.baseAddress! + off, cur.baseAddress! + off, bytes) != 0 {
-                                differs = true
-                                break
+                    // A tile row's pixel rows come from `ty` alone (`rect` is separable: x from tx,
+                    // y from ty), so the band is read once for the whole row of tiles.
+                    let band = grid.rect(0, ty)
+                    let base = ty * grid.tilesX
+                    for row in band.y..<(band.y + band.h) {
+                        let off = row * stride
+                        if memcmp(p + off, c + off, stride) == 0 { continue }
+                        identical = false
+                        for tx in 0..<grid.tilesX where !mask[base + tx] {
+                            let r = grid.rect(tx, ty)
+                            let colOff = off + r.x * grid.bpp
+                            if memcmp(p + colOff, c + colOff, r.w * grid.bpp) != 0 {
+                                mask[base + tx] = true
+                                unchanged -= 1
                             }
                         }
-                        if differs { result.append(ty * grid.tilesX + tx) }
+                        if unchanged == 0 {
+                            dirty = Array(0..<grid.count)
+                            return          // nothing left to learn: every tile is dirty
+                        }
                     }
+                    // Appended per band, so the result is ascending in index order (the order the
+                    // encoder emits tiles in, and the one the old per-tile loop produced).
+                    for tx in 0..<grid.tilesX where mask[base + tx] { dirty.append(base + tx) }
                 }
             }
         }
-        return result
+        return FrameDiff(identical: identical, dirty: dirty)
+    }
+
+    /// Indices of tiles whose pixels differ — the tile-only face of `diff`.
+    ///
+    /// The pipeline asks both questions, so it calls `diff` and never pays for this read twice;
+    /// this stays as the API for a caller that only wants the tiles (the bench, the tests).
+    public static func dirty(previous: [UInt8], current: [UInt8], grid: TileGrid) -> [Int] {
+        diff(previous: previous, current: current, grid: grid).dirty
     }
 }

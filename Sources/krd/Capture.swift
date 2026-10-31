@@ -15,6 +15,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// whole frame first (the previous frame still references it); alternating two buffers keeps
     /// each one uniquely referenced when it is written. See issue #1.
     private var spare = [UInt8]()
+    /// The buffer we last handed downstream. It is not compared here any more (see below), it is
+    /// held so that `rgba` is the *other* buffer on the next callback — the swap below is only a
+    /// swap while these two do not alias, and the frame we handed out is still referenced twice
+    /// (`previousFrame` in `Desk`). Issue #1.
     private var previous: [UInt8]?
     /// Matches ScreenWriter.format; set before start().
     var format: krdcore.PixelFormat = .rgb
@@ -23,8 +27,6 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// tiles under it. `--cursor` turns it on.
     var showsCursor = false
 
-    private(set) var framesDelivered = 0
-    private(set) var framesSkipped = 0
     private(set) var callbacks = 0
     private(set) var idleFrames = 0
     private(set) var badFrames = 0
@@ -230,13 +232,15 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
 
-        // A static desktop costs zero bandwidth: skip byte-identical frames.
-        if let prev = previous, prev == rgba {
-            framesSkipped += 1
-            return
-        }
+        // **Every** frame goes downstream, identical or not: the one scan that decides "did
+        // anything change" *and* "which tiles" happens in `Desk.handleFrame` (#95), so the
+        // whole-frame `prev == rgba` that used to sit here was a second read of the same 10 MB —
+        // and, as `Array ==`, the 23x more expensive one (element-wise for `UInt8`, 4.06–4.34 ms
+        // against 0.184 ms for a `memcmp`). A frame that changed nothing is dropped there, before
+        // a single byte is written, exactly as it was dropped here before.
+        //
+        // `onFrame` is called on this queue either way; the swap above is what makes that free.
         previous = rgba
-        framesDelivered += 1
         onFrame?(rgba, w, h)
     }
 

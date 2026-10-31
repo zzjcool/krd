@@ -204,23 +204,30 @@ SCStream callback (capture queue)
   └─ Capturer.stream(_:didOutputSampleBuffer:of:)
        ├─ sample attachments: status=complete|idle|blank, …  → idle vs bad vs frame
        ├─ CVPixelBuffer → vImagePermuteChannels_ARGB8888(BGRA → RGBA)
-       └─ previous == rgba ? drop : keep  ← zero cost for a static desktop
+       └─ every frame is handed on (the swap above is what keeps that copy-free)
           └─ Desk.handleFrame(pixels:width:height:)          (same queue)
                ├─ size != layout ? log once, drop
-               ├─ dirty = TileGrid.dirty(previousFrame, pixels, grid)
-               │          (or all tiles when --full-frame, or when the frame size changed)
+               ├─ scan = TileGrid.diff(previousFrame, pixels, grid)
+               │          (one pass: "identical to the last frame" *and* the dirty tiles;
+               │           or all tiles when --full-frame, or when the frame size changed)
+               ├─ scan.identical → count it as skipped, emit nothing at all, return  ← zero cost
                ├─ writer.beginFrame()   (reset counters, open the frame's ?2026h block)
                ├─ dirty.isEmpty → writer.nudge(), writer.endFrame() and return
+               │          (unreachable while `diff` reports the tiles honestly: a frame that is not
+               │           identical has at least one dirty tile)
                ├─ concurrentPerform over the dirty tiles (compression is stateless):
                │     extract(rect) → zlib(compress2, level = LevelPolicy[tile]) → CompressedTile
                └─ then, serially, per tile: writer.emit(tile)  (escape assembly only)
                     CUP → base64 chunks → a=t transmit → a=p place  … writer.endFrame() (?2026l + flush)
 ```
 
-Two independent dedupe stages exist for a reason: the capture stage compares whole frames
-(`previous == rgba`, an Array equality — one memcmp under the hood) and kills the truly static
-case; the tile stage compares per tile, so a small change costs a small update. The capture stage
-also means `dirty.isEmpty` is rare, which is why `nudge()` (see §7) is not a per-frame cost.
+There is **one** dedupe stage, not two (issue #95). `TileGrid.diff` scans the frame once — one
+`memcmp` per row, then the tile columns of a row that differs — and answers both questions from
+that pass: "is this frame identical to the last one" (the truly static case, which emits nothing at
+all) and "which tiles changed" (so a small change costs a small update). It used to be two reads of
+the same 10 MB, the first an `Array` equality (element-wise for `UInt8`, 4.1 ms at 2329x1452) and
+the second a per-tile `memcmp`; the two answers could only agree by accident. The scan is 0.22 ms
+per delivered frame, including the ones that emit nothing.
 
 A frame whose dimensions differ from the current layout is dropped and logged once
 (`krd: dropping frames: got WxH, layout expects WxH`) — that message means a resize raced the
@@ -501,9 +508,10 @@ in-frame overlay.
 
 Documented so the next reader does not chase ghosts:
 
-- The two capture buffers remove the per-frame copy only while frames are being *emitted*. A frame
-  dropped by the whole-frame dedupe leaves `previous` pointing at the buffer that is about to be
-  rewritten, so the next emitted frame pays one 13.5 MB copy before the rotation is in phase again.
+- The two capture buffers remove the per-frame copy only while frames are being *emitted*.
+  `Capturer.previous` now advances on every callback, but a static screen still keeps
+  `Desk.previousFrame` pinned to a buffer that is about to be rewritten, so the next emitted frame
+  pays one 13.5 MB copy before the rotation is in phase again.
 - `TileGrid.bpp` is taken from the writer at layout time; a `--format` change mid-session (there is
   none today) would invalidate the grid and the `previousFrame` it was measured against.
 - `LevelPolicy` starts every tile at level 5 and needs one frame per tile to learn; after a resize
