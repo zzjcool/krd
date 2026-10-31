@@ -438,7 +438,7 @@ which is why §7.6 exists.
 | `KRD_BENCH_BUDGET_SCALE` | `bench/bench.py` only (not read by krd): multiplies `ms.*` / `write_ms.*` budgets by the machine's speed factor, never bytes ([BENCHMARK](BENCHMARK.md) §6) |
 | `--mock` | `MockDesktop` instead of `Capturer`: synthetic frames through the real `handleFrame`, no permission. With `--wall`: `WallSource.mockModel` (a fake window list) + `WallPictures.demo` (pictures in process) instead |
 | `--mock-size` | size of the generated desktop, default `1920x1200` |
-| `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand |
+| `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand. Selects the mirror — the wall owns every row, so `--wall --dev` is a usage error rather than a dropped flag (#116) |
 | `--dev-panel` | `ChromeState.panel` set before the first layout, for screenshots and pty tests |
 | `--no-chrome` | forces the layer off, so `--dev` can live in a wrapper script |
 | `krd` (no flags) | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`: the landing screen, one display on stage and three recent windows below, as pictures. A click on one turns this process into `krd --window <id>` (`Desk.handOver`, `execv` — a second live process of one executable is not allowed to stream, see design §12 P3b) and `Ctrl-\` in that mirror `exec`s the wall back with its offsets in argv (`--wall-at`, `--said`). `--mirror` selects the old whole-display path, `--window <q>` implies it |

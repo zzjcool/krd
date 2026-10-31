@@ -75,7 +75,9 @@ krd --wall-quality 70       # the landing screen's pictures: 100 = lossless, 70 
                             # mirror's knob), and it survives a click into a window and back
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
-krd --dev                    # TUI layer: a status line and panels under the picture
+krd --dev                    # TUI layer: a status line and panels under the picture. It opens
+                             # the mirror: the wall owns every row, so `krd --wall --dev` is
+                             # refused with that sentence instead of dropping the flag
 krd --mock --dev             # the same, with the screen mocked: no permission needed
 krd --wall --mock            # the landing screen against a fake window list (12 cards,
                              # CJK/emoji titles, a withheld title, a mask, two displays):

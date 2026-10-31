@@ -287,7 +287,9 @@ func usage() -> String {
                           KRD_PASSTHROUGH=on|off|auto is the same switch
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
-      --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
+      --dev               TUI layer: status line + panels (stats, devices, settings, log, help).
+                          Selects the mirror -- the wall owns every row, so `--wall --dev` is a
+                          usage error rather than a flag that does nothing
       --no-chrome         force the TUI layer off, e.g. for scripts
       --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
       --mirror            the whole display as one picture at --fps (the old behaviour; plain krd
@@ -475,9 +477,10 @@ func doubleValue(_ flag: String, _ args: [String], _ i: inout Int, wants: String
 /// plus two overrides, i.e. exactly the shape that rots silently.
 func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options {
     var options = Options()
-    // `--wall`/`--mirror`/`wall` are remembered *as typed* rather than as a final value: `--mock`
-    // decides the mode itself when nobody asked for the wall (issue #114), instead of leaving a
-    // stale `wall` that the branch below then disagrees with.
+    // `--wall`/`--mirror`/`wall` are remembered *as typed* rather than as a final value: `--dev`
+    // and `--mock` decide the mode themselves when nobody asked for the wall (issues #114, #116),
+    // and "the wall **and** the chrome" is a contradiction to refuse, not one to resolve by
+    // whichever flag happened to come last.
     var wallPinned = false
     if invokedAsWall(argv.first ?? "") { options.wall = true; wallPinned = true }
     let args = Array(argv.dropFirst())
@@ -708,8 +711,21 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
         options.quality = QualityBudget(options.quality.value, eager: eager)
     }
     // The mode, decided once, after every flag has been read — so no flag's *position* can change
-    // what the flag means.
+    // what a pair of them means.
     //
+    // `--dev` on the wall is the bug #116 came from: the wall owns every cell (`chromeEnabled`),
+    // so the layer was switched off and the flag said nothing. A wall that was *asked for* and a
+    // chrome that was asked for cannot both be honoured, and quietly choosing one is how three
+    // documented entry points (`make dev`, `make dev-mock`, `krd --mock --dev`) came to show no
+    // status line at all. So the pair is a usage error, and `--dev` on its own means the screen
+    // the chrome has rows for: the mirror.
+    if options.dev && !options.noChrome {
+        if wallPinned {
+            throw UsageError("--dev draws a status line and panels under the picture, and the wall "
+                             + "owns every row; run `krd --mirror --dev` (or drop --dev)")
+        }
+        options.wall = false
+    }
     // `--mock` is the mock *mirror* unless the wall was asked for, in which case it supplies the
     // wall's window list (`WallSource.mockModel`, issue #114). The flag has to agree with the branch
     // `Desk.run()` will take: while it did not, `krd --mock` ran the mock mirror with `wall` still
@@ -1027,8 +1043,9 @@ final class Desk {
     private var mock: MockDesktop?
     private var geometrySource = "-"
 
-    /// The wall owns the whole pane, so `--dev` has no rows to take: the layer stays off even when
-    /// both flags are given.
+    /// The wall owns the whole pane, so `--dev` has no rows to take: the layer is off in a wall
+    /// session, and that is why `parseArguments` refuses `--wall --dev` and points at the mirror
+    /// instead of dropping the flag in silence (issue #116).
     private var chromeEnabled: Bool { options.dev && !options.noChrome && !options.wall }
     /// The mirror's own top bar (design §6.8). Independent of `--dev`: that is a diagnostic surface
     /// at the bottom, this is the window's furniture at the top.

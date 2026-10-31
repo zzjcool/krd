@@ -375,7 +375,7 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `KRD_SYNC` | `tile` 恢复每瓦片一个同步块；`KRD_NOSYNC=1` 完全关掉 |
 | `KRD_PASSTHROUGH` | `auto`（默认）/ `on` / `off` —— 把每条 kitty APC 包进 tmux 的 DCS passthrough（`ESC P tmux;` … `ESC \`，内部每个 `ESC` 翻倍；`--passthrough` 设的是同一个开关，见 PROTOCOL §6.6）。`auto` = `TERM` 以 `tmux` 或 `screen` 开头时打开（issue #107） |
 | `--mock` | 用 `MockDesktop` 顶替 `Capturer`：合成帧走真实 `handleFrame`，不需要权限。带 `--wall` 时改为 `WallSource.mockModel`（假窗口列表）+ `WallPictures.demo`（图在进程内画） |
-| `--dev` | `Chrome` + `startChrome()`：TUI 层，预留一行状态栏，面板按需占行 |
+| `--dev` | `Chrome` + `startChrome()`：TUI 层，预留一行状态栏，面板按需占行。它会选镜像——墙占满每一行，所以 `--wall --dev` 是用法错误，而不是被丢掉的开关（#116） |
 | `--dev-panel` | 在第一次布局前就打开面板，用于截图和 pty 测试 |
 | `--no-chrome` | 强制关闭该层，方便把 `--dev` 写进包装脚本 |
 | `krd`（无参数） | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`：落地屏，舞台放一块屏、下面三张最近用过的窗口，都是图片。点其中一张会让这个进程变成 `krd --window <id>`（`Desk.handOver`，`execv`——同一个可执行文件的两个活进程不允许都开流，见设计 §12 P3b），在镜像里按 `Ctrl-\` 会用 argv 里的偏移（`--wall-at`、`--said`）把墙 `exec` 回来。`--mirror` 选回老的整屏镜像路径，`--window <查询>` 隐含它 |

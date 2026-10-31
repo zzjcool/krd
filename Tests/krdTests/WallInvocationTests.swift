@@ -426,10 +426,37 @@ final class ScaleTransportTests: XCTestCase {
     }
 }
 
-/// `--mock` used to be dropped in silence on the wall (issue #114). The parse is where the mode is
-/// decided, so the parse is where the truth is pinned — a pane cannot be asserted in a unit test,
-/// and "the flag says one thing, the branch does another" is how this bug survived.
+/// Two flags that used to be dropped in silence: `--dev` on the wall (issue #116) and `--mock` on
+/// it (issue #114). The parse is where the mode is decided, so the parse is where the truth is
+/// pinned — a pane cannot be asserted in a unit test, and "the flag says one thing, the branch does
+/// another" is precisely how both of these bugs survived.
 final class MockAndDevModeTests: XCTestCase {
+    func testDevSelectsTheScreenThatHasRowsForIt() throws {
+        XCTAssertFalse(try parseArguments(["krd", "--dev"]).wall,
+                       "--dev is a status line under the picture: it needs the mirror's rows (#116)")
+        XCTAssertTrue(try parseArguments(["krd", "--dev"]).dev)
+        XCTAssertFalse(try parseArguments(["krd", "--mock", "--dev"]).wall, "make dev-mock")
+        XCTAssertFalse(try parseArguments(["krd", "--selftest", "--dev"]).wall, "make dev-selftest")
+        XCTAssertFalse(try parseArguments(["krd", "--selftest", "--dev", "--dev-panel", "stats"]).wall)
+        // `--no-chrome` asks for no layer, so nothing is dropped and the default wall stands.
+        XCTAssertTrue(try parseArguments(["krd", "--dev", "--no-chrome"]).wall)
+        XCTAssertTrue(try parseArguments(["krd", "--no-chrome", "--dev"]).wall,
+                      "the same, whatever the order")
+    }
+
+    func testAWallAndTheChromeIsARefusalNotASilentDrop() {
+        for argv in [["krd", "--wall", "--dev"], ["krd", "--dev", "--wall"], ["wall", "--dev"],
+                     ["krd", "--mock", "--dev", "--wall"]] {
+            XCTAssertThrowsError(try parseArguments(argv), "\(argv) cannot be honoured") { error in
+                let sentence = "\(error)"
+                XCTAssertTrue(sentence.contains("--mirror --dev"),
+                              "the refusal has to say what to type instead: \(sentence)")
+            }
+        }
+        // Asking for the wall and for the layer to be forced off is not a contradiction.
+        XCTAssertTrue(try parseArguments(["krd", "--wall", "--dev", "--no-chrome"]).wall)
+    }
+
     func testTheMockMirrorDoesNotPretendToBeAWall() throws {
         let options = try parseArguments(["krd", "--mock"])
         XCTAssertTrue(options.mock)
