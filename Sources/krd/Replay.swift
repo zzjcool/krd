@@ -95,10 +95,15 @@ struct FrameReplay {
 
     let dir: String
     let entries: [Entry]
-    /// The *first* frame's size. For a recording that agrees with itself -- every recording
-    /// `--record` writes in one go -- that is the recording's size. A manifest whose lines disagree
-    /// is carried per entry and refused by `refusal(...)` before a frame is painted, because one grid
-    /// can only render one layout.
+    /// The **first line's** size. Not the thing a frame is checked against: `refusal(...)` compares
+    /// every entry with the live layout, because one grid renders one layout and the header is what
+    /// picks it. Reading these as "the recording's size" and checking frames against them is exactly
+    /// what #133 was; they have no reader left in `Sources/` (only `bpp` has one, in the `--format`
+    /// guard).
+    ///
+    /// One `--record` does not promise they hold for every line either: a live resize changes the grid
+    /// mid-recording and the lines then disagree. A recording whose lines all agree (the usual case:
+    /// one layout) is the case the benchmarks replay.
     let width: Int
     let height: Int
     let bpp: Int
@@ -134,9 +139,16 @@ struct FrameReplay {
                                  width: w, height: h, bpp: b))
         }
         // Every line, not just the last one, has to be a frame someone could render.
-        guard let first = entries.first,
-              entries.allSatisfy({ $0.width > 0 && $0.height > 0 && $0.bpp >= 3 })
-        else { return nil }
+        //
+        // A hand-edited line can declare a size no `Int` holds, and `Entry.byteCount` multiplies it:
+        // refused here, where the manifest is read, rather than trapping the pre-flight later.
+        func renderable(_ entry: Entry) -> Bool {
+            guard entry.width > 0, entry.height > 0, entry.bpp >= 3 else { return false }
+            let (pixels, widthOverflow) = entry.width.multipliedReportingOverflow(by: entry.height)
+            let (_, bytesOverflow) = pixels.multipliedReportingOverflow(by: entry.bpp)
+            return !widthOverflow && !bytesOverflow
+        }
+        guard let first = entries.first, entries.allSatisfy(renderable) else { return nil }
         return FrameReplay(dir: dir, entries: entries, width: first.width, height: first.height,
                            bpp: first.bpp, header: header)
     }
@@ -169,23 +181,31 @@ struct FrameReplay {
     /// report success.
     func refusal(_ index: Int, layoutWidth: Int, layoutHeight: Int, bpp: Int) -> String? {
         guard entries.indices.contains(index) else {
-            return "replay: frame \(index) does not exist (the manifest declares \(entries.count))"
+            return "replay frame \(index) does not exist (the manifest declares \(entries.count) frames)"
         }
         let entry = entries[index]
         // `stat`, not `read`: a 1 GB recording must not be pulled through memory to learn that
         // frame 40 is short.
         guard let onDisk = (try? FileManager.default.attributesOfItem(atPath: entry.path))?[.size] as? Int else {
-            return "replay: frame \(index) (\(entry.name)) is missing; "
+            return "replay frame \(index) (\(entry.name)) is missing; "
                 + "its manifest line declares \(entry.declaredSize)"
         }
         guard onDisk == entry.byteCount else {
-            return "replay: frame \(index) (\(entry.name)) is \(onDisk) B "
+            return "replay frame \(index) (\(entry.name)) is \(onDisk) B "
                 + "but its manifest line declares \(entry.declaredSize)"
         }
         guard entry.width == layoutWidth, entry.height == layoutHeight, entry.bpp == bpp else {
-            return "replay: frame \(index) (\(entry.name)) is \(entry.width)x\(entry.height) px, \(entry.bpp) bpp "
+            // A recording carries no scale of its own (`docs/ENCODING.md`), so a recording whose lines
+            // all agree can still miss this layout: the reader replayed it without the `--scale` it was
+            // made with. Say that, instead of blaming the manifest for being consistent.
+            let linesAgree = entries.allSatisfy {
+                $0.width == entries[0].width && $0.height == entries[0].height && $0.bpp == entries[0].bpp
+            }
+            return "replay frame \(index) (\(entry.name)) is \(entry.width)x\(entry.height) px, \(entry.bpp) bpp "
                 + "but this replay renders \(layoutWidth)x\(layoutHeight) px, \(bpp) bpp (from the manifest header); "
-                + "a recording's header and its frame lines have to describe the same layout"
+                + (linesAgree
+                   ? "the recording carries no scale, so replay it with the --scale it was made with"
+                   : "a recording's header and its frame lines have to describe the same layout")
         }
         return nil
     }

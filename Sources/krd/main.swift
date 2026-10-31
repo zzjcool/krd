@@ -2100,7 +2100,7 @@ final class Desk {
         // stderr and exit 1, before anything is painted. Until this existed the loop below answered
         // `nil` with one log line and a `break`, then printed the ordinary summary -- counting the
         // *declared* frames -- and exited 0: measured on cd9ac5d, a valid two-frame recording painted
-        // nothing, reported "2 frames" with `bytes 0`, and said nothing at all.
+        // nothing, reported "2 frames" with `bytes 0`, and not one word on stderr.
         if let refusal = replay.refusal(layoutWidth: layout.pixelW, layoutHeight: layout.pixelH,
                                         bpp: layout.bpp) {
             failReplay(refusal)
@@ -2117,7 +2117,9 @@ final class Desk {
                 // is live here, so hand the terminal back before saying why.
                 writer.endSession()
                 failReplay(replay.refusal(i, layoutWidth: layout.pixelW, layoutHeight: layout.pixelH,
-                                          bpp: layout.bpp) ?? "replay: frame \(i) is missing or truncated")
+                                          bpp: layout.bpp)
+                           ?? "replay frame \(i) (\(replay.entries[i].name)) could not be read, "
+                           + "although its size still matches its manifest line")
             }
             let t0 = benchNowMs()
             handleFrame(pixels: pixels, width: layout.pixelW, height: layout.pixelH)
