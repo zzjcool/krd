@@ -19,9 +19,11 @@ import Foundation
 /// * **the writer got further ahead than a window** -- the reader re-anchors on the last
 ///   `windowBytes` rather than digesting a gap that cannot reach twelve rows.
 ///
-/// Measured with a 19 MB file (`bench/loop-logtail.swift`, table in the PR): 220 ms per tick for
-/// the whole-file read, 0.05 ms for an unchanged tick here, 0.06 ms for a re-anchor, and a tick that
-/// swallows one appended line reads one line. The numbers are flat in the size of the file.
+/// Measured against a 19 MB file, both bodies in one process, release (`LogTailCostTests`,
+/// `KRD_LOGTAIL_COST=1 swift test -c release --filter LogTailCost`): the whole-file read costs
+/// 16.9 ms at 1 MB, 86.5 ms at 5 MB, 357 ms at 19 MB and 1072 ms at 50 MB, while a re-anchor here is
+/// 1.10 ms and an unchanged tick 0.026 ms at every one of those sizes. The numbers are flat in the
+/// size of the file, and a tick that swallows one appended line reads one line (0.03 ms).
 ///
 /// A struct, not a class, so the reader's whole state is the panel's own and a test can drive it
 /// against a real file (`Tests/krdTests/LogTailTests.swift`) instead of a mocked file system.
