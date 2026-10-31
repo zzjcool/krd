@@ -579,10 +579,11 @@ public final class ScreenWriter {
     /// `guard` below has just fixed the bit depth for the entire buffer -- but as a `specs` tuple
     /// array indexed with `enumerated()` *inside* the loop neither the array loads nor the tuple
     /// destructuring could be hoisted, and each of the three stores went through a bounds-checked
-    /// `Array` subscript. That cost 43.4 ms per 2329x1452 frame on the `photo` bench case; this
-    /// version is 5-8x it and every byte it writes is the byte the loop above it wrote, because the
-    /// loop body is the *same expression* -- only the address arithmetic and the bound checks are
-    /// gone. Pinned by `QuantiseTests.testHoistedLoopIsByteIdentical…`.
+    /// `Array` subscript. On the `photo` bench case (198 tiles, 2329x1452 px) that was 26-43 ms of a
+    /// frame depending on what else the machine was doing; this version measures a flat 4.6 ms, 5.6x
+    /// against the load-matched sample. Every byte it writes is a byte the old loop wrote: the body
+    /// is the *same expression*, so only the address arithmetic and the bound checks are gone. Pinned
+    /// by `QuantiseTests.testHoistedLoopIsByteIdentical…`.
     public static func quantise(_ pixels: [UInt8], bits: QualityBudget.Bits,
                                bytesPerPixel bpp: Int = 3) -> [UInt8] {
         guard bpp >= 3 else { return pixels }

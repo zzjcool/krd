@@ -74,8 +74,10 @@ final class QuantiseTests: XCTestCase {
     /// The implementation #92 replaced, kept verbatim as the oracle: a `specs` tuple array,
     /// `enumerated()` inside the pixel loop, bounds-checked `Array` subscripts. Re-deriving the
     /// replication identity here would only prove that two *expressions* agree; keeping the old body
-    /// proves the shipped function still returns what `main` returned on every input, which is the
-    /// gate the rewrite is allowed through.
+    /// proves the shipped function still returns what `main` returned on everything this test can
+    /// throw at it -- byte values, strides, partial-pixel tails, mixed depths. That the agreement is
+    /// not a property of the sample is licensed by the loop body being the same expression; this is
+    /// what would notice if it ever stopped being one.
     private func referenceQuantise(_ pixels: [UInt8], bits: QualityBudget.Bits,
                                    bytesPerPixel bpp: Int = 3) -> [UInt8] {
         guard bpp >= 3 else { return pixels }
@@ -94,9 +96,8 @@ final class QuantiseTests: XCTestCase {
         return out
     }
 
-    /// Every byte value meets every channel of every rung. A 256-entry table of the old and the new
-    /// result, compared: if the hoisting moved a shift or a replicate count by one, one of these
-    /// 3072 comparisons fails.
+    /// Every byte value meets every channel of every rung, old result against new: if the hoisting
+    /// moved a shift or a replicate count by one, one of these 3072 comparisons fails.
     func testHoistedLoopIsByteIdenticalForEveryByteValue() {
         let rungs = [QualityBudget.fiveSixFive, QualityBudget.sixSixSix,
                      QualityBudget.fiveFiveFive, QualityBudget.fourFourFour]
@@ -137,15 +138,23 @@ final class QuantiseTests: XCTestCase {
         var lengths = Array(0...64)
         for _ in 0..<64 { lengths.append(Int(next() % 3000)) }
 
-        for bpp in [3, 4, 5, 8] {
+        // `bpp < 3` returns the buffer untouched, so it belongs in the sweep too: it is the branch
+        // that must never start quantising. 3 and 4 are the shipping strides, 5 and 8 the generic one.
+        for bpp in [-1, 0, 1, 2, 3, 4, 5, 8] {
             for n in lengths {
                 var px = [UInt8](repeating: 0, count: n)
                 for i in 0..<n { px[i] = UInt8(truncatingIfNeeded: next()) }
+                let control = px
                 for bits in rungs {
                     let want = referenceQuantise(px, bits: bits, bytesPerPixel: bpp)
                     let got = ScreenWriter.quantise(px, bits: bits, bytesPerPixel: bpp)
                     XCTAssertEqual(got, want, "bpp \(bpp) n \(n) \(bits.label)")
                     XCTAssertEqual(got.count, n, "the pixel count never changes")
+                    // `quantise` is idempotent per rung, so a pointer loop that wrote through to the
+                    // caller's buffer would still agree with the oracle on the next rung: compare
+                    // the input against a copy taken before the call, so in-place mutation is a
+                    // failure instead of an invisible coincidence.
+                    XCTAssertEqual(px, control, "the caller's buffer must not be written in place")
                     if bpp == 4 {
                         for i in stride(from: 3, to: n, by: 4) {
                             XCTAssertEqual(got[i], px[i], "alpha at \(i), n \(n)")
