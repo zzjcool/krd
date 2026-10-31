@@ -1,6 +1,7 @@
 import XCTest
 import ScreenCaptureKit
 @testable import krd
+import krdcore
 
 /// `wall` is how the screen is meant to be called, so the binary answers to that name.
 ///
@@ -273,6 +274,29 @@ final class StickyArgumentTests: XCTestCase {
         let again = try options(Desk.wallArguments(at: nil, sticky: sticky))
         XCTAssertEqual(again.placeholders, false)
         XCTAssertTrue(again.qualityAuto)
+    }
+
+    /// An eager 80 came back guarded across a wall -> mirror hand-over: `--quality 80` is the bit
+    /// depth and cannot spell the other half of the same `QualityBudget` (issue #87).
+    func testTheEagerHalfOfQualitySurvivesTheHandOver() throws {
+        let typed = try options(["--quality", "80", "--eager"])
+        XCTAssertTrue(typed.quality.eager, "--eager is the menu's second slider as a flag")
+        let sticky = Desk.stickyArguments(typed)
+        XCTAssertEqual(sticky, ["--quality", "80", "--eager"])
+        let again = try options(Desk.wallArguments(at: nil, sticky: sticky))
+        XCTAssertEqual(again.quality.value, 80)
+        XCTAssertTrue(again.quality.eager, "an eager 80 has to stay eager across a hand-over")
+        // Guarded is the default, so an untyped knob still hands over nothing extra.
+        XCTAssertEqual(Desk.stickyArguments(try options(["--quality", "80"])), ["--quality", "80"])
+        // …and the colour pin the menu sets is carried as the number it pinned.
+        // A 70 made *guarded* is an override of the rung's own table, so it needs the other flag.
+        let guarded = try options(["--quality", "70", "--no-eager"])
+        XCTAssertFalse(guarded.quality.eager)
+        XCTAssertEqual(Desk.stickyArguments(guarded), ["--quality", "70", "--no-eager"])
+        var held = try options(["--quality", "auto"])
+        held.qualityHeld = true
+        held.quality = QualityBudget(80)
+        XCTAssertEqual(Desk.stickyArguments(held), ["--quality", "80"])
     }
 
     func testOnePageFlagsAreNotCarried() throws {

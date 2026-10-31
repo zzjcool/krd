@@ -43,6 +43,15 @@ struct ChromeGeometry: Equatable {
 
     var chromeTop: Int { imageRows }
 
+    /// Whether a panel can be **drawn** in this geometry: the bar alone is enough furniture for one.
+    ///
+    /// The `--dev` status line and the panels used to share `devStatus`, and a handed-over mirror
+    /// runs `--bar` with no `--dev` -- so `[ ≡ ]` opened a panel the drawer skipped while
+    /// `panelRect` still claimed its rows, and the menu was invisible on exactly the page it was
+    /// built for (issue #87). One predicate, read by the drawer *and* by `panelRect`, so the rows a
+    /// click thinks are a panel and the rows a panel is painted in cannot disagree.
+    var panelsDrawable: Bool { barRow != nil || devStatus }
+
     /// Rows a panel's box has inside its two borders: what `drawPanel` writes into, and what the
     /// wheel's clamp is measured against. The box deliberately stops above the pane's final row
     /// (writing its last cell arms the terminal's pending-wrap, see the file's invariant 3), so the
@@ -221,11 +230,11 @@ struct ChromeMetrics {
     /// incompressible -- the second half of `--quality` (`QualityBudget.eager`), which the menu's
     /// second slider moves on its own.
     var qualityEager = false
-    /// Whether `--quality auto`'s governor still owns colour and frame rate. A click on the menu
-    /// pins them (that is exactly what `--quality <n>` already means), and this is what the menu's
-    /// `pinned` note reads: a number that walks back by itself after the click is the worst of the
-    /// options (issue #87).
-    var qualityGoverned = false
+    /// The axes a click has pinned (issue #87): the value column says `pinned` and no governor
+    /// takes it back. One set, because the two halves of `--quality` and the frame rate pin on the
+    /// same click and the menu has to say which of its three rows is the user's now -- the bug was
+    /// a slider whose value walked back by itself.
+    var pinned: Set<ChromeAxis> = []
     /// Tiles the encoder is currently quantising and the tiles it is sending raw (#53/#59).
     var quantisedTiles = 0
     var skippedTiles = 0
@@ -324,13 +333,16 @@ enum ChromeAxis: String, CaseIterable {
         }
     }
 
-    /// What the value column says next to the track.
+    /// What the value column says next to the track. `pinned` is part of the value, not a note
+    /// three rows down: the reader has to see that the governor no longer owns this number at the
+    /// number itself, which is where they looked when it walked back (issue #87).
     func value(_ m: ChromeMetrics) -> String {
+        let held = m.pinned.contains(self) ? " · pinned" : ""
         switch self {
-        case .colour: return "\(m.qualityLabel) (\(m.quality))"
-        case .quality: return m.qualityEager ? "eager — quantise every tile"
-                                             : "guarded — only what will not compress"
-        case .fps: return "\(m.fpsTarget) fps"
+        case .colour: return "\(m.qualityLabel) (\(m.quality))\(held)"
+        case .quality: return (m.qualityEager ? "eager — quantise every tile"
+                                             : "guarded — only what will not compress") + held
+        case .fps: return "\(m.fpsTarget) fps\(held)"
         }
     }
 
@@ -440,12 +452,14 @@ final class Chrome {
                                  imageCols: min(imageCols, cols), statusRow: pictureRows,
                                  panelTop: pictureRows + 1, panelHeight: 0,
                                  barRow: bar ? 0 : nil, devStatus: dev)
-        guard let panel else { return geo }
+        guard let panel, geo.panelsDrawable else { return geo }
         // Desk already took these rows out of the picture before fitting it, so this is a
         // bookkeeping check: clamp instead of floating a panel over the tiles.
         let room = max(0, rows - 1 - pictureRows)
         geo.panelHeight = min(panel.height, room)
-        geo.panelTop = min(pictureRows + 1, rows - 1)
+        // With no `--dev` there is no status line either, so the box starts on the row the status
+        // line would have taken instead of leaving a blank one between picture and panel.
+        geo.panelTop = min(dev ? pictureRows + 1 : pictureRows, rows - 1)
         return geo
     }
 
@@ -462,7 +476,9 @@ final class Chrome {
     static func pictureRows(paneRows: Int, bar: Bool, panel: ChromePanel?, chrome: Bool) -> Int {
         let barRows = bar ? 1 : 0
         var rows = max(1, paneRows - barRows)
-        guard chrome, rows > 4 else { return rows }
+        // The same predicate `ChromeGeometry.panelsDrawable` uses: the bar alone can open a panel,
+        // and a panel whose rows the picture never gave up would be drawn over the tiles.
+        guard chrome || bar, rows > 4 else { return rows }
         let panelRows = panel?.height ?? 0
         // What the panel would get with a one-row picture: -1 picture, -1 status line.
         let forPanel = min(panelRows, rows - 2)
@@ -483,9 +499,11 @@ final class Chrome {
         }
         if geometry.devStatus {
             drawStatus(geometry: geometry, m: m, state: state)
-            if let panel = state.panel {
-                drawPanel(panel, geometry: geometry, m: m, requested: state.panelOffset)
-            }
+        }
+        // `panelsDrawable`, not `devStatus`: a mirror handed over as `--bar` (no `--dev`) still has
+        // `[ ≡ ]`, and a click that opens a panel nothing paints is the blocker of issue #87.
+        if geometry.panelsDrawable, let panel = state.panel {
+            drawPanel(panel, geometry: geometry, m: m, requested: state.panelOffset)
         }
         return render(from: min(geometry.chromeTop, geometry.barRow ?? Int.max))
     }
@@ -588,7 +606,9 @@ final class Chrome {
     static func panelRect(_ geometry: ChromeGeometry, row: Int, col: Int) -> Bool {
         let y = row - 1
         guard col >= 1, col <= geometry.cols, row >= 1, row <= geometry.rows else { return false }
-        return geometry.panelHeight > 0
+        // The drawer's own predicate, not a second opinion: a rectangle over rows no panel is
+        // painted in is how a handed-over mirror swallowed clicks on a strip of its own picture.
+        return geometry.panelsDrawable && geometry.panelHeight > 0
             && y >= geometry.panelTop && y < geometry.panelTop + geometry.panelHeight
     }
 
@@ -946,10 +966,9 @@ final class Chrome {
                 // Says the two things a reader cannot guess: how to close it, and what `pinned`
                 // means -- a slider whose value walks back by itself is the worst of the options,
                 // so a click pins the axis it touches (issue #87).
-                let note = m.qualityGoverned
-                    ? "click a tick to set it · a click pins the axis (no governor) · [ ≡ ] closes"
-                    : "click a tick to set it · pinned: no governor takes it back · [ ≡ ] closes"
-                text(2, y + 1 + r, DisplayWidth.truncate(note, to: max(0, w - 4)), .dim)
+                text(2, y + 1 + r,
+                     DisplayWidth.truncate("a click sets it and pins the axis (no governor) · "
+                                           + "[ ≡ ] closes", to: max(0, w - 4)), .dim)
             }
         case .devices:
             if m.devices.isEmpty, let r = slot(0) {

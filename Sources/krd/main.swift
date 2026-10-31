@@ -48,6 +48,18 @@ struct Options {
     /// Whether `--quality` (or `--no-quantise`) was typed. The selftest's sha256 is a byte contract,
     /// so naming a lossy rung next to it is a usage error -- the default must keep working.
     var qualityPinned = false
+    /// The menu's colour or quality track was clicked (issue #87): the *encoder* is the user's now,
+    /// so the governor's quality half stands down while its frame-rate half keeps running.
+    ///
+    /// A separate flag from `qualityPinned` on purpose: that one is also true for `--quality auto`,
+    /// where the governor is exactly what was asked for. And a colour click must **not** clear
+    /// `qualityAuto` -- doing that also drops `fpsTarget` from the governor's rate to the capture's
+    /// and turns the frame gate off, i.e. a colour click silently changed the frame rate.
+    var qualityHeld = false
+    /// `--eager` / `--no-eager`: the second half of `--quality` (quantise every tile, or only the ones
+    /// that proved incompressible). Applied after the whole command line is read, so the flag means
+    /// the same thing wherever it sits next to `--quality`.
+    var eagerOverride: Bool? = nil
     /// How much colour the **landing screen's** pictures may lose (`--wall-quality`, 0...100, default
     /// 70 = 5-5-5). Separate from `--quality` on purpose (issue #88): the mirror's number answers a
     /// per-frame question and its ladder moves it as the pipe falls behind, while the wall paints once
@@ -238,6 +250,10 @@ func usage() -> String {
                           Give a number to pin it (--quality 80 is then exactly the old behaviour)
       --no-quantise       same as --quality 100 (pinned, no ladder). It is the MIRROR's lossless:
                           the wall's is --wall-quality 100, and --no-quantise does not set it
+      --eager / --no-eager
+                          the other half of --quality: quantise every tile, or (the default) only
+                          the ones that proved incompressible. The menu's quality slider sets it,
+                          and a hand-over carries it (an eager 80 used to come back guarded)
       --wall-quality <0-100|auto>
                           how much colour the landing screen's pictures may lose (issue #88): 100
                           is the old lossless wall, 70 (the default) is 5-5-5 and 50 is 4-4-4, on
@@ -542,6 +558,11 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
         case "--no-quantise": options.quality = QualityBudget(100); options.qualityPinned = true
+        // The menu's second slider, as a flag: an eager rung pinned on the wall has to survive the
+        // hand-over into the mirror (issue #87), and `stickyArguments` can only carry what `argv`
+        // can spell. Order-independent: applied once the line is read (`eagerOverride`).
+        case "--eager": options.eagerOverride = true
+        case "--no-eager": options.eagerOverride = false
         case "--quality":
             let parsed = try parseQualitySpec(value("--quality", args, &i))
             options.quality = parsed.budget
@@ -666,6 +687,9 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
         }
         i += 1
     }
+    if let eager = options.eagerOverride {
+        options.quality = QualityBudget(options.quality.value, eager: eager)
+    }
     return options
 }
 
@@ -761,6 +785,9 @@ final class Desk {
     /// the same way (`governed` in `handleFrame`), or the slider reads as doing nothing on a link that
     /// delivers faster than the capture (issue #87).
     private var fpsPinned = false
+    /// Which of the menu's three axes a click has pinned (issue #87), so the panel can say
+    /// `pinned` next to the value it is holding and the drawer and the governor agree about it.
+    private var pinnedAxes: Set<ChromeAxis> = []
     /// Frames and late frames since the last stats tick, for the `late` column.
     private var framesSinceTick = 0
     private var lateSinceTick = 0
@@ -2223,10 +2250,23 @@ final class Desk {
         if options.scalePinned {
             arguments += ["--scale", String(format: "%g", options.scale)]
         }
-        if options.qualityAuto {
+        if options.qualityHeld {
+            // The colour slider is a pinned number: it has to travel as one, or the next process is
+            // `--quality auto` again and the governor takes the value back on the wall
+            // (`qualityHeld` is why the governor's quality half is off in the first place).
+            arguments += ["--quality", String(options.quality.value)]
+        } else if options.qualityAuto {
             arguments += ["--quality", "auto"]
         } else if options.qualityPinned {
             arguments += ["--quality", String(options.quality.value)]
+        }
+        // The *other* half of `--quality` (issue #87): a decision about this link too, and the one
+        // bit `--quality <n>` cannot spell -- an eager-80 came back guarded across a wall -> mirror
+        // hand-over. Only an *override* of the rung's own table travels: `QualityBudget(70)` is
+        // eager by itself, so `--quality 70` does not also need `--eager`, while a 70 the menu made
+        // guarded does need `--no-eager`.
+        if options.quality.eager != QualityBudget(options.quality.value).eager {
+            arguments.append(options.quality.eager ? "--eager" : "--no-eager")
         }
         // The wall's own rung travels for the same reason (issue #88): it is a decision about *this
         // pane's* link, typed once, and a click into a picture and back is a new process. `auto`
@@ -2985,13 +3025,28 @@ final class Desk {
     /// carrying them across would make the first frames after a step compare apples to oranges.
     private func applyQualityChange(_ change: QualityGovernor.Change) {
         guard options.qualityAuto else { return }
-        writer.quality = QualityBudget(change.to.quality)
-        effectiveFps = change.to.fps
-        // A new rung owes a frame at once (the picture should not wait a period to get the better
-        // rate), and carries its deadline from there.
-        frameGate = FrameGate(fps: change.to.fps)
+        // One governor, two halves, two pins (issue #87). A pinned half is the user's and the other
+        // half keeps adapting: this is what stops a late rung overwriting a frame rate the slider
+        // had just set (`effectiveFps` *and* `frameGate` wholesale), which was the failure the
+        // issue called worst -- the slider walked back.
+        let takesQuality = !options.qualityHeld
+        let takesFps = !fpsPinned
+        guard takesQuality || takesFps else { return }
+        if takesQuality {
+            // The eager half is not the ladder's: a rung names a bit depth, not how eagerly it is
+            // spent, so the user's `guarded`/`eager` choice rides through a governor step.
+            writer.quality = QualityBudget(change.to.quality, eager: options.quality.eager)
+            options.quality = writer.quality
+        }
+        if takesFps {
+            effectiveFps = change.to.fps
+            // A new rung owes a frame at once (the picture should not wait a period to get the
+            // better rate), and carries its deadline from there.
+            frameGate = FrameGate(fps: change.to.fps)
+        }
         chromeDirty = true
-        Log.write("krd: \(change.line)\n")
+        Log.write("krd: \(change.line)" + (takesFps ? "" : " (frame rate pinned by the menu)")
+                  + (takesQuality ? "" : " (quality pinned by the menu)") + "\n")
     }
 
     /// Step the capture resolution in place: the same `updateSource` a pan uses (#57), so the stream
@@ -3915,9 +3970,12 @@ final class Desk {
         // the governor's rung under `--quality auto`, `--fps` otherwise.
         let focusedNow = isFocused
         m.focused = focusedNow
-        m.fpsTarget = focusedNow
-            ? (options.qualityAuto ? effectiveFps : options.fps)
-            : min(options.qualityAuto ? effectiveFps : options.fps, options.unfocusedFps)
+        // A pinned frame rate is the user's number (issue #87), so `--quality auto`'s rung is not
+        // consulted for it; a focus cap still multiplies it down, because that is a deliberate
+        // throttle and the row has to say what the picture is really being held at.
+        let menuTarget = fpsPinned ? options.fps
+                                   : (options.qualityAuto ? effectiveFps : options.fps)
+        m.fpsTarget = focusedNow ? menuTarget : min(menuTarget, options.unfocusedFps)
         // Rates come from `sampleRates()`, which owns the one definition of what `fps`, `tiles/s`,
         // `MB/s` and the two starvation rates mean (issue #52).
         m.fps = lastRates.fps
@@ -3935,7 +3993,7 @@ final class Desk {
         // The menu's three tracks read these (issue #87): which half of `--quality` is set, and
         // whether a governor still owns the axis -- a slider whose value walks back needs to say so.
         m.qualityEager = writer.quality.eager
-        m.qualityGoverned = options.qualityAuto
+        m.pinned = pinnedAxes
         m.quantisedTiles = writer.quantisedTiles
         m.skippedTiles = writer.skippedTiles
         m.tilesPerSec = Int(lastRates.tilesPerSec.rounded())
@@ -4226,7 +4284,19 @@ final class Desk {
             // A notch is not a click, even when it lands on a segment: a two-finger scroll over the
             // bar used to take whatever the segment does, and one of them shrinks the mirror back
             // into the wall (#118).
-            guard wheel == 0 else { return }
+            //
+            // …but a *panel* row that happens to carry a control must not swallow the wheel either:
+            // the menu's tracks are the first panel cells with `hit` ids, and a notch over a tick used
+            // to hit this guard and do nothing -- the fourth row of a four-row panel was unreachable
+            // at the sizes where the box scrolls (issue #87, and #118's "the wheel reaches the rest").
+            guard wheel == 0 else {
+                if ChromeAxis.parse(id) != nil {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.scrollPanel(by: wheel < 0 ? -1 : 1)
+                    }
+                }
+                return
+            }
             // The bar's one control: a click on `[ - ]` (or on the traffic lights, which is what a
             // red one does) shrinks this window back into the wall. Same path as `Ctrl-\`, so the
             // two ways out cannot drift.
@@ -4285,29 +4355,37 @@ final class Desk {
     /// The values are clamped by construction: `ChromeAxis` owns the rungs, so a step is always one
     /// of `QualityBudget`'s documented bit depths or inside `--fps`'s 1…20.
     private func applyRung(_ axis: ChromeAxis, _ step: Int) {
+        pinnedAxes.insert(axis)
         switch axis {
         case .colour:
+            // The frame rate is *not* touched (issue #87): clearing `qualityAuto` here used to flip
+            // `fpsTarget` from the governor's rate to the capture's and turn the frame gate off, so
+            // a colour click silently changed the frame rate. `qualityHeld` pins this half and the
+            // governor's frame-rate half keeps adapting.
             options.quality = QualityBudget(ChromeAxis.colourValue(step: step),
                                             eager: options.quality.eager)
             writer.quality = options.quality
             options.qualityPinned = true
-            options.qualityAuto = false
+            options.qualityHeld = true
             Log.write("krd: menu colour \(step) -> q\(options.quality.value) \(options.quality.label)"
                       + "\(options.quality.eager ? " eager" : "") (pinned: no governor)\n")
         case .quality:
             options.quality = QualityBudget(options.quality.value, eager: step == 1)
             writer.quality = options.quality
             options.qualityPinned = true
-            options.qualityAuto = false
+            options.qualityHeld = true
             Log.write("krd: menu quality \(step) -> q\(options.quality.value)"
                       + "\(options.quality.eager ? " eager" : " guarded") (pinned: no governor)\n")
         case .fps:
+            // Pin the rate the same way: the governor keeps its frame-rate half *off* for as long as
+            // this is set, or the next late rung overwrites `effectiveFps` and `frameGate` wholesale
+            // and the slider walks back (issue #87).
             let fps = ChromeAxis.fpsValue(step: step)
             options.fps = fps
             effectiveFps = fps
             frameGate = FrameGate(fps: fps)
             fpsPinned = true
-            Log.write("krd: menu fps \(step) -> \(fps) fps (held by the frame gate)\n")
+            Log.write("krd: menu fps \(step) -> \(fps) fps (held by the frame gate, no governor)\n")
         }
         // Repaint now, not on the next 1 Hz tick: a slider that answers a second late reads as a
         // click that missed.
