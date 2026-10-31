@@ -20,10 +20,13 @@ speed is. The blind spots that matter are the ones the current harness cannot se
 
 1. **Nothing measures the write path.** `flush()` blocks in `write(2)` when the terminal is behind.
    The stats line reports `write=<ms>` but only as a 1 Hz average of a number that spikes.
-2. **Dirty detection and the whole-frame dedupe are unmeasured.** `TileGrid.dirty` memcmps the
-   whole frame per grid pass (10.1 MB at `f=24`, 13.5 MB at `f=32`); `Capturer` does one `Array`
-   equality over the same buffer before that. Both run on every delivered frame, including frames
-   that end up emitting nothing.
+2. **Dirty detection and the whole-frame dedupe are unmeasured.** `TileGrid.diff` memcmps the
+   whole frame once per delivered frame (10.1 MB at `f=24`, 13.5 MB at `f=32`) and answers both
+   "did anything change" and "which tiles" from that one pass (issue #95 merged the two; before it,
+   `Capturer` did one `Array` equality over the same buffer and `TileGrid.dirty` read it again).
+   It runs on every delivered frame, including frames that end up emitting nothing — `bench/budget.json`
+   still has no entry for it, so a regression here is invisible to CI. `bench/frame-scan-probe.swift`
+   measures it against the pre-#95 shape; the `none` case of `krd --bench` is the same number.
 3. **No distribution.** Best-of-6 hides the p99 that users feel as a stutter.
 4. **No end-to-end number.** "Frame captured at T, last byte out at T+n" does not exist anywhere.
 5. **No machine-readable output**, so "did this PR regress?" is answered by reading a table.
@@ -138,7 +141,8 @@ cannot look the same:
 ### L1 — pipeline (`krd --bench [--json]`)
 
 `Bench.runStages` walks every case for `--rounds` measured frames plus 3 warm-up frames, and per frame
-records: the whole-frame dedupe, `TileGrid.dirty`, the serial reference (once per case, outside the
+records: the one `TileGrid.diff` scan (timed as `dedupe`; its `dirty` tiles come out of the same pass,
+so the `dirty` column is 0 — #95), the serial reference (once per case, outside the
 timed frames — putting it inside made `total` include two compressions), the live parallel encode,
 and the escape assembly with a per-tile timer that only exists when a bench asks for it.
 
@@ -341,10 +345,11 @@ calibration, not a CI check. `--selftest`'s moving bar exists for exactly that.
 **ScreenCaptureKit cost.** Only visible in a live `--debug` run as `cap=` and `pipe=`. Anything finer
 needs `powermetrics`, which needs root, which this project does not ask for.
 
-**The whole-frame dedupe on a static screen in production.** It is measured here as a 10 MB memcmp
-(6.8 ms), which is the honest cost of a *delivered* frame; in production ScreenCaptureKit usually
-does not deliver one at all, so the real number is lower. The benchmark deliberately does not model
-that discount.
+**The one frame scan on a static screen in production.** It is measured here as `dedupe` — one
+`memcmp` per row of the frame plus the tile columns of the rows that differ, i.e. 0.22 ms at
+2329x1452 (it was an `Array` equality at 4.1 ms before #95) — which is the honest cost of a
+*delivered* frame; in production ScreenCaptureKit usually does not deliver one at all, so the real
+number is lower. The benchmark deliberately does not model that discount.
 
 ## 9. Status
 

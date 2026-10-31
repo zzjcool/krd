@@ -7,7 +7,8 @@ import krdcore
 /// this file obeys so its output stays comparable:
 ///
 ///  - one clock (`DispatchTime`, monotonic), never `Date`
-///  - stages are timed separately: dedupe, dirty, extract, zlib, base64, assembly
+///  - stages are timed separately: dedupe (the one scan that also yields the dirty tiles, #95),
+///    dirty (a read of that scan's result), extract, zlib, base64, assembly
 ///  - every result carries its configuration (pane, cell, tile, format, machine, cores)
 ///  - distributions, not best-of: p50/p95/p99 over `--rounds` frames
 ///  - warm-up rounds are discarded, so first-touch page faults and `LevelPolicy` learning
@@ -402,15 +403,17 @@ enum Bench {
                 c.patch(&px, layout, round)
                 c.stamp(&px, layout, round)
 
-                // The whole-frame dedupe `Capturer` runs before anything else. On a static
-                // screen this is the only work done per delivered frame.
+                // The one scan the pipeline runs on every delivered frame (#95): it answers *did
+                // anything change* and *which tiles* in the same pass over the pixels. On a static
+                // screen this is the entire cost of the frame, and it is what the `dedupe` column
+                // measures; the `dirty` column is 0 by construction now (same pass, no second read).
                 let dedupeStart = benchNowMs()
-                let identical = previous == px
+                let scan = TileGrid.diff(previous: previous, current: px, grid: layout)
                 let dedupe = benchNowMs() - dedupeStart
                 let totalStart = benchNowMs()
 
                 let dirtyStart = benchNowMs()
-                let dirty: [Int] = identical ? [] : TileGrid.dirty(previous: previous, current: px, grid: layout)
+                let dirty: [Int] = scan.dirty
                 let dirtyElapsed = benchNowMs() - dirtyStart
                 previous = px
                 lastDirty = dirty

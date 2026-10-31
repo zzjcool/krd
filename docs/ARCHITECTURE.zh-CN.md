@@ -180,11 +180,13 @@ SCStream 回调（采集队列）
   └─ Capturer.stream(_:didOutputSampleBuffer:of:)
        ├─ sample attachments：status=complete|idle|blank…  → idle / bad / 真正的帧
        ├─ CVPixelBuffer → vImagePermuteChannels_ARGB8888(BGRA → RGBA)
-       └─ previous == rgba ? 丢弃 : 保留   ← 静止桌面在这里就是零成本
+       └─ 每一帧都往下传（上面的双缓冲交换保证这一步不需要拷贝）
           └─ Desk.handleFrame(pixels:width:height:)          （同一队列）
                ├─ 尺寸和布局不符 → 记一次日志后丢弃
-               ├─ dirty = TileGrid.dirty(previousFrame, pixels, grid)
-               │          （--full-frame 或帧尺寸变化时 = 全部瓦片）
+               ├─ scan = TileGrid.diff(previousFrame, pixels, grid)
+               │          （一次扫描同时给出「和上一帧是否逐字节相同」和脏瓦片；
+               │           --full-frame 或帧尺寸变化时 = 全部瓦片）
+               ├─ scan.identical → 记为 skipped，一个字节都不发，直接返回  ← 静止桌面零成本
                ├─ writer.beginFrame()   （清空每帧计数）
                ├─ dirty 为空 → writer.nudge() 后返回
                ├─ 在脏瓦片上 concurrentPerform（压缩无状态）：
@@ -193,9 +195,11 @@ SCStream 回调（采集队列）
                     CUP → base64 分块 → a=t 传输 → a=p 放置 … writer.endFrame()（?2026l + flush）
 ```
 
-两级去重是刻意保留的：采集侧比较整帧（`previous == rgba`，Array 相等，底层一次 memcmp）干掉真正
-静止的情况；瓦片侧逐块比较，让一个小变化只花一个小更新的钱。也正因为采集侧已经拦住了静止画面，
-`dirty.isEmpty` 很少发生 —— 所以 `nudge()`（见 §7）不是每帧开销。
+去重只有**一级**，不是两级（issue #95）。`TileGrid.diff` 只扫一遍：每行一次 `memcmp`，遇到不同的行
+再按瓦片列细分，同一遍扫描同时回答「和上一帧是否逐字节相同」（真正静止的情况，一个字节都不发）和
+「哪些瓦片变了」（小变化只花小更新的钱）。以前这是对同一份 10 MB 的两次读：第一次是 `Array` 相等
+（对 `UInt8` 是逐元素比较，2329x1452 上 4.1 ms），第二次是逐瓦片 `memcmp`；两个答案是否一致全靠巧合。
+现在每帧 0.22 ms，包括那些什么都不发的帧。
 
 尺寸和当前布局不符的帧会被丢掉并记一条日志
 （`krd: dropping frames: got WxH, layout expects WxH`）。这条日志意味着 resize 和流撞了一下，
