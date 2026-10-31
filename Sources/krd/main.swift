@@ -1918,6 +1918,17 @@ final class Desk {
             return
         }
         let layout = wallLayout(state, pane: pane)
+        // The terminal's own pointer follows the hover target's *class* (#202): a hand over anything
+        // that enters, the terminal's own shape over the furniture. Set here rather than in
+        // `paintWall` because this is the funnel every paint the desk starts goes through — a direct
+        // paint, a text-only one, and the capture path's when it lands — and the wish has to be on the
+        // writer before the write that carries the frame. (The capture path's paint calls `paintWall`
+        // from its main-actor hop instead of re-entering here, and needs no line of its own: the wish it
+        // reads is the one the pointer last set, and a shape goes out only when it differs from the
+        // wire.)
+        // `ScreenWriter.writeChrome` prepends the shape to that same write, so a class change costs
+        // 14 B inside the repaint and not a second `write`.
+        writer.pointerShape = state.pointer.shape
         // The layout clamps both offsets to what this pane and this model can show, so its answer is
         // the page the reader is about to see. Write it back: `⤢` changes the page size without
         // touching the model or the pane, and `refreshWall` returns before its own clamp while those
@@ -2462,11 +2473,13 @@ final class Desk {
         // answerable with what was asked for plus what the mirror said on its way back.
         Log.write("krd: handing the pane to krd \(arguments.joined(separator: " "))\n")
         // Before the `exec`, not in a teardown: `endSession` is never called here (the mirror wants
-        // the alternate screen we are already on), so this is the last chance to give back a mode the
-        // terminal had off. The next process probes 2027 itself and would otherwise read *our*
-        // `?2027h` back as the terminal's own state, and turn it off on the way out of a pane that
-        // never had it off.
-        writer.restoreGraphemeMode()
+        // the alternate screen we are already on), so this is the last chance to give back what this
+        // session changed about the terminal. 2027 first: the next process probes it itself and would
+        // otherwise read *our* `?2027h` back as the terminal's own state, and turn it off on the way
+        // out of a pane that never had it off. And the pointer shape (#202): the mirror paints a
+        // desktop, never asks for a shape, and would leave the hand we asked for to the shell behind
+        // *it*. One call for both, so a third mode cannot be handed over "by memory".
+        writer.restoreSessionModes()
         Self.execSelf(arguments)
         // Only on failure to exec (no image, no permission): the wall is the thing that can still be
         // shown, so it comes back with the reason in its footer.
@@ -3789,6 +3802,11 @@ final class Desk {
             // moment the terminal has a fresh answer to give, and it is where a font change lands.
             remeasureWallPane()
             wallCanvas?.invalidate()
+            // The full repaint below re-asks the pointer shape if the pointer is still over something,
+            // so forgetting here costs 14 B on a resize and covers the one thing the recon did not
+            // measure: whether a terminal drops the shape on `SIGWINCH`. If it does not, the shape is
+            // already on the wire and nothing is emitted.
+            writer.forgetPointerShape()
             // Drop every placement, not just the text. A picture is an object the terminal owns and
             // keeps attached to the cell it was placed on; after a resize a terminal may keep the
             // old one there, so the wall would show the old picture under the new one ("缩放的时候
@@ -4388,6 +4406,21 @@ final class Desk {
         }
         let active = reader.start()
         input = reader
+        // `reader.start()` has *just* turned the mouse modes on, and that toggle is one of the things
+        // both terminals reset the pointer shape with (measured in the #202 recon) — so whatever krd
+        // thought the pane was holding is gone. Order is the point, and it is why this is here and not
+        // above the `reader.start()`: forgetting first and asking second would have the ask wiped by
+        // the toggle a line later. The paint that follows is what asks again, and it is needed because
+        // nothing else would: after a failed `exec`, `resumeWall()` paints the wall with the pointer
+        // still over the card that was clicked, and `wallHover` returns early when the target did not
+        // change, so no report is coming to correct it. Usually 0 B — the frame is already on screen,
+        // so the canvas diff is empty and only a 14 B shape can be new.
+        if wallMode {
+            writer.forgetPointerShape()
+            // Only when there is something to say: with the terminal's own pointer as the wish, the
+            // forget is the whole repair and a paint would emit nothing anyway.
+            if writer.pointerShape != .default { drawWall(textOnly: true) }
+        }
         if options.debug {
             Log.write("krd: input active=\(active)\n")
             Log.write("krd: accessibility trusted=\(AXIsProcessTrusted()) (clicks/keys need it; "

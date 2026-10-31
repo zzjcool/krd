@@ -197,6 +197,11 @@ public final class ScreenWriter {
         // a terminal that lays flags out as two letters (Rex: 2027 reset) is told once, before the
         // first cell is drawn, and the arm flag below is what lets the teardown know it was ours.
         graphemeModeArmed = graphemeClustering == .enableAndReset
+        // The heal below resets the mouse modes unconditionally, and the recon measured that the
+        // mouse-mode toggles are one of the things both terminals reset the *pointer shape* with —
+        // so whatever the previous session in this process left is gone. Forget it here, or the first
+        // hover of the new session would sit inside the same item class and emit nothing (#202).
+        forgetPointerShape()
         write(healSequence + "\u{1B}[?1049h" + (graphemeModeArmed ? Self.graphemeEnable : "")
               + "\u{1B}[2J\u{1B}[H\u{1B}[?25l")
     }
@@ -241,6 +246,90 @@ public final class ScreenWriter {
         guard graphemeModeArmed else { return }
         graphemeModeArmed = false
         write(Self.graphemeReset)
+    }
+
+    // MARK: pointer shape (OSC 22, issue #202)
+
+    /// The shape the *wall* wants the terminal's pointer to take — the wish, set by `Desk.drawWall`
+    /// on the main queue before it paints. It is written only when it differs from what the terminal
+    /// is already holding (`pointerShapeOnWire`), and only ever by `writeChrome`, so it rides the
+    /// frame's own `write(2)` instead of adding one (#197).
+    ///
+    /// Not static, unlike `focusReporting`: this is a conversation between one wall and one terminal,
+    /// and a second `ScreenWriter` in a test must not inherit it.
+    public var pointerShape: PointerShape {
+        get { writeLock.lock(); defer { writeLock.unlock() }; return wantedPointerShape }
+        set { writeLock.lock(); defer { writeLock.unlock() }; wantedPointerShape = newValue }
+    }
+
+    /// What krd last put on the wire. The reset in `restorePointerShape` is armed by this and by
+    /// nothing else: there is no `DECRQM` for the shape, so "what was there before" cannot be asked,
+    /// and a session that never asked for a hand must not write 14 B of reset into a byte contract
+    /// (the golden dump, `--selftest`'s sha256).
+    private var pointerShapeOnWire = PointerShape.default
+    private var wantedPointerShape = PointerShape.default
+
+    /// The wall is about to write its frame: hand the shape to the same write when it changed.
+    /// Returns the bytes to prepend (empty when the terminal already holds it).
+    private func pointerShapeBytesLocked() -> [UInt8] {
+        guard wantedPointerShape != pointerShapeOnWire else { return [] }
+        pointerShapeOnWire = wantedPointerShape
+        return Array(wantedPointerShape.sequence.utf8)
+    }
+
+    /// The terminal forgot the shape, so krd's book has to forget it too — **without writing
+    /// anything**. Two things reset it: the mouse-mode toggles (`InputReader.start()` calls
+    /// `writeInputModes(true)` after the wall's first paint, and `beginSession`'s heal resets them
+    /// unconditionally), and our own teardown. The *wish* survives, so the next paint asks again:
+    /// a hover that never moves again would otherwise never get its hand back.
+    public func forgetPointerShape() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        pointerShapeOnWire = .default
+    }
+
+    /// Every terminal mode this session changed and has not given back yet, in one call.
+    ///
+    /// One list, because a session has two ways out and only one of them can be `endSession`: the
+    /// other is `handOver`, which `exec`s the mirror into this same process image and deliberately
+    /// leaves the alternate screen entered, so the teardown never runs. A mode that only `endSession`
+    /// resets is therefore a mode the hand-over leaves behind — for a process that never asked for it,
+    /// and for the shell behind it (#193 for 2027, #202 for the pointer shape). `endSession` and
+    /// `Desk.handOver` both call *this*, so a mode added here is given back by both by construction,
+    /// which is the same rule `inputModes` follows for the mouse modes.
+    ///
+    /// Idempotent through and through: each half writes nothing when this session did not change the
+    /// mode, so a failed `exec` that falls through to `endSession` adds no second reset.
+    public func restoreSessionModes() {
+        restoreGraphemeMode()
+        restorePointerShape()
+    }
+
+    /// Give the pointer shape back: `ESC ] 22 ; default ST`, on every way out of a session that put
+    /// a hand on the pane.
+    ///
+    /// The same "leave it as we found it" rule as `restoreGraphemeMode`, with one difference that is
+    /// the whole reason it is armed by our own book rather than by a probe: there is **no DECRQM for
+    /// OSC 22**, so krd cannot ask what the pane had before it started. Idempotent, because the
+    /// session can end twice over the same bytes: `handOver` restores before `exec`, and a failed
+    /// `exec` falls through to `endSession` (`GraphemeSessionTests` pins the same pair for 2027).
+    ///
+    /// A pane left holding a hand pointer is a lie the shell behind us inherits: it would draw its
+    /// own prompt with the shape krd asked for and never gave back.
+    public func restorePointerShape() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard pointerShapeOnWire != .default else {
+            // Nothing of ours to take back. `wantedPointerShape` still goes home: after a teardown
+            // the wall it belonged to is gone, and a stale wish would be emitted by the next write
+            // that happens to flush (`endSession` itself writes two chunks).
+            wantedPointerShape = .default
+            return
+        }
+        pointerShapeOnWire = .default
+        wantedPointerShape = .default
+        append(PointerShape.default.sequence)
+        flushLocked()
     }
 
     /// Every DEC private **mouse** mode a session turns on, in the order it turns them on.
@@ -364,9 +453,10 @@ public final class ScreenWriter {
         writeLock.unlock()
         clear()
         // Before the alternate screen, so the shell behind us never draws a frame with 2027 off and
-        // then on: same write, reset first. `restoreGraphemeMode` is the same one way out, so the
-        // flag cannot be left saying "armed" after the mode is gone.
-        restoreGraphemeMode()
+        // then on, nor with a hand pointer it did not ask for: same write, reset first. Both modes go
+        // back through one call, which `handOver` also uses (a `exec`ed mirror is the other way out
+        // of a session, and `endSession` never runs there).
+        restoreSessionModes()
         write(Self.inputReset + "\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)
     }
@@ -1123,10 +1213,20 @@ public final class ScreenWriter {
 
     /// Writes TUI-layer text. Positioned escapes only: the caller guarantees no newline and no
     /// write above the picture (Chrome.swift), and this lock guarantees no split escape.
+    ///
+    /// The wall's paints come through here, and so does the terminal's pointer shape (#202): when the
+    /// shape the wall wants differs from the one on the wire, its sequence is prepended to *this*
+    /// write rather than sent as a second one. That is not an optimisation detail — a hover repaint
+    /// is 39-97 B and krd went to some trouble to make it one `write(2)` (#197); 14 B in front of the
+    /// same chunk keeps it one. It also means the shape can arrive on a paint that carries no cells
+    /// at all: a class change always changes what the wall draws *except* where the target has no
+    /// cells left to colour, and dropping the shape there would be a hand that never appears.
     public func writeChrome(_ bytes: [UInt8]) {
-        guard !bytes.isEmpty else { return }
         writeLock.lock()
         defer { writeLock.unlock() }
+        let shape = pointerShapeBytesLocked()
+        guard !shape.isEmpty || !bytes.isEmpty else { return }
+        out.append(contentsOf: shape)
         out.append(contentsOf: bytes)
         flushLocked()
     }
