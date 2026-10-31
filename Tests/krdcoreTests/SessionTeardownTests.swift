@@ -351,7 +351,43 @@ final class SessionTeardownTests: XCTestCase {
             """, file: file, line: line)
     }
 
-    // MARK: - 4. what a session that never enables the mouse still resets
+    // MARK: - 4. the enable list and the reset list are one list
+
+    /// The property issue #134 asks for by name: "add a unit test that the enable set and the reset
+    /// set are complementary".
+    ///
+    /// Both strings are derived from `ScreenWriter.mouseModes` (the reset is that list reversed), so
+    /// this test is the lock on the derivation, not on a particular mode: same mode set, opposite
+    /// polarity, and the reset is exactly the enable order backwards. A mode added to the list shows
+    /// up on both sides here; a mode added by hand to *one* string fails.
+    func testTheEnableSetAndTheResetSetAreComplementary() {
+        let enable = modeEvents(in: ScreenWriter.mouseEnable)
+        let reset = modeEvents(in: ScreenWriter.mouseReset)
+
+        XCTAssertEqual(enable.map { $0.mode }, ScreenWriter.mouseModes,
+                       "mouseEnable must carry exactly the documented list, in its order")
+        XCTAssertTrue(enable.allSatisfy { $0.on }, "every escape in mouseEnable must set its mode")
+        XCTAssertTrue(reset.allSatisfy { !$0.on }, "every escape in mouseReset must reset its mode")
+
+        XCTAssertEqual(Set(enable.map { $0.mode }), Set(reset.map { $0.mode }),
+                       "the same modes are enabled and reset; enable \(enable.map { $0.mode }), "
+                       + "reset \(reset.map { $0.mode })")
+        XCTAssertEqual(enable.map { $0.mode }, Array(reset.map { $0.mode }.reversed()),
+                       "one list, written forwards to enable and backwards to reset: a mode can no "
+                       + "longer be turned on without the same list turning it off")
+
+        // What is *in* the list is the contract, not a consequence of it. Everything above is
+        // derived from `mouseModes`, so deleting a mode keeps both sides complementary - and the
+        // four modes themselves are what PROTOCOL §7's table and issue #134's ownership table name.
+        // Pinned literally, so adding or removing a mode is a deliberate edit here *and* in the
+        // docs, never a silent drift in one of them.
+        XCTAssertEqual(ScreenWriter.mouseModes, [1003, 1002, 1006, 1016],
+                       "the mouse modes krd owns are exactly the four PROTOCOL §7 documents; a "
+                       + "fifth, or a missing one, has to change the doc table and the ownership "
+                       + "table with it")
+    }
+
+    // MARK: - 5. what a session that never enables the mouse still resets
 
     /// The other half of the invariant: a session that never turns the mouse on must not emit a
     /// single mouse-mode *enable*, and the modes it does touch are exactly the ones the ownership
