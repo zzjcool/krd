@@ -13,8 +13,9 @@ import XCTest
 /// is not evidence that the fixture was rewritten). The update run prints
 /// `input trace written: <path> (<n> lines)`.
 final class ParserTraceTests: XCTestCase {
-    /// The seven sequences from the issue: plain keys, kitty `CSI u` with modifiers and release, a
-    /// drag, a double click, the wheel, Ctrl-V, and an OSC 52 reply.
+    /// The sequences from the issue: plain keys, kitty `CSI u` with modifiers and release, a drag,
+    /// a double click, the wheel, Ctrl-V, and an OSC 52 reply -- plus, since: #109's terminal replies
+    /// and #110's two focus reports.
     private let feed: [String] = [
         "ab\r\t\u{7F}",
         "\u{1B}[?15u" + "\u{1B}[97;5u" + "\u{1B}[97;1:3u" + "\u{1B}[97;1:2u"
@@ -31,6 +32,10 @@ final class ParserTraceTests: XCTestCase {
         "\u{1B}_Gi=31;OK\u{1B}\\"
             + "\u{1B}_Gi=137,p=7;EINVAL: decompression failed\u{1B}\\"
             + "\u{1B}_Ghello\u{1B}\\",
+        // Issue #110: DECSET 1004's only two reports, in the order a terminal sends them when the
+        // pane loses focus and gets it back. A terminal that does not implement 1004 never sends
+        // them, and the trace below is then byte-identical to what it was before the feature.
+        "\u{1B}[O\u{1B}[I",
     ]
 
     private func fixtureURL() -> URL {

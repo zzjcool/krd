@@ -20,6 +20,12 @@ public enum Event: Equatable {
     case control(UInt8)
     /// An SGR mouse or wheel report, exactly as sent.
     case mouse(MouseReport)
+    /// DECSET 1004: `true` = the terminal gained focus (`CSI I`), `false` = it lost focus
+    /// (`CSI O`). Two plain 2-byte CSIs with no parameters, and the *only* way a terminal tells
+    /// krd about focus at all: one that does not implement 1004 never sends them, which is the
+    /// supported outcome (nothing changes for it). Not input — no keystroke is injected for it;
+    /// `krd` only uses it to pick a frame rate. See `ScreenWriter.focusReporting` (issue #110).
+    case focus(Bool)
     /// `OSC … BEL|ST`: the body, untouched. Only OSC 52 is interpreted, and `krd` owns the clipboard.
     case osc(String)
     /// The terminal's answer to `CSI ? u` — which keyboard enhancements it accepted.
@@ -810,6 +816,8 @@ public final class InputParser {
         case "D": emit(.press(Keys.left, flags, phase))
         case "H": emit(.press(Keys.home, flags, phase))
         case "F": emit(.press(Keys.end, flags, phase))
+        case "I": emit(.focus(true))                        // DECSET 1004: focus gained
+        case "O": emit(.focus(false))                       // DECSET 1004: focus lost
         case "Z": emit(.press(Keys.tab, flags.union(.maskShift), phase))
         case "~":
             // A table lookup, not arithmetic: an unknown number is dropped instead of indexing
@@ -964,6 +972,8 @@ extension Event {
             return "mouse button=\(r.button) x=\(r.x) y=\(r.y)"
                 + " wheel=\(r.isWheel ? 1 : 0) release=\(r.isRelease ? 1 : 0)"
                 + " motion=\(r.isMotion ? 1 : 0) mods=\(r.mods.rawValue)"
+        case let .focus(on):
+            return "focus \(on ? 1 : 0)"
         case let .osc(body):
             return "osc \(body.prefix(3)) \(body.utf8.count) B"
         case let .keyboardFlags(flags):

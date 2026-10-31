@@ -165,10 +165,11 @@ public final class ScreenWriter {
     /// Heal a pane whose parser was left mid-sequence by a killed predecessor:
     /// ST closes a dangling APC (which would otherwise swallow every later byte),
     /// and 2026l closes a dangling synchronized-update block (which would freeze drawing).
-    /// The four mouse resets are the §7 enable list reversed, so a killed predecessor's pixel
-    /// mode is repaired here too.
+    /// The input-mode resets are the enable list reversed, so a killed predecessor's pixel
+    /// mode is repaired here too -- and so is its focus reporting, for a session whose list has
+    /// 1004 on it (see `inputModes`).
     private var healSequence: String {
-        "\u{1B}\\\u{1B}[?2026l" + Self.mouseReset + "\u{1B}[0m\u{1B}[?25h"
+        "\u{1B}\\\u{1B}[?2026l" + Self.inputReset + "\u{1B}[0m\u{1B}[?25h"
     }
 
     public func beginSession() {
@@ -181,7 +182,7 @@ public final class ScreenWriter {
     /// Every DEC private **mouse** mode a session turns on, in the order it turns them on.
     ///
     /// One list, because three hand-written copies of it had already drifted: the enable path and
-    /// `writeMouseReporting(false)` knew `?1016` (SGR *pixel* coordinates), while `beginSession`'s
+    /// `writeInputModes(false)` knew `?1016` (SGR *pixel* coordinates), while `beginSession`'s
     /// heal and `endSession` reset only three of the four -- so a `kill -9` (or any exit that skips
     /// `InputReader`'s own reset) handed the pane on still reporting in device pixels where the next
     /// program expects cells: every click lands somewhere else, silently (issue #134). The reset is
@@ -190,14 +191,52 @@ public final class ScreenWriter {
     /// 1003 = report every motion, not only while a button is held: a remote pointer has to follow
     /// the mouse even when nobody is clicking. 1002 = button events (press/drag/release). 1006 = SGR
     /// encoding, 1016 = SGR *pixels*.
+    ///
+    /// Two lists, one derivation (issue #110): this list is unconditional -- every session resets
+    /// what a killed predecessor may have left on -- while `focusModes` below is conditional on
+    /// `focusReporting`, because 1004 is not a mouse mode and only a session that reads input may
+    /// ask for it. `inputModes` joins them, `inputEnable` is that list forwards and the reset the
+    /// heal and the teardown send is **that joined list reversed**. So `healSequence` and
+    /// `endSession` own 1004 by construction the moment a session has input, never by a
+    /// hand-written `?1004l`.
     static let mouseModes = [1003, 1002, 1006, 1016]
+
+    /// The input mode that is **not** a mouse mode: DECSET 1004 makes the terminal report whether
+    /// this pane has focus, as `CSI I` (gained) and `CSI O` (lost). Its own list, because what owns
+    /// it differs: a mouse mode is always krd's (a killed predecessor may have left it on, which is
+    /// why every session resets those), while 1004 is only ever *asked for* by a session that reads
+    /// input -- see `focusReporting`.
+    static let focusModes = [1004]
+
+    /// Whether this session's input-mode set includes 1004.
+    ///
+    /// Set **once** by the desk, before `beginSession()` -- the heal is the first thing a session
+    /// writes, so the decision cannot be taken later -- and it defaults to false on purpose: a
+    /// session that never reads input (`--no-input`, `--selftest`, `--bench`, `--replay`, wall) must
+    /// not put the pane into a mode whose whole purpose is to send bytes to a reader that does not
+    /// exist. The `--selftest` dump/sha contract depends on it too: the golden dump is byte-exact,
+    /// so a single `?1004h` (or `l`) in it would move the sha (issue #110).
+    public static var focusReporting = false
+
+    /// The two lists joined: what *this* session turns on.
+    ///
+    /// Two lists, one derivation. `mouseModes` is unconditional -- whatever the session does, the
+    /// pane it is handed may have been left with mouse reporting on by a killed process, so every
+    /// session resets those four -- while `focusModes` is conditional on `focusReporting` (above),
+    /// because 1004 is not a mouse mode and is only ever enabled by a session that has input. The
+    /// derivation is #134's, applied to the joined list: `inputEnable` is the list forwards and
+    /// `inputReset` is **the concatenated list reversed**. So `healSequence` and `endSession` own
+    /// 1004 by construction: the moment 1004 is on the list a session enables, it is on the list
+    /// that same session's heal and teardown send, ahead of the mouse resets, with no hand-written
+    /// `?1004l` anywhere in the file.
+    static var inputModes: [Int] { mouseModes + (focusReporting ? focusModes : []) }
     /// `?<mode>h` in order, and `?<mode>l` in reverse: the enable set and the reset set are
     /// complementary by construction, never by hand.
-    static let mouseEnable = mouseModes.map { "\u{1B}[?\($0)h" }.joined()
-    static let mouseReset = mouseModes.reversed().map { "\u{1B}[?\($0)l" }.joined()
+    static var inputEnable: String { inputModes.map { "\u{1B}[?\($0)h" }.joined() }
+    static var inputReset: String { inputModes.reversed().map { "\u{1B}[?\($0)l" }.joined() }
 
-    public static func writeMouseReporting(_ on: Bool) {
-        writeRaw(on ? mouseEnable : mouseReset)
+    public static func writeInputModes(_ on: Bool) {
+        writeRaw(on ? inputEnable : inputReset)
     }
 
     /// Push the kitty keyboard enhancements krd can use, and ask which ones took.
@@ -260,7 +299,7 @@ public final class ScreenWriter {
         batchOpen = false
         writeLock.unlock()
         clear()
-        write(Self.mouseReset + "\u{1B}[?25h\u{1B}[?1049l")
+        write(Self.inputReset + "\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)
     }
 

@@ -102,3 +102,55 @@ final class KeyTableTests: XCTestCase {
         XCTAssertEqual(Keys.ss3Function.count, pairs.count)
     }
 }
+
+/// DECSET 1004 (issue #110): the terminal reports focus with two plain 2-byte CSIs, `ESC [ I` and
+/// `ESC [ O`, and they are the *entire* input surface of the feature.
+///
+/// They are tested here, at the parser, for the reason `#14` taught: what matters is not that the
+/// bytes mean something, but that they mean *exactly one* thing. Two failure modes are silent — a
+/// `CSI I` that is dropped is a pane that never unfocuses, and a `CSI O` that falls through to
+/// "some key" is an ESC/`[`/`O` sequence typed into the mirrored desktop, which is worse than not
+/// having the feature. So the assertions are `==` against the whole event list, never "contains".
+final class FocusEventTests: XCTestCase {
+    private func parse(_ bytes: [UInt8]) -> [Event] {
+        var events: [Event] = []
+        let parser = InputParser()
+        parser.onEvent = { events.append($0) }
+        parser.feed(bytes)
+        return events
+    }
+
+    /// `CSI I`: focus gained. One event, and no keystroke beside it.
+    func testFocusInIsExactlyOneFocusEvent() {
+        XCTAssertEqual(parse(Array("\u{1B}[I".utf8)), [.focus(true)])
+    }
+
+    /// `CSI O`: focus lost. One event, and no keystroke beside it.
+    func testFocusOutIsExactlyOneFocusEvent() {
+        XCTAssertEqual(parse(Array("\u{1B}[O".utf8)), [.focus(false)])
+    }
+
+    /// Two reports in one read keep their order: a terminal that loses and regains focus sends both,
+    /// and the rate machine on the other side is a state machine, not a counter.
+    func testFocusReportsKeepTheOrderTheTerminalSentThemIn() {
+        XCTAssertEqual(parse(Array("\u{1B}[O\u{1B}[I".utf8)), [.focus(false), .focus(true)])
+    }
+
+    /// A read can split anywhere (a pty hands over whatever has arrived), and the CSI state machine
+    /// already buffers a partial sequence — these two must not be the exception.
+    func testFocusReportsSurviveAByteAtATime() {
+        var events: [Event] = []
+        let parser = InputParser()
+        parser.onEvent = { events.append($0) }
+        for byte in Array("\u{1B}[O\u{1B}[I".utf8) {
+            parser.feed([byte])
+        }
+        XCTAssertEqual(events, [.focus(false), .focus(true)])
+    }
+
+    /// The trace form the golden input fixture is made of (`Event.canonicalTrace`).
+    func testFocusHasACanonicalTrace() {
+        XCTAssertEqual(Event.focus(true).canonicalTrace, "focus 1")
+        XCTAssertEqual(Event.focus(false).canonicalTrace, "focus 0")
+    }
+}

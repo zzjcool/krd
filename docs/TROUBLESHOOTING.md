@@ -852,3 +852,27 @@ log (`--debug`, or `--stats-json`'s per-second `scale`). To pin it, pass `--scal
 value, `--scale 0.5`. `--bench`, `--selftest`, `--record` and `--replay` always capture at 1 and say
 so once, because their output must not depend on the link — a recording whose frame size changes
 mid-file has no marker for it.
+
+### 50. Inside tmux the picture stays at the unfocused rate, or focus never changes anything
+
+**Cause.** The unfocused rate (issue #110) rides entirely on the terminal's focus reports: a session
+that reads input enables DECSET `?1004`, and the terminal answers `ESC [ O` when the pane loses focus
+and `ESC [ I` when it gets it back (PROTOCOL §7). tmux sits in between and forwards those two
+sequences only when `focus-events` is on — a **server** option, and off by default, so nothing
+reaches krd until someone turns it on. Off, krd never receives `CSI I` or `CSI O`: the picture
+keeps `--fps`, costs exactly what it did before the flag existed, and `--unfocused-fps` does nothing
+at all (nothing is broken — there is no event to react to). On, the opposite complaint can appear:
+tmux does tell krd the pane lost focus, the last thing krd heard was `CSI O`, and the picture sits at
+`--unfocused-fps` — 1 fps by default, and `0` freezes it outright.
+**Fix.** Turn the option on for the whole server, then open a new pane or session:
+
+```bash
+tmux set -g focus-events on        # then open a new pane or session
+```
+
+Nothing inside the pane has to be restarted for the picture to come back: any real input counts as
+focus-in by itself (a key, a click, the wheel — PROTOCOL §7), so a picture that `--unfocused-fps 0`
+froze returns on the first thing you type or click. Without the option, `--unfocused-fps 0` is not a
+freeze switch at all: krd is never told the pane lost focus, so there is nothing to freeze.
+`--debug` shows each transition — `krd: pane unfocused; the picture is at 1 fps`, then
+`krd: pane focused again; the picture is back at 20 fps` (your `--fps` in place of 20).

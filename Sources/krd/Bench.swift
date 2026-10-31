@@ -722,6 +722,10 @@ final class StatsJSONWriter {
         // and prints `nan`. Typed here, once.
         let rttMs: Double = m.rttAvailable ? m.rttMs : -1
         let rttP99: Double = m.rttAvailable ? m.rttP99Ms : -1
+        // One field about the *picture's* rate rather than the pipe's (issue #110): `focused` says
+        // whether the throttle in `fps` is `--unfocused-fps` holding the picture down or the rung the
+        // governor chose. Typed, for the same reason as `capMs`.
+        let focused: Int = m.focused ? 1 : 0
         // `nan` is not JSON. A series that has no samples yet (the first second of a session) must
         // still produce a line `jq` can read, so anything non-finite becomes -1 = "not measured".
         func n(_ value: Double) -> Double { value.isFinite ? value : -1 }
@@ -736,7 +740,7 @@ final class StatsJSONWriter {
                 + "\"rtt_ms\":%.2f,\"rtt_p99_ms\":%.2f,"
                 + "\"px\":[%d,%d],\"cells\":[%d,%d],"
                 + "\"delivered\":%d,\"skipped\":%d,\"callbacks\":%d,\"idle\":%d,\"bad\":%d,"
-                + "\"late\":%d,\"frames\":%d,\"scale\":%.3f,\"quality\":%d}\n",
+                + "\"late\":%d,\"frames\":%d,\"scale\":%.3f,\"quality\":%d,\"focused\":%d}\n",
             (benchNowMs() - started) / 1000.0, m.tilesPerSec, m.framesTotal, m.dirty, m.kbPerFrame,
             n(m.mbps), m.fps, m.captureFps, Double(m.tilesPerSec),
             n(m.skippedPerSec), n(m.idlePerSec),
@@ -747,7 +751,7 @@ final class StatsJSONWriter {
             n(rttMs), n(rttP99),
             m.pxW, m.pxH, m.cellsW, m.cellsH,
             m.delivered, m.skipped, m.callbacks, m.idle, m.bad,
-            late, frames, n(m.scale), m.quality)
+            late, frames, n(m.scale), m.quality, focused)
         handle.write(Data(line.utf8))
     }
 }

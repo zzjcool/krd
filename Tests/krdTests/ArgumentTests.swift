@@ -38,9 +38,9 @@ final class ArgumentTests: XCTestCase {
     }
 
     func testAFlagWithNoValueIsRefusedAndNamesItself() {
-        for flag in ["--fps", "--display", "--zoom", "--tile", "--cell", "--format",
-                     "--window", "--quality", "--wall-quality", "--ime", "--clipboard", "--log",
-                     "--scale"] {
+        for flag in ["--fps", "--unfocused-fps", "--display", "--zoom", "--tile", "--cell",
+                     "--format", "--window", "--quality", "--wall-quality", "--ime",
+                     "--clipboard", "--log", "--scale"] {
             XCTAssertEqual(refusal(["krd", flag]), "\(flag) needs a value", flag)
         }
     }
@@ -127,6 +127,30 @@ final class ArgumentTests: XCTestCase {
         XCTAssertFalse(wallOnly.qualityAuto)
     }
 
+    /// The rate the picture drops to while the terminal reports focus-out (issue #110). It is its own
+    /// flag rather than a second meaning for `--fps` because the two answer different questions: how
+    /// fast the capture may run, and how fast it may run when nobody is looking. `0` is a *value*
+    /// here (freeze the picture), which is the one place its grammar differs from `--fps`'s.
+    func testTheUnfocusedRateDefaultsToOneAndMayBeZero() throws {
+        XCTAssertEqual(try parseArguments(["krd"]).unfocusedFps, 1,
+                       "1, not 0: a lost focus-in report must leave a pane updating slowly, not dead")
+        XCTAssertEqual(try parseArguments(["krd", "--unfocused-fps", "0"]).unfocusedFps, 0)
+        XCTAssertEqual(try parseArguments(["krd", "--unfocused-fps", "3"]).unfocusedFps, 3)
+        // The other knob keeps its own default: naming one rate must not move the other.
+        let both = try parseArguments(["krd", "--fps", "30", "--unfocused-fps", "2"])
+        XCTAssertEqual(both.fps, 30)
+        XCTAssertEqual(both.unfocusedFps, 2)
+        // A parseable value below the range is normalised, not refused -- the same rule `--fps 0`
+        // has always had (it means 1); here the floor is 0, i.e. "frozen".
+        XCTAssertEqual(try parseArguments(["krd", "--unfocused-fps", "-5"]).unfocusedFps, 0)
+        // What is *not* a number is still a usage error, and a missing value names the flag.
+        XCTAssertEqual(refusal(["krd", "--unfocused-fps", "x"]),
+                       "--unfocused-fps wants a whole number, got \"x\"")
+        XCTAssertEqual(refusal(["krd", "--unfocused-fps"]), "--unfocused-fps needs a value")
+        XCTAssertEqual(refusal(["krd", "--unfocused-fps", "--mirror"]),
+                       "--unfocused-fps needs a value (got the option \"--mirror\")")
+    }
+
     func testAValidCommandLineParsesExactlyAsBefore() throws {
         // The other half of the contract: none of the tightening above may change what a valid
         // command line means. Every field the flags touch is pinned to the value that was typed.
@@ -181,6 +205,7 @@ final class ArgumentTests: XCTestCase {
         let cases: [([String], String)] = [
             (["--nonsense"], "krd: unknown option \"--nonsense\" (try `krd --help`)\n"),
             (["--fps"], "krd: --fps needs a value\n"),
+            (["--unfocused-fps"], "krd: --unfocused-fps needs a value\n"),
             (["--fps", "--wall"], "krd: --fps needs a value (got the option \"--wall\")\n"),
             (["--fps", "abc"], "krd: --fps wants a whole number, got \"abc\"\n"),
         ]
