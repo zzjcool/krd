@@ -73,7 +73,10 @@ public struct GraphicsReply: Equatable {
         rest = rest.dropFirst()
         let meta: Substring
         let result: Substring
-        if let semicolon = rest.firstIndex(of: ";") {
+        // A `;` separates metadata from the status only when there *is* metadata (`i=`/`I=`/`p=`).
+        // An error text may carry its own `;` (`EINVAL: bad; param`), and splitting on it used to
+        // turn a refusal into `unparsed` — i.e. lose the reason the issue is about.
+        if let semicolon = rest.firstIndex(of: ";"), rest[..<semicolon].contains("=") {
             meta = rest[..<semicolon]
             result = rest[rest.index(after: semicolon)...]
         } else {

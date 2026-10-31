@@ -180,6 +180,8 @@ final class InputReader {
     private let stopLock = NSLock()
     private var stopFlag = false
     private let stoppedSignal = DispatchSemaphore(value: 0)
+    /// 100 ms ticks with no bytes for the escape sequence sitting in `parser.buffer` (see `loop`).
+    private var idleReads = 0
 
     private func loop() {
         defer {
@@ -196,21 +198,44 @@ final class InputReader {
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {
-                // A lone ESC with nothing following it is the Esc key.
-                if parser.buffer == [0x1B] {
+                // An escape sequence that stopped arriving. Two different things can look like
+                // this, and both must leave the keyboard working:
+                //
+                // - `ESC x` with nothing after it is Alt+`x` (a legal keystroke: Option+Shift+P on
+                //   a legacy terminal *is* `ESC P`, and that is also how a DCS starts). The parser
+                //   holds it for one tick to see whether a string sequence follows; after that it
+                //   is the keystroke, exactly as before issue #109.
+                // - Anything longer that stopped (`ESC _ G …` without its `ST`, a truncated CSI, a
+                //   reply whose terminator was lost) is dropped, not typed: no payload byte ever
+                //   reaches the desktop, and a lost terminator cannot hold the keyboard hostage.
+                if parser.buffer.count == 1, parser.buffer[0] == 0x1B {
                     parser.reset()
+                    idleReads = 0
                     postKey(Keys.esc, [])
                     continue
                 }
-                // `ESC _` with nothing after it is Alt-`_` (a legal keystroke) that this read did
-                // not complete: the parser holds it to see whether a graphics reply follows, and
-                // here the wait is over.
-                if parser.buffer == [0x1B, 0x5F] {
+                if parser.buffer.count == 2, parser.buffer[0] == 0x1B, parser.buffer[1] >= 0x20 {
+                    let byte = parser.buffer[1]
                     parser.reset()
-                    postUnicode("_", [.maskAlternate])
+                    idleReads = 0
+                    if let ch = String(bytes: [byte], encoding: .utf8)?.first {
+                        postUnicode(ch, [.maskAlternate])
+                    }
+                    continue
                 }
+                if parser.buffer.count > 1 {
+                    idleReads += 1
+                    if idleReads >= 5 {
+                        if trace { log("dropped an unterminated escape sequence (\(parser.buffer.count) B)") }
+                        parser.reset()
+                        idleReads = 0
+                    }
+                    continue
+                }
+                idleReads = 0
                 continue
             }
+            idleReads = 0
             let n = Darwin.read(STDIN_FILENO, &chunk, chunk.count)
             if n <= 0 { return }
             if trace {
@@ -282,7 +307,9 @@ final class InputReader {
     /// The terminal's own words, made safe for a one-line log: no control bytes (a reply is
     /// attacker-influenceable text on a tty), no newline, and a length a human can read.
     private static func logSafe(_ text: String) -> String {
-        let cleaned = String(text.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F })
+        // The reply is terminal-supplied text on a tty, so only printable ASCII gets through: a
+        // stray U+009B or a bidi override in an error message would otherwise edit the log itself.
+        let cleaned = String(text.unicodeScalars.filter { (0x20...0x7E).contains($0.value) })
         return String(cleaned.prefix(200))
     }
 

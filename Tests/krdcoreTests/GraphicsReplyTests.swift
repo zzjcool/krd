@@ -166,6 +166,30 @@ final class GraphicsReplyTests: XCTestCase {
         XCTAssertEqual(replies(events).first?.isError, false)
     }
 
+    /// An error text may contain a `;` of its own (`EINVAL: bad; param`): only a `;` that follows
+    /// real metadata (`i=`/`I=`/`p=`) separates it from the status, or the reason is lost.
+    func testErrorTextWithASemicolonKeepsItsReason() {
+        let events = parse(Array("\u{1B}_GEINVAL: bad; param\u{1B}\\".utf8))
+        XCTAssertEqual(replies(events).first?.status, "EINVAL: bad; param")
+        XCTAssertEqual(replies(events).first?.isError, true)
+        XCTAssertEqual(injected(events).count, 0)
+        // ... while metadata is still split off when it is there.
+        let withID = parse(Array("\u{1B}_Gi=9;EINVAL: bad; param\u{1B}\\".utf8))
+        XCTAssertEqual(withID.count == 1 ? replies(withID).first?.image : nil, 9)
+        XCTAssertEqual(replies(withID).first?.status, "EINVAL: bad; param")
+    }
+
+    /// A `DCS`/`SOS`/`PM` that never terminates still emits nothing — the read loop's idle tick
+    /// drops the stalled bytes, so the keyboard comes back without a payload byte being typed.
+    func testUnterminatedStringSequenceEmitsNothing() {
+        let dcs = parse(Array("\u{1B}P1;2|hello".utf8))
+        XCTAssertEqual(dcs.count, 0, "an unfinished DCS leaked: \(trace(dcs))")
+        let sos = parse(Array("\u{1B}Xjunk".utf8))
+        XCTAssertEqual(sos.count, 0, "an unfinished SOS leaked: \(trace(sos))")
+        let pm = parse(Array("\u{1B}^junk".utf8))
+        XCTAssertEqual(pm.count, 0, "an unfinished PM leaked: \(trace(pm))")
+    }
+
     // MARK: - the keystroke this must not break
 
     /// Alt-`_` is a legal thing to type. Only `ESC _ G` starts a reply, so any other `ESC _` keeps
