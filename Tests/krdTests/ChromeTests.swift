@@ -74,6 +74,99 @@ final class ChromeTests: XCTestCase {
         return text
     }
 
+    /// Replay the positioned writes into a full text grid of `cols` columns and `rows` lines -- the
+    /// same second opinion `WallCanvasTests.replay` gives the wall. `cursorMoves` says the escapes are
+    /// there and `textOnRow` reads one row forward; this one says what a terminal would end up
+    /// showing, including a write that lands on a row another write already painted.
+    private func grid(_ bytes: [UInt8], cols: Int, rows: Int) -> [[Character]] {
+        var cells = [Character](repeating: " ", count: cols * rows)
+        /// True for the second cell of a wide glyph: it is covered by the character before it.
+        var covered = [Bool](repeating: false, count: cols * rows)
+        var row = 1, col = 1
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x1B, i + 1 < bytes.count, bytes[i + 1] == 0x5B {
+                var j = i + 2
+                while j < bytes.count, !(bytes[j] >= 0x40 && bytes[j] <= 0x7E) { j += 1 }
+                if j < bytes.count, bytes[j] == UInt8(ascii: "H") {
+                    let parts = String(decoding: bytes[(i + 2)..<j], as: UTF8.self)
+                        .split(separator: ";").compactMap { Int($0) }
+                    if parts.count == 2 { row = parts[0]; col = parts[1] }
+                }
+                i = j + 1
+                continue
+            }
+            // One run of text: up to the next escape, decoded as a whole so a multi-scalar
+            // character stays in one piece.
+            var j = i
+            while j < bytes.count, bytes[j] != 0x1B { j += 1 }
+            for ch in String(decoding: bytes[i..<j], as: UTF8.self) {
+                let width = DisplayWidth.of(ch)
+                if width == 0 { continue }
+                guard row >= 1, row <= rows, col >= 1, col + width - 1 <= cols else { continue }
+                cells[(row - 1) * cols + (col - 1)] = ch
+                covered[(row - 1) * cols + (col - 1)] = false
+                if width == 2 { covered[(row - 1) * cols + col] = true }
+                col += width
+            }
+            i = j
+        }
+        var out: [[Character]] = []
+        for y in 0..<max(0, rows) {
+            var line: [Character] = []
+            for x in 0..<max(0, cols) where !covered[y * cols + x] { line.append(cells[y * cols + x]) }
+            if line.count < cols { line.append(contentsOf: repeatElement(" ", count: cols - line.count)) }
+            out.append(line)
+        }
+        return out
+    }
+
+    /// The panel's three text columns. `line(_:_:_:note:)` writes them at 0-based 2, 17 and 38, so a
+    /// slice per column is exactly what the row shows -- and a label that another write painted over
+    /// comes back blank or wrong here, which is the point. A row narrower than the note column has no
+    /// columns at all. A row whose glyphs are not all one cell wide cannot be sliced by `Character`
+    /// index at all, and reading the neighbouring cells silently would make an assertion pass for the
+    /// wrong reason -- `ChromeMetrics` carries user strings (`recording`, `logPath`, `envSwitches`),
+    /// so this has to fail loudly instead.
+    private func columns(_ row: [Character]) -> (label: String, value: String, note: String) {
+        // Measured in cells, not in `Character`s: a row of 38 characters can still be 39 cells wide.
+        let cells = DisplayWidth.of(String(row))
+        guard cells >= 39 else { return ("", "", "") }
+        XCTAssertEqual(cells, row.count,
+                       "a wide glyph makes array index != cell index here: \(String(row))")
+        // A row of the box ends in its right border, which belongs to the box, not to the note
+        // column: without this the note reads `TIOCOUTQ unavailable on this tty    │`.
+        let end = row.last == "│" ? row.count - 1 : row.count
+        return (String(row[2..<16]).trimmingCharacters(in: .whitespaces),
+                String(row[17..<38]).trimmingCharacters(in: .whitespaces),
+                String(row[38..<max(38, end)]).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Draw the stats panel and replay it onto a pane-sized grid. `panelRows` are the box's inside
+    /// rows -- empty when the panel does not fit and `drawPanel` draws nothing. The clamps mirror the
+    /// panel's own two (`h > 2, cols > 8`) and its height clamp (`rows - 1 - panelTop`: never the
+    /// final row, autowrap), so a size sweep gets "no box" instead of a range that traps
+    /// (`Range requires lowerBound <= upperBound`) or a bottom border `╰───╯` handed back as a row.
+    private func drawStatsPanel(cols: Int, paneRows: Int, imageRows: Int, _ m: ChromeMetrics)
+        -> (rows: [[Character]], panelRows: Range<Int>) {
+        let geo = Chrome.layout(paneCols: cols, paneRows: paneRows, imageCols: cols, imageRows: imageRows,
+                                panel: .stats)
+        let bytes = Chrome().draw(geometry: geo, metrics: m, state: ChromeState(panel: .stats))
+        let rows = grid(bytes, cols: geo.cols, rows: geo.rows)
+        let top = geo.panelTop
+        let h = min(geo.panelHeight, geo.rows - 1 - top)   // what drawPanel actually draws
+        guard h > 2, geo.cols > 8 else { return (rows, (top + 1)..<(top + 1)) }
+        return (rows, (top + 1)..<(top + h - 1))
+    }
+
+    /// The `--dev` status line as a string, read back from the same grid: `textOnRow` does not consume
+    /// SGR, so its output carries `[1;97m` debris and a failing assertion becomes unreadable.
+    private func statusLine(cols: Int, _ m: ChromeMetrics) -> String {
+        let geo = Chrome.layout(paneCols: cols, paneRows: 20, imageCols: cols, imageRows: 19, panel: nil)
+        let bytes = Chrome().draw(geometry: geo, metrics: m, state: ChromeState())
+        return String(grid(bytes, cols: geo.cols, rows: geo.rows)[geo.statusRow])
+    }
+
     private func metrics(cols: Int = 137) -> ChromeMetrics {
         var m = ChromeMetrics()
         m.target = "display 0 3024×1964"
@@ -207,6 +300,173 @@ final class ChromeTests: XCTestCase {
         if case .outside = chrome.hitTest(row: 1, col: 1, geometry: geo) {} else {
             XCTFail("a cell inside the picture must not be reported as chrome")
         }
+    }
+
+    // MARK: the stats panel's rows (#117)
+
+    /// The sparklines were positioned with `y + 9`, which is the `pty buffer` row: their label
+    /// painted over that row's name while its value and note survived at columns 17 and 38
+    /// (0-based). The row has to keep all three columns at every size where the panel has 10 inside
+    /// rows.
+    func testTheStatsPanelKeepsThePtyBufferRowForItsOwnNumber() {
+        var m = metrics()
+        m.queueBytes = 1024
+        m.drainMbps = 3.4
+        for (cols, paneRows, imageRows) in [(80, 24, 8), (137, 44, 27)] {
+            let (rows, panelRows) = drawStatsPanel(cols: cols, paneRows: paneRows, imageRows: imageRows, m)
+            let named = panelRows.filter { columns(rows[$0]).label == "pty buffer" }
+            XCTAssertEqual(named.count, 1, "\(cols)x\(paneRows): the pty-buffer row lost its name")
+            guard let i = named.first else { continue }
+            XCTAssertTrue(columns(rows[i]).value.contains("1024 B"),
+                          "\(cols)x\(paneRows): value column reads \"\(columns(rows[i]).value)\"")
+            XCTAssertTrue(columns(rows[i]).note.contains("sshd took"),
+                          "\(cols)x\(paneRows): note column reads \"\(columns(rows[i]).note)\"")
+            for r in panelRows where ["MB/s", "pipe"].contains(columns(rows[r]).label) {
+                XCTAssertFalse(columns(rows[r]).note.contains("sshd"),
+                               "\(cols)x\(paneRows): a sparkline row carries another row's note")
+            }
+        }
+    }
+
+    /// One number per row. A hand-written row index can land on a row another line already took, and
+    /// then two numbers share a `y` while one inside row is left blank. With every optional row on,
+    /// no inside row may be blank and no label may appear twice. The pane is tall enough for the full
+    /// 16-row panel, so `inside` is 14 and `recording` -- the last row this panel can draw, since
+    /// `log` and `env` sit at indices 14/15 and `ChromePanel.stats.height` is 16 -- is exercised.
+    func testEveryStatsRowOwnsOneLineOfThePanel() {
+        var m = metrics()
+        m.queueBytes = 1024
+        m.mbpsHistory = [1, 2, 3, 4, 5, 6, 7, 8]
+        m.latencyHistory = [2, 4, 6, 8, 6, 4, 2, 1]
+        m.inputActive = true
+        m.recording = "recorded 01:02 to /tmp/krd.mov"
+        m.logPath = "/tmp/krd.log"
+        m.envSwitches = "KRD_NO_RTT=1 KRD_GRID=1"
+        m.devices = ["* display 0 1920x1200", "  window 42 -- Terminal"]
+        let (rows, panelRows) = drawStatsPanel(cols: 137, paneRows: 60, imageRows: 8, m)
+        let labels = panelRows.map { columns(rows[$0]).label }
+        XCTAssertEqual(labels.count, 14, "the panel's `inside` is height - 2")
+        XCTAssertFalse(labels.contains(""), "an inside row is blank: a row was skipped or overwritten")
+        XCTAssertEqual(Set(labels).count, labels.count, "two rows share a label: \(labels)")
+        // The range itself: without this pin an off-by-one in `statsPanel` would count the bottom
+        // border as a row and the test above would keep passing while `recording` was never drawn.
+        XCTAssertTrue(String(rows[panelRows.lowerBound - 1]).hasPrefix("╭"),
+                      "the row above the range must be the box's top border")
+        XCTAssertTrue(String(rows[panelRows.upperBound]).hasPrefix("╰"),
+                      "the row at the range's end must be the box's bottom border")
+    }
+
+    /// On `--mock`/`--replay`/`--selftest` `e2e` is the pipe half alone (there is no PTS to subtract),
+    /// so `frame 0 ms` claimed an end-to-end measurement nobody made, in the same row whose note
+    /// said `cap — (no PTS)`.
+    func testTheFrameRowSaysItWasNotMeasuredWhenTheCaptureHalfIsMissing() {
+        var m = metrics()
+        m.capMs = -1
+        m.e2eMs = 0
+        let (rows, panelRows) = drawStatsPanel(cols: 137, paneRows: 44, imageRows: 27, m)
+        let frame = panelRows.map { columns(rows[$0]) }.first { $0.label == "frame" }
+        XCTAssertEqual(frame?.value, "— ms", "the frame row must not print a confident 0")
+        XCTAssertEqual(frame?.note.hasPrefix("cap — (no PTS)"), true,
+                       "and the cap half still says why: \(frame?.note ?? "-")")
+        let bar = statusLine(cols: 120, m)
+        XCTAssertTrue(bar.contains("pipe 0 ms"), "the bar names the number for what it is: \(bar)")
+        XCTAssertFalse(bar.contains("frame 0 ms"), "nothing was measured end to end: \(bar)")
+    }
+
+    /// The measured mirror keeps today's number and today's name: `frame` is `cap + pipe`, and
+    /// `54` is what it always printed.
+    func testTheFrameRowKeepsItsNumberWhenTheCaptureHalfIsMeasured() {
+        var m = metrics()
+        m.capMs = 40
+        m.e2eMs = 54
+        let (rows, panelRows) = drawStatsPanel(cols: 137, paneRows: 44, imageRows: 27, m)
+        let frame = panelRows.map { columns(rows[$0]) }.first { $0.label == "frame" }
+        XCTAssertEqual(frame?.value, "54 ms")
+        XCTAssertTrue(statusLine(cols: 120, m).contains("frame 54 ms"))
+    }
+
+    /// The issue is "every size where `inside > 9`", so the arithmetic has to hold at every height,
+    /// not at the one the captures happened to use: from 13 pane rows there is an inside row, and at
+    /// each size the range must sit between the two borders, carry a label on every row and never
+    /// repeat one. A hand-written row index shows up here as a blank row or as a row on a border.
+    func testNoStatsRowLandsOnTheBoxAtAnyHeight() {
+        var m = metrics()
+        m.queueBytes = 1024
+        m.mbpsHistory = [1, 2, 3, 4, 5, 6, 7, 8]
+        m.latencyHistory = [8, 7, 6, 5, 4, 3, 2, 1]
+        m.inputActive = true
+        for paneRows in 11...30 {
+            let (rows, panelRows) = drawStatsPanel(cols: 137, paneRows: paneRows, imageRows: 8, m)
+            guard !panelRows.isEmpty else {
+                // `drawPanel` needs `h > 2`: with less room it draws nothing at all, and the rows
+                // under the status line stay blank rather than holding half a box.
+                let drawn = rows[9...].filter { !String($0).trimmingCharacters(in: .whitespaces).isEmpty }
+                XCTAssertTrue(drawn.isEmpty, "\(paneRows) rows: something was drawn without room for it")
+                continue
+            }
+            XCTAssertTrue(String(rows[panelRows.lowerBound - 1]).hasPrefix("╭"),
+                          "\(paneRows) rows: the row above the range is not the top border")
+            XCTAssertTrue(String(rows[panelRows.upperBound]).hasPrefix("╰"),
+                          "\(paneRows) rows: the range ends on the bottom border")
+            // A border is not a row: both of them carry solid `─` across the value column, so any
+            // text there means something was drawn on the box. `hasPrefix` alone cannot see that --
+            // a row written on the bottom border starts at column 2 and leaves the corner glyph
+            // intact, which is exactly how an off-by-one in `line`'s `i < inside` would look.
+            for border in [panelRows.lowerBound - 1, panelRows.upperBound] where rows[border].count > 38 {
+                XCTAssertEqual(String(rows[border][17..<38]), String(repeating: "─", count: 21),
+                               "\(paneRows) rows: a row is drawn on the border at \(border): "
+                               + String(rows[border]))
+            }
+            let labels = panelRows.map { columns(rows[$0]).label }
+            XCTAssertFalse(labels.contains(""), "\(paneRows) rows: an inside row is blank: \(labels)")
+            XCTAssertEqual(Set(labels).count, labels.count, "\(paneRows) rows: two rows share a label")
+        }
+        // The two shapes that used to trap the helper (`Range requires lowerBound <= upperBound`):
+        // a pane too short for any box, and a layout with no room for a panel at all (`panelHeight`
+        // 0). Both must report "nothing drawn" rather than a backwards range.
+        XCTAssertTrue(drawStatsPanel(cols: 80, paneRows: 11, imageRows: 8, m).panelRows.isEmpty,
+                      "80 columns and 11 rows: no box, so no rows")
+        XCTAssertTrue(drawStatsPanel(cols: 137, paneRows: 44, imageRows: 43, m).panelRows.isEmpty,
+                      "panelHeight 0: no box, so no rows")
+    }
+
+    /// The width ladder has two rungs for the new name: at 84 columns the bar has room for
+    /// `pipe`/`frame`, at 83 it prints the bare number, and nothing may call an unmeasured sum
+    /// `frame` -- that name is what made `frame 0 ms` read as a measured end to end.
+    func testTheLatencySegmentIsNamedOnlyWhereTheBarHasRoom() {
+        var unmeasured = metrics()
+        unmeasured.capMs = -1
+        unmeasured.e2eMs = 0
+        XCTAssertTrue(statusLine(cols: 84, unmeasured).contains("pipe 0 ms"),
+                      "84 columns is where the bar has room for a name: \(statusLine(cols: 84, unmeasured))")
+        XCTAssertFalse(statusLine(cols: 84, unmeasured).contains("frame"),
+                       "nothing was measured end to end, so the bar must not say `frame`")
+        let narrow = statusLine(cols: 83, unmeasured)
+        XCTAssertTrue(narrow.contains("0 ms"), "the number stays at 83 columns: \(narrow)")
+        XCTAssertFalse(narrow.contains("pipe"), "no room for a name at 83 columns: \(narrow)")
+        XCTAssertFalse(narrow.contains("frame"), "no room for a name at 83 columns: \(narrow)")
+        var measured = metrics()
+        measured.capMs = 40
+        measured.e2eMs = 54
+        XCTAssertTrue(statusLine(cols: 84, measured).contains("frame 54 ms"),
+                      "a measured mirror keeps the number and the name: \(statusLine(cols: 84, measured))")
+    }
+
+    /// `queueBytes = -1` is the tty that cannot answer `TIOCOUTQ`: the row has to say so, and it
+    /// still owns exactly one line -- the collision left the row under `pipe` blank, so "the row
+    /// below the pty row is the next number" is the pin.
+    func testThePtyRowSaysWhenTheTtyCannotReportItsBuffer() {
+        var m = metrics()
+        m.queueBytes = -1
+        m.mbpsHistory = [1, 2, 3]
+        let (rows, panelRows) = drawStatsPanel(cols: 137, paneRows: 60, imageRows: 8, m)
+        let labels = panelRows.map { columns(rows[$0]).label }
+        let named = panelRows.map { columns(rows[$0]) }.filter { $0.label == "pty buffer" }
+        XCTAssertEqual(named.count, 1, "the pty row must own exactly one line")
+        XCTAssertEqual(named.first?.value, "—", "no buffer is not a zero-byte buffer")
+        XCTAssertEqual(named.first?.note, "TIOCOUTQ unavailable on this tty")
+        guard let i = labels.firstIndex(of: "pty buffer") else { return XCTFail("no pty row") }
+        XCTAssertEqual(labels[i + 1], "MB/s", "the row under the pty row is blank: a row was left over")
     }
 }
 
