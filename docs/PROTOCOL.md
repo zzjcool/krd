@@ -493,16 +493,19 @@ krd *does* parse replies (issue #109) — the `APC` the graphics protocol answer
 - **Past the deadline the discard ends and the keyboard comes back at that moment.** The one thing
   still protected is the sequence's own tail: if the very next read *completes* the sequence (it
   contains the terminator, within the cap), that read is the reply's ending arriving late and it is
-  swallowed, never typed, however late it arrived. The invariant, in one line: **a byte that arrived
-  inside a sequence that began as a reply head is never typed, no matter how late it arrived.** A
-  read that does not complete the sequence is input: it is typed, and every read after it is typed
-  too. So a reply that is still mid-body when the deadline passes is not swallowed forever — the
-  deadline buys the keyboard back, and the price is a reply whose tail is still arriving.
+  swallowed, never typed, however late it arrived. The invariant, in one line: **a read that
+  *completes* a sequence that began as a reply head is swallowed, however late it arrives; a read
+  that does not complete it is input.** Completing is the condition — not arriving late: a read that
+  does not complete the sequence is typed, and every read after it is typed too. So a reply that is
+  still mid-body when the deadline passes is *lost*: what was already swallowed is gone, the rest is
+  typed into the mirrored desktop, and the keyboard is what the deadline bought. That is the
+  deliberate trade — a payload that never stops arriving must not hold the typist's keys.
 - **Past the byte cap the sequence is dropped whole**: no part of it becomes input, and the keyboard
   is back at the next sequence boundary.
-- Every discard that does not end at its terminator logs exactly one line saying which introducer it
-  was (`ESC ]` OSC or `ESC _ G` APC), how many bytes were dropped, and which end condition fired —
-  the deadline with the elapsed ms, or the byte cap. The undecided head `ESC _` stays what it is: it
+- Every discard that does not end at its terminator is *reported* — under `--debug` only, and as two
+  lines rather than one: the `notice` that fired it, then the read loop's report naming the
+  introducer (`ESC ]` OSC or `ESC _ G` APC), the bytes dropped, the end condition and the elapsed ms.
+  Without `--debug` an abandoned reply is silent. The undecided head `ESC _` stays what it is: it
   waits for the byte that decides it, no clock.
 - Half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is the one other thing dropped on a timeout: 500 ms
   with no bytes, then it is discarded — not typed. A lone `ESC` is the Esc key and a complete
@@ -513,8 +516,8 @@ one cut short is *lost*, and the undecided head waits for a byte rather than for
 
 - A reply split **after** `ESC _ G` (so the `G` arrived but the body did not) is swallowed up to
   `ST`, the 65,536 B cap or the 1500 ms deadline. At the deadline the keyboard comes back: the next
-  read is swallowed only if it completes the sequence, and is typed otherwise — one log line names
-  the deadline, the bytes dropped, and the `ESC _ G` APC that started it.
+  read is swallowed only if it completes the sequence, and is typed otherwise — the `--debug` report
+  names the deadline, the bytes dropped, and the `ESC _ G` APC that started it.
 - A lone `ESC _` that no byte ever follows is delivered when the next byte arrives, not before (on
   `main` it was typed at once). Releasing it from the idle read instead would be a clock, and the
   idle read fires ~100 ms after `ESC _` — before the body of a reply written 1200 ms later, which
@@ -527,7 +530,8 @@ one cut short is *lost*, and the undecided head waits for a byte rather than for
   was buffered until more arrived, so the body keeps that shape up to `BEL`, `ST`, the 2,796,218 B
   cap or the 1500 ms deadline. Past the deadline the tail rule above applies unchanged.
 
-The first refusal per image is logged once, where the log panel already is:
+The first refusal per image *and* status is logged once, where the log panel already is, with no
+`--debug` needed:
 
 ```
 krd: image 137 refused: EINVAL: decompression failed
