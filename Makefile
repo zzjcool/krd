@@ -20,6 +20,8 @@
 #   make agent-doctor   every capability of the VM target, measured
 #   make agent-fix      rebuild the driver on the target after editing agent/driver/*.swift
 #   make agent-check    the scaffold's own tests (no permissions, no network)
+#   make agent-checks   every regression check; each one must pass
+#   make agent-hunts    the open findings; each one must fail until it is fixed
 #   make agent-render   decode krd's own escape stream back into the picture it drew
 #   make agent-scenario the end-to-end smoke test against the VM
 
@@ -28,7 +30,7 @@ BENCH_ARGS ?=
 KRD     := .build/release/krd
 
 .PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock wall bench bench-quick bench-encode bench-wire bench-replay bench-ab clean \
-	agent-doctor agent-fix agent-check agent-render agent-scenario agent-see
+	agent-doctor agent-fix agent-check agent-checks agent-hunts agent-render agent-scenario agent-see
 
 all: build
 
@@ -96,6 +98,19 @@ agent-fix:
 
 agent-check:
 	$(AGENT) selftest
+
+agent-checks:
+	@for check in agent/checks/*.sh; do printf '%-46s' "$$check"; \
+	  if KRD=$(KRD) KAGENT=$(AGENT) sh "$$check" >/tmp/kagent-check.log 2>&1; then echo ok; \
+	  else echo FAILED; tail -5 /tmp/kagent-check.log; exit 1; fi; done
+
+# These are expected to fail: each one is a bug that is not fixed yet. A hunt that passes has been
+# fixed (move it to agent/checks/) or has stopped reproducing (rewrite or delete it).
+agent-hunts:
+	@for hunt in agent/hunts/*.sh; do printf '%-46s' "$$hunt"; \
+	  if KRD=$(KRD) KAGENT=$(AGENT) sh "$$hunt" >/tmp/kagent-hunt.log 2>&1; then \
+	    echo "PASSES (fixed? move it to agent/checks/)"; \
+	  else echo "still failing (finding is open)"; fi; done
 
 agent-render: build
 	$(AGENT) --target host render --pane 80x24 --cell 17x33 --seconds 6 --strict-fit -- \
