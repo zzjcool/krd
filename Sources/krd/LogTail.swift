@@ -12,10 +12,14 @@ import Foundation
 ///
 /// * **nothing new** (`stat` reports the same size, mtime and inode) -- the lines in hand are
 ///   returned, zero bytes read, zero allocation;
-/// * **the writer appended** -- exactly those bytes are read and appended to the line buffer;
-/// * **the file shrank or was replaced** (truncated, rotated onto another inode, rewritten in place
-///   at the same length) -- everything is forgotten and the reader re-anchors on the file that is
-///   there now: the tail of *that* file, read from its own start when it is small enough;
+/// * **the writer appended** -- exactly those bytes are read and appended to the line buffer, after
+///   the bytes just before the offset are re-read to rule out a truncation that refilled the file
+///   past that offset between two ticks (which `stat` reports exactly like an append);
+/// * **the file shrank, was replaced, or was truncated and refilled past the old offset** (a
+///   truncation, a rotation onto another inode, a rewrite in place at the same length, or a refill
+///   that grew past the offset inside one tick) -- everything is forgotten and the reader re-anchors
+///   on the file that is there now: the tail of *that* file, read from its own start when it is
+///   small enough;
 /// * **the writer got further ahead than a window** -- the reader re-anchors on the last
 ///   `windowBytes` rather than digesting a gap that cannot reach twelve rows.
 ///
@@ -41,6 +45,10 @@ struct LogTailReader {
     /// Most bytes one continuation may append before it gives up digesting the gap and re-anchors.
     static let appendBytes = 16 * 1024
 
+    /// How many bytes before the read offset the next tick re-reads to prove the file was *appended*
+    /// to rather than truncated and refilled past that offset inside one tick (see `update`).
+    static let probeBytes = 64
+
     /// The newest complete lines, oldest first, and the bytes of the line after them that has no
     /// newline yet. `--debug` writes a whole line per `write`, but a half-written line is a real
     /// state (a short write, or a note that ends without a newline): painting it and then jumping
@@ -55,6 +63,13 @@ struct LogTailReader {
     /// mtime)` is what separates "grown" from "replaced" from "unchanged" without reading a byte.
     private var read: UInt64 = 0
     private var identity: FileIdentity? = nil
+
+    /// The last `probeBytes` bytes the file held at `read`. `stat` cannot tell an append from a file
+    /// that was truncated and refilled past `read` between two ticks -- both are "the same inode,
+    /// bigger than it was" -- but a truncation cannot leave those bytes where they were, and an
+    /// append cannot move them. So this is the discriminator, at the price of one 64-byte read on a
+    /// tick that found something new.
+    private var probe: [UInt8] = []
 
     /// What `fstat` says about the file, in the four numbers the decision above needs.
     struct FileIdentity: Equatable {
@@ -84,12 +99,25 @@ struct LogTailReader {
         // re-anchor, because the buffer's bytes no longer describe the file's tail.
         let sameFile = was?.device == now.device && was?.inode == now.inode
         let grew = now.size > read && now.size - read <= UInt64(LogTailReader.appendBytes)
-        if sameFile, was != nil, grew {
+        if sameFile, was != nil, grew, stillHoldsWhatWasRead(handle) {
             consume(handle, from: read, to: now.size)
         } else {
             reanchor(handle, size: now.size)
         }
         return lines
+    }
+
+    /// Whether the bytes the buffer has read up to are still the bytes in the file -- what separates
+    /// "the writer appended" from "the file was truncated and refilled past the old offset inside one
+    /// 1 Hz tick". The second one satisfies every test `stat` can make: same `(device, inode)`, and a
+    /// size larger than the offset. Without this, the reader would take it for an append, read from
+    /// the old offset -- now somewhere in the middle of the new file's first lines -- and show that
+    /// fragment of a line as its oldest row for as long as the panel stayed open, because `read` has
+    /// moved past it and no later tick looks back.
+    private func stillHoldsWhatWasRead(_ handle: FileHandle) -> Bool {
+        guard !probe.isEmpty else { return true }            // nothing read yet: any growth is new bytes
+        let from = read - UInt64(probe.count)
+        return LogTailReader.read(handle, from: from, upTo: probe.count) == probe
     }
 
     /// Forget the file: the next `update` starts from scratch.
@@ -99,6 +127,7 @@ struct LogTailReader {
         sawNewline = false
         read = 0
         identity = nil
+        probe = []
     }
 
     /// Read the tail of the file as it is now: the last `windowBytes` of it, or the whole file when
@@ -112,6 +141,7 @@ struct LogTailReader {
         let window = UInt64(LogTailReader.windowBytes)
         let from = size > window ? size - window : 0
         let bytes = LogTailReader.read(handle, from: from, upTo: Int(min(window, size - from)))
+        probe = Array(bytes.suffix(LogTailReader.probeBytes))
         var text = String(decoding: bytes, as: UTF8.self)
         if from > 0 {
             // The window starts in the middle of a line, and possibly of a UTF-8 sequence: the
@@ -131,7 +161,14 @@ struct LogTailReader {
     /// Read bytes the writer appended since the last tick -- no more than that.
     private mutating func consume(_ handle: FileHandle, from: UInt64, to: UInt64) {
         let bytes = LogTailReader.read(handle, from: from, upTo: Int(to - from))
+        guard bytes.count == Int(to - from) else {
+            // A short read: the offset the buffer believes in is not the offset the file has, so the
+            // only safe move is to start over on the file that is there now.
+            reanchor(handle, size: (try? handle.seekToEnd()) ?? to)
+            return
+        }
         read = to
+        probe = Array((probe + bytes).suffix(LogTailReader.probeBytes))
         absorb(String(decoding: bytes, as: UTF8.self), wholeFile: false)
     }
 
