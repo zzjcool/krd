@@ -249,6 +249,26 @@ swift probe/sck_probe.swift   # on the machine being viewed
 swift probe/ax_probe.swift    # 最好在 ssh 里跑：那里第一次 AX 调用会失败到 warm-up 为止
 ```
 
+### 重新生成宽度表
+
+`Sources/krd/WidthTable.swift` 是生成的，不是手写的：`DisplayWidth` 回答的是「占几格」，而这件事唯一的权威是
+终端本身，所以这张表是从 libghostty 自己的 Unicode 表里读出来的——用的就是 UI v2 方案里当参照终端的那个版本
+（v1.4.0）。
+
+```bash
+git clone --depth 1 --branch v1.4.0 https://github.com/ghostty-org/ghostty /tmp/krd-spike/ghostty
+cd /tmp/krd-spike/ghostty && zig build -Demit-lib-vt -Doptimize=ReleaseFast
+cd - && scripts/gen-widths.sh                       # 或：scripts/gen-widths.sh <checkout>
+swift test --filter WidthTableTests                 # 拿终端自己的答案验这张表
+```
+
+脚本拒绝装上一张少了任何一组集合的表（`wide` 空掉照样能编译，然后所有 CJK 都画成一格），生成文件的头里写着
+它读的是哪个 tag。正常构建既不需要 Zig 也不需要那份 checkout：表是提交进仓库的。
+
+`WidthTableTests` 里约 50 个字符串的期望宽度是 libghostty 自己算出来的，所以一次让答案变了的重新生成会表现为
+一条失败的测试，而不是「文字排在了错误的列上」。最要紧的两条：`☰` 和国旗是 **2 格**，没有 VS16 的 emoji
+码点（`🖥`、`⚙`）是 **1 格**。
+
 ## 11. 浸泡测试：全功能开 30 分钟
 
 11 个 feature 是在一轮里落地的（#15 键盘协议、#16 `--ime`、#17 定向投递输入、#18 剪贴板桥、#19

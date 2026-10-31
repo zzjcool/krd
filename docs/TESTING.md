@@ -288,6 +288,28 @@ swift probe/display_probe.swift watch          # ssh: no events at all (that is 
 swift probe/display_probe.swift watch --appkit # a GUI terminal: 3 notifications per change
 ```
 
+### Regenerating the width table
+
+`Sources/krd/WidthTable.swift` is generated, not written: `DisplayWidth` answers in cells and the only
+authority on that is the terminal, so the table is read out of libghostty's own Unicode tables in the
+same build the UI v2 plan uses as its reference terminal (v1.4.0).
+
+```bash
+git clone --depth 1 --branch v1.4.0 https://github.com/ghostty-org/ghostty /tmp/krd-spike/ghostty
+cd /tmp/krd-spike/ghostty && zig build -Demit-lib-vt -Doptimize=ReleaseFast
+cd - && scripts/gen-widths.sh                       # or: scripts/gen-widths.sh <checkout>
+swift test --filter WidthTableTests                 # the table against the terminal's own answers
+```
+
+The script refuses to install a table that lost one of its four sets (an empty `wide` compiles fine and
+draws every CJK glyph in one cell), and the header of the generated file names the tag it came from. A
+normal build needs neither Zig nor the checkout: the table is committed.
+
+`WidthTableTests` carries ~50 strings whose expected widths were produced by libghostty itself, so a
+regeneration that changes an answer shows up as a failing test rather than as text at the wrong column.
+The two that mattered: `☰` and a flag are **two** cells, and an emoji codepoint without VS16 (`🖥`, `⚙`)
+is **one**.
+
 ## 11. Soak: thirty minutes with every feature on
 
 Eleven features landed in one run (#15 keyboard protocol, #16 `--ime`, #17 pid-targeted input, #18
