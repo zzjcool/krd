@@ -235,11 +235,22 @@ cols = geometry.cols
 rows = round(cols * cellW / aspect / cellH)        // aspect = sourceRect.width / height
 if rows > geometry.rows { rows = geometry.rows
                           cols = round(rows * cellH * aspect / cellW) }
-cols = clamp(cols, tileCols, geometry.cols)        // never smaller than one tile
-rows = clamp(rows, tileRows, geometry.rows)
+cols = min(max(1, cols), geometry.cols)            // the picture's box: the pane and the aspect,
+rows = min(max(1, rows), geometry.rows)            //   never the tile size (issue #143)
 pixelW = max(2, round(cols * cellW * scale))       // the SCStream output size
 pixelH = max(2, round(rows * cellH * scale))
 ```
+
+The box is a function of the pane, the cell and the source's aspect - **`--tile` does not enter it**
+(issue #143). It used to be clamped up to at least one whole tile *before* the fit, which for a pane
+shorter or narrower than the tile (or a picture smaller than one tile) made the box **bigger than
+the pane**: the fit then came out larger than the pane can hold, the clamp after it could only trim
+the *cells*, and the picture kept a frame that was not its aspect. Measured on a 40x15 pane with a
+1440x2560 source: `--tile 32x16` drew 18 cells where the aspect says 17, `--tile 24x20` stretched the
+picture 36 % wide, and `--tile 8x4` on a 40x3 pane (no flag at all) 48 %. A box smaller than one tile
+needs nothing special - `rect` sizes the single tile that is there to the cells that exist. Two
+invariants follow - `boxCols <= paneCols` and `boxRows <= paneRows` - and the tile floor violated
+both; the mouse mapping and the tile grid take them for granted.
 
 `TileGrid.rect(tx, ty)` returns a tile's pixel rect **and** its placement footprint:
 
@@ -325,8 +336,9 @@ tiles       9 × 6 = 54 of 16 × 8 cells   (one tile = 272 × 264 px = 287 KB ra
 edge tiles  tile (8,5): cols 129..137 (9 cells), rows 41..44 (4 cells) → 153 × 132 px
 ```
 
-`--tile c x r` only changes the tiling, never the picture: the same 2329×1452 px frame is cut
-differently. Smaller tiles mean more escapes per update (fixed overhead per tile: ~120 bytes of
+`--tile c x r` only changes the tiling, never the picture: the same 2329x1452 px frame is cut
+differently, and the box and the fit it came from do not move with the tile size (#143). Smaller
+tiles mean more escapes per update (fixed overhead per tile: ~120 bytes of
 control plus one flush) and smaller worst-case latency per change; bigger tiles mean fewer, larger
 updates.
 
