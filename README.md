@@ -66,8 +66,9 @@ krd --no-quantise           # same as --quality 100 (the mirror's lossless; the 
                             # --wall-quality 100)
 krd --wall-quality 70       # the landing screen's pictures: 100 = lossless, 70 (default) = 5-5-5,
                             # 50 = 4-4-4. Bit depth only — the picture is still exactly its
-                            # cells, so a first picture on a slow link costs ~half the bytes
-                            # with nothing cropped and no seam. Separate from --quality (the
+                            # cells, so a first picture costs ~20-30 % fewer bytes on desktop-like
+                            # content (measured -20.7 % at 70, -27.9 % at 50) and nothing on a flat
+                            # one, with nothing cropped and no seam. Separate from --quality (the
                             # mirror's knob), and it survives a click into a window and back
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
