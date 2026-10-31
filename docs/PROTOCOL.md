@@ -40,6 +40,9 @@ teardown sends at the end (§4), so no mode can be enabled without the same list
 all three places. Re-running krd fixes such a pane automatically; by hand it is
 `printf '\033\\\033[?2026l\033[?25h'`.
 
+None of these is a kitty graphics APC — the leading `ESC \` is a bare `ST`, not an envelope — so
+tmux passthrough (§6.6) leaves §1 exactly as written.
+
 ## 2. One tile
 
 The whole frame shares one synchronized-update block, opened by `ScreenWriter.beginFrame` and
@@ -87,6 +90,11 @@ ESC[?2026l
 `KRD_NOSYNC=1` removes the two `?2026` escapes (for terminals whose synchronized-update support
 misbehaves with image placements).
 
+With `--passthrough on` (`KRD_PASSTHROUGH`) every APC in this section — each `m=1`/`m=0` transmit
+chunk and the `a=p` placement, including the `U=1` virtual ones — is wrapped in tmux's DCS envelope
+(§6.6): same commands, `ESC P tmux;` in front, every interior `ESC` doubled, `ESC \` at the end.
+The two `?2026` escapes stay unwrapped.
+
 ## 3. Full-frame path (`--full-frame`)
 
 One synchronized block for the whole frame, one image id (`2`) and one placement id (`2`):
@@ -101,7 +109,8 @@ ESC [ ? 2026 l
 ```
 
 Same id-reuse rule as tiles: the previous frame is overwritten, never deleted. This path exists to
-A/B the tiling against the naive version, and as a fallback if tiling ever produces artifacts.
+A/B the tiling against the naive version, and as a fallback if tiling ever produces artifacts. Its
+APCs take the same passthrough envelope as §2 when it is on (§6.6); the `?2026` pair does not.
 
 ## 4. Steady state, clear, teardown
 
@@ -121,7 +130,9 @@ The four mouse resets are `ScreenWriter.mouseReset` — the §7 enable list reve
 the heal sends on the way in (§1) and `writeMouseReporting(false)` sends when input stops: a mode can
 no longer be enabled without all three resetting it.
 
-`a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames.
+`a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames. With
+passthrough on it is wrapped like every other APC (§6.6); `?2026l`, `2J` and the four mouse resets
+are not.
 
 ## 5. What krd deliberately never sends
 
@@ -180,6 +191,69 @@ Some terminals commit a placement only on the next output cycle. krd emits `ESC[
 captured frame produced **no** dirty tiles, so the pipe keeps moving (and the cursor stays hidden).
 A completely static desktop emits nothing at all: the capture side drops byte-identical frames
 before the renderer sees them.
+
+### 6.6 tmux passthrough (#107)
+
+A tmux pane is a terminal emulator between krd and the terminal you are looking at: tmux parses the
+escape stream itself, and by default an APC ends there — the image never reaches the outer terminal.
+The placeholder *cells* are ordinary text, so they do get through, and the outer terminal draws
+`U+10EEEE` (which it has no glyph for) as a grid of boxes. What tmux does forward is its DCS
+passthrough, off unless the program opts in: `--passthrough auto|on|off`, or `KRD_PASSTHROUGH`,
+default `auto` = wrap when `TERM` starts with `tmux` or `screen`, off otherwise (the flag wins over
+the variable).
+
+With it on, every kitty APC krd emits — each `a=t` transmit chunk, each `a=p` placement including
+the `U=1` virtual ones, the `a=d,d=a` delete, and the §6.7 geometry probe's own `a=t`/`a=p`/`a=d`
+plus `KRD_DELTEST`'s lone `a=d` — goes out as
+
+```
+ESC P tmux;  ESC ESC _ G <the APC's own bytes> ESC ESC \  ESC \
+```
+
+i.e. the APC exactly as §2/§4 draw it, with every interior `ESC` doubled (`ESC _` → `ESC ESC _`, and
+the APC's own closing `ESC \` → `ESC ESC \`), `ESC P tmux;` in front and `ESC \` behind (`ESC P tmux;`
+is seven bytes, `\ePtmux;` — the spaces are this file's notation, the way §1 writes
+`ESC [ ? 2026 l`). The doubling is the trick, not a quoting habit: tmux ends the envelope at the
+first `ESC \` it meets, so an interior `ESC \` would end it in the middle of the image — doubled, it
+is invisible to that scan, and tmux un-doubles it on the way out, so the outer terminal receives
+byte for byte what krd wrote.
+
+**"Every APC" is structural, not a promise per call site.** `GraphicsAPC`
+(`krdcore/GraphicsAPC.swift`) is the only constructor of a graphics escape, and the flag it consults
+is set once, process-wide, before the first byte — so the geometry probe (§6.7), which writes through
+raw fd 1 before any `ScreenWriter` exists, is enveloped by the same decision as a transmit chunk. Two
+guards keep it that way: `GraphicsAPC.writeRaw` (the probe's write) and `ScreenWriter.flushLocked`
+(the frame sink) both run the envelope parser `GraphicsAPC.isFullyEnveloped` over the bytes they are
+about to send and assert on it. A new emission path that hand-rolls `ESC _ G…` therefore fails a
+debug run and `TmuxPassthroughTests.testEveryAPCInACapturedStreamIsEnveloped`, instead of failing
+silently in a pane.
+
+Cost: 11 bytes per APC — the introducer grows from 2 bytes to 3 (the doubled `ESC _`), the APC's own
+`ST` from 2 to 3 (the doubled `ESC \`), `ESC P tmux;` adds 7 in front and the envelope's `ESC \` adds
+2 behind. Nothing else about a picture changes: `U=1` placeholders *compose* with the envelope rather
+than being replaced by it. The placeholder cells stay ordinary text — that is the transport tmux
+supports — and only the image data travels inside the DCS.
+
+Deliberately **not** wrapped:
+
+| Not wrapped | Why |
+|---|---|
+| `?2026h` / `?2026l` | tmux ≥ 3.7 implements synchronized output itself and before that it has none at all: wrapped, the mode would be forwarded *past* the process that paints the pane instead of honoured by it |
+| the mouse modes (`?1002`/`?1003`/`?1006`/`?1016` and the four resets) | tmux is the thing that reports the mouse, so these have to reach *it*; sent past it, nothing would ever turn tracking on or off |
+| OSC 52 (§7.4) | the clipboard belongs to the terminal krd is attached to — tmux keeps its own buffers and relays with `set-clipboard`, and a read (`out`) sent beyond it could never be answered back on stdin |
+| the kitty keyboard protocol (`CSI > 15 u`, `CSI ? u`, `CSI < u`) | the answer is what krd gates on, and only tmux — the terminal it is actually talking to — can send one back |
+| the placeholder cells | they are ordinary text (`U+10EEEE` plus diacritics), not escapes: tmux rewrites them like any other cell, and it is the image they point at that needs the envelope |
+
+Measured, not run in a pane: the transform is pinned byte for byte (`--selftest --no-input` is
+61112 B, `--passthrough on` is 68119 B in 637 envelopes, and stripping them reproduces the plain
+stream exactly; forward-wrapping every `ESC _ … ESC \` span of the plain stream reproduces the
+wrapped stream), but **tmux is not installed** on the machine this was built on, so the end-to-end
+pane test has not been run. The `auto` guess, the doubling rule and the 11-byte cost come from
+tmux's own parser and manual, not from a live pane.
+
+Limits: tmux ≥ 3.3 with `allow-passthrough` on (`set -g allow-passthrough on` — it is off by
+default) and one level of nesting only (a DCS inside a DCS is not forwarded). tmux < 3.7 has no
+`?2026` at all, so a picture there arrives in pieces: never frozen, but a resize can tear it.
 
 ## 7. Input: what the terminal sends
 

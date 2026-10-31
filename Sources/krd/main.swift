@@ -94,6 +94,14 @@ struct Options {
     var square = false
     /// Force the pane size in cells (bench/selftest only; a real run reads it from the tty).
     var pane: (cols: Int, rows: Int)? = nil
+    /// Wrap every graphics APC in tmux's DCS passthrough envelope (`--passthrough`, issue #107).
+    /// `auto` (the default) means "when `TERM` says the pane is a multiplexer", which is off for a
+    /// normal terminal, so the byte contract is untouched unless someone is really in tmux.
+    /// See `TmuxPassthrough.resolve` for the precedence against `KRD_PASSTHROUGH`.
+    var passthrough: PassthroughMode = .auto
+    /// Whether `--passthrough` was typed. Only then does it beat `KRD_PASSTHROUGH`, so a shell
+    /// profile that sets the variable cannot be overridden by the default.
+    var passthroughPinned = false
 
     // benchmarks (docs/BENCHMARK.md)
     /// Source aspect for --bench/--selftest: the display the tiles are fitted into.
@@ -233,6 +241,12 @@ func usage() -> String {
       --square           square corners on the wall's pictures (default: rounded)
       --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
                           pixel-sized placement. Default: one probe at startup, then the answer
+      --passthrough <m>   wrap every graphics APC in tmux's DCS passthrough envelope, for a pane
+                          inside a multiplexer: auto (default), on or off. auto wraps when TERM is
+                          tmux-* or screen-*, which is how the multiplexer names itself over ssh;
+                          `on` is for a server that forces TERM=xterm. Needs tmux >= 3.3 with
+                          `set -g allow-passthrough on`, and one level of nesting only.
+                          KRD_PASSTHROUGH=on|off|auto is the same switch
       --dry-run           parse input but only log it, never post CGEvent
       --debug             geometry + per-second stats on stderr
       --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
@@ -314,6 +328,14 @@ func adaptiveQualityRefusal(bench: Bool, selftest: Bool, recording: Bool, replay
 func parseIMESpec(_ spec: String) throws -> IMEMode {
     guard let mode = IMEMode(spec: spec) else {
         throw UsageError("--ime wants auto|raw|unicode, got \"\(spec)\"")
+    }
+    return mode
+}
+
+/// `--passthrough <spec>`, or a usage error: a typo must not silently pick a mode.
+func parsePassthroughSpec(_ spec: String) throws -> PassthroughMode {
+    guard let mode = PassthroughMode(spec: spec) else {
+        throw UsageError("--passthrough wants auto|on|off, got \"\(spec)\"")
     }
     return mode
 }
@@ -552,6 +574,12 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             options.ime = try parseIMESpec(value("--ime", args, &i))
         case let arg where arg.hasPrefix("--ime="):
             options.ime = try parseIMESpec(String(arg.dropFirst("--ime=".count)))
+        case "--passthrough":
+            options.passthrough = try parsePassthroughSpec(value("--passthrough", args, &i))
+            options.passthroughPinned = true
+        case let arg where arg.hasPrefix("--passthrough="):
+            options.passthrough = try parsePassthroughSpec(String(arg.dropFirst("--passthrough=".count)))
+            options.passthroughPinned = true
         case "--clipboard":
             options.clipboard = try parseClipboardSpec(value("--clipboard", args, &i))
         case "--clipboard-paste":
@@ -875,6 +903,22 @@ final class Desk {
     func run() async throws {
         // Before any branch: --bench, --selftest and the live path all go through this writer.
         writer.quality = options.quality
+        // A multiplexer consumes an APC body itself, so the graphics escapes have to go out inside
+        // its passthrough envelope (`--passthrough`, issue #107). Decided once, here, before the
+        // first byte and by the same rule for every path -- and off for a normal terminal, which
+        // is what keeps the dump and the golden fixtures byte-identical.
+        let passthrough = TmuxPassthrough.resolve(
+            flag: options.passthroughPinned ? options.passthrough : nil,
+            env: ProcessInfo.processInfo.environment)
+        // Set on the sink itself, not just the writer: the geometry probe (`a=t` and friends)
+        // writes before a frame exists, and it is the probe that must survive tmux (issue #107).
+        GraphicsAPC.passthrough = passthrough.on
+        writer.passthrough = passthrough.on
+        if passthrough.on || options.debug {
+            // A log line, not stderr: inside a pane a line of text scrolls the picture off its own
+            // grid (CONTRIBUTING.md rule 1), and `Log` is a file whenever logging is configured.
+            Log.write("krd: passthrough \(passthrough.on ? "on" : "off") (\(passthrough.why))\n")
+        }
         effectiveFps = options.fps
         if options.qualityAuto {
             qualityGovernor = QualityGovernor(start: .init(quality: options.quality.value,
@@ -2419,7 +2463,7 @@ final class Desk {
             try await Task.sleep(nanoseconds: 6_000_000_000)
             if ProcessInfo.processInfo.environment["KRD_DELTEST"] != nil {
                 // one lone delete, in its own write, outside any synchronized block
-                writer.write("\u{1B}_Ga=d,i=901\u{1B}\\")
+                writer.writeAPC("Ga=d,i=901")   // same sink, so it is enveloped like the rest
                 Log.write("krd: sent lone delete for 901\n")
             }
             try await Task.sleep(nanoseconds: 20_000_000_000)
@@ -3528,6 +3572,7 @@ final class Desk {
     private func activeEnvSwitches() -> String {
         let env = ProcessInfo.processInfo.environment
         let keys = ["KRD_Q", "KRD_FORMAT", "KRD_SYNC", "KRD_NOSYNC", "KRD_REAP", "KRD_DUMP",
+                    "KRD_PASSTHROUGH",
                     "KRD_GRID", "KRD_QUADRANTS", "KRD_DELTEST", "KRD_RAWDUMP"]
         let active = keys.filter { env[$0] != nil }
         if active.isEmpty { return "none" }

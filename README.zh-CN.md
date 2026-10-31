@@ -69,6 +69,9 @@ wall                         # 同一个落地屏的另一个名字（安装脚�
 krd --symbols ascii          # 每个字形都只占一格（终端把 ▲ 画成两格宽时用）
 krd --debug                  # 统计写日志文件，不会打到画面上
 krd --format rgba            # 终端不认 f=24 时退回 f=32
+krd --passthrough on         # 在 tmux/screen 里：把每条图像转义包进 DCS passthrough，让 tmux 转发出去
+                             # （auto|on|off，或 KRD_PASSTHROUGH；默认 auto：TERM 以 tmux 或 screen
+                             # 开头时打开，其它终端关着；见 TROUBLESHOOTING §1c）
 krd --bench                  # 在合成帧上给编码器计时，不需要终端
 ```
 

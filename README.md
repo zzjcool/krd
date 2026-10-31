@@ -79,6 +79,9 @@ wall                         # the same landing screen under its own name (a sym
 krd --symbols ascii          # one-cell-everywhere glyphs (terminals that draw ▲ two wide)
 krd --debug                  # stats to a log file, never to the screen
 krd --format rgba            # fall back to f=32 if the terminal rejects f=24
+krd --passthrough on         # inside tmux/screen: wrap every image escape in a DCS passthrough so
+                             # tmux forwards it (auto|on|off, KRD_PASSTHROUGH; default auto = on when
+                             # TERM starts with tmux or screen; see TROUBLESHOOTING §1c)
 krd --bench                  # time the encoder on synthetic frames, no terminal needed
 make bench                   # every layer + budget verdicts -> bench/report.md
 ```
