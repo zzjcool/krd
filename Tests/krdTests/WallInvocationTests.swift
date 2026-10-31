@@ -231,10 +231,11 @@ final class StickyArgumentTests: XCTestCase {
     }
 
     func testCheapSettingsSurviveBothDirections() throws {
-        let typed = try options(["--scale", "0.8", "--quality", "70", "--fps", "10",
-                             "--cell", "17x33", "--dpr", "1", "--square", "--cursor"])
+        let typed = try options(["--scale", "0.8", "--quality", "70", "--wall-quality", "50",
+                             "--fps", "10", "--cell", "17x33", "--dpr", "1", "--square", "--cursor"])
         let sticky = Desk.stickyArguments(typed)
         XCTAssertEqual(sticky, ["--cell", "17x33", "--scale", "0.8", "--quality", "70",
+                                "--wall-quality", "50",
                                 "--fps", "10", "--dpr", "1", "--square", "--cursor"])
 
         // The wall's way back and the mirror's way forward both carry it, and re-parsing has to give
@@ -246,6 +247,9 @@ final class StickyArgumentTests: XCTestCase {
             XCTAssertTrue(again.scalePinned)
             XCTAssertEqual(again.quality.value, 70)
             XCTAssertTrue(again.qualityPinned)
+            // The two knobs are independent: the wall's rung is not the mirror's (issue #88).
+            XCTAssertEqual(again.wallQuality.value, 50, "\(arguments)")
+            XCTAssertEqual(again.wallQuality.label, "4-4-4")
             XCTAssertEqual(again.fps, 10)
             XCTAssertEqual(again.dpr, 1)
             XCTAssertEqual(again.cell?.w, 17)

@@ -62,7 +62,13 @@ krd --no-input               # watch only
 krd --quality 70            # how much colour the picture may lose: 100 = lossless, 80 (default) =
                             # 5-6-5 on incompressible tiles, 70 = 5-5-5, 50 = 4-4-4 everywhere
 krd --quality auto          # let krd spend colour first (80->70->50), then frame rate, then scale
-krd --no-quantise           # same as --quality 100
+krd --no-quantise           # same as --quality 100 (the mirror's lossless; the wall's is
+                            # --wall-quality 100)
+krd --wall-quality 70       # the landing screen's pictures: 100 = lossless, 70 (default) = 5-5-5,
+                            # 50 = 4-4-4. Bit depth only — the picture is still exactly its
+                            # cells, so a first picture on a slow link costs ~half the bytes
+                            # with nothing cropped and no seam. Separate from --quality (the
+                            # mirror's knob), and it survives a click into a window and back
 krd --cursor                 # draw the target's pointer into the picture (default: hidden —
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture

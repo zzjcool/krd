@@ -56,6 +56,21 @@ final class QualityTests: XCTestCase {
         XCTAssertEqual(QualityBudget(100).label, "lossless")
     }
 
+    /// The landing screen's rung (issue #88): the same ladder, a different question, and a default of
+    /// its own. It is a rung (`QualityBudget(70)`), never a second encoding - which is what keeps the
+    /// knob "bits per pixel" instead of "a smaller picture in the same box".
+    func testTheWallHasItsOwnRungOnTheSameLadder() {
+        XCTAssertEqual(QualityBudget.wall.value, 70)
+        XCTAssertEqual(QualityBudget.wall.label, "5-5-5")
+        XCTAssertEqual(QualityBudget.wall.bits, QualityBudget.fiveFiveFive)
+        XCTAssertTrue(QualityBudget.wall.isLossy)
+        // `eager` is the mirror tiles' guard and the wall never reads it (`WallPictures.quantised`
+        // uses `bits` only): asserting it here would pin one path's policy with the other's test.
+        XCTAssertEqual(QualityBudget.wall, QualityBudget(70))
+        XCTAssertNotEqual(QualityBudget.wall, QualityBudget.default,
+                          "the wall and the mirror are separate knobs")
+    }
+
     func testOutOfRangeValuesClampAndSaySo() {
         XCTAssertEqual(QualityBudget(101).value, 100)
         XCTAssertEqual(QualityBudget(-7).value, 0)

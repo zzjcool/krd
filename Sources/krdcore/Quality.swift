@@ -58,6 +58,28 @@ public struct QualityBudget: Equatable {
     /// 5-6-5 behind the two-frame guard: what krd did before `--quality` existed.
     public static let `default` = QualityBudget(80)
 
+    /// The landing screen's own rung: 5-5-5, and quantised *eagerly* rather than behind the
+    /// incompressible-tile guard (issue #88).
+    ///
+    /// Why the wall gets its own number instead of following `--quality`: the two spend different
+    /// things. The mirror's number answers "how much fidelity is worth paying for per frame on this
+    /// link" and its ladder moves it 80 -> 70 -> 50 as the pipe falls behind. The wall has no ladder
+    /// and no frames: it captures once per change, and what the reader waits for is
+    /// *time-to-first-picture* over a link that already carries the picture.
+    ///
+    /// Why 5-5-5 is the right rung for these pixels specifically: the stage is a desktop screenshot - dark
+    /// title bars, flat backgrounds, near-flat gradients, big runs of one colour - and the cards are
+    /// window thumbnails of the same material. Dropping the low bits is what gives deflate long
+    /// matches to point at, and it is *cheaper to encode* than lossless, so the rung buys bytes and
+    /// milliseconds on the same axis. The damage is invisible at the size these pictures are drawn:
+    /// the stage is a 1955x1221 picture of a 1920x1199 desktop (issue #88), i.e. nobody is reading
+    /// 24-bit gradients off it.
+    ///
+    /// The one thing this rung must never become is a *smaller picture*: the wall's rule is that the
+    /// picture is its cells (§6.6, #121), so a quality knob for it may only drop bits per pixel, never
+    /// pixels per cell. `PanelImage.fit` stays the only thing that decides the picture's size.
+    public static let wall = QualityBudget(70)
+
     /// The value the user asked for, clamped to 0...100.
     public let value: Int
     /// `nil` means lossless. Otherwise the bit depth every quantised tile is reduced to.
