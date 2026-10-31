@@ -370,19 +370,26 @@ pane    137 × 73 格               单元格 17 × 33 px
 同一批计数器，各自的间隔就短了一半，打印出来的速率也就只有一半（issue #52）。
 
 ```
-stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[cap=<ms> pipe=<ms>(p99 <ms>) zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  delivered=<n>/s skipped=<n>/s idle=<n>/s bad=<n>  input=<ms> late=<n>/<n>
+stats: <瓦片/秒> tiles/s  <脏块数> dirty  <KB> KB  <MB/s>  ms[cap=<ms> pipe=<ms>(p99 <ms> max <ms>) zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  delivered=<n>/s skipped=<n>/s idle=<n>/s bad=<n>  input=<ms> late=<n>/<n>
 ```
 
 `tiles/s` 是 `framesEmitted` 的增量（数的是瓦片，不是帧）；`KB` 是最近一帧压缩后的负载；`MB/s` 是最近
 一秒写出的字节；`delivered`/`skipped`/`idle` 都换算成每秒；`idle`/`bad` 是没有像素缓冲的
 ScreenCaptureKit 帧，按 sample attachments 里的 status 区分（`idle` = 状态这么说或者根本没有状态，
-`bad` = 它声称 `complete`）；`late` 是 `--quality auto` 降速后帧循环主动丢掉的帧数。
+`bad` = 它声称 `complete`）；`late` 数的是 `write(2)` 超过当前档位周期（`1000/fps`）的帧，或最近一次往返超过
+`KRD_RTT_BUDGET_MS` 的帧——也就是「链路正在丢」的因果版本（`Desk.noteFrame`）。它**不是**
+「帧循环主动丢掉的帧」：被降速丢掉的帧在测量之前就已经返回了。
 
 `cap` 与 `pipe` 是回答「慢在采集还是慢在我们」的那一刀：
 
 - `cap = ScreenCaptureKit 回调 − PTS`，在 sample handler 最前面测（`CMSampleBufferGetPresentationTimeStamp`
   和 `benchNowMs()` 同一个时钟基准）。10 fps 下它本身就有约 50 ms，所以「画面卡」通常不是编码器的锅。
 - `pipe = 回调 → 最后一个字节写出`，即我们对这一帧做的全部事情。
+- 两者都是**每帧一个采样**，由帧循环写入（`Desk.recordFrameLatency`），1 Hz 的 tick 只**读**。
+  #91 之前 tick 每秒把 `lastPipeMs` 推进序列一次，于是 `pipe p99` 是「20 fps 的工作量隔着一秒的
+  钥匙孔看到的 p99」：一帧阻塞了 1,368 ms，同一个 tick 里 `pipe 0.30 p99 0.36`，而 `write max`
+  写着 1367.86。`pipe max` 是环里最差的一帧——300 个采样的 nearest-rank p99 是第 4 差，所以只有
+  `max` 看得见单次卡顿。
 - `e2e = cap + pipe`，就是状态栏上那个 `frame`；`cap` 为 `—` 时状态栏叫它 `pipe`：没有采集那一半可加，
   这个和就是 pipe 本身。
 

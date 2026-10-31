@@ -427,15 +427,17 @@ renderer because rates are *deltas over an interval* — two timers over the sam
 interval and print half the rate (issue #52).
 
 ```
-stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[cap=<ms> pipe=<ms>(p99 <ms>) zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  delivered=<n>/s skipped=<n>/s idle=<n>/s bad=<n>  input=<ms> late=<n>/<n>
+stats: <tiles/s> tiles/s  <dirty> dirty  <KB> KB  <MB/s>  ms[cap=<ms> pipe=<ms>(p99 <ms> max <ms>) zlib=<ms> write=<ms> max=<ms> over5=<n>]  <WxH> px <CxR> cells  delivered=<n>/s skipped=<n>/s idle=<n>/s bad=<n>  input=<ms> late=<n>/<n>
 ```
 
 `tiles/s` is the delta of `framesEmitted` (tiles, not frames), `KB` is the last frame's compressed
 payload, `MB/s` is bytes written in the last second, `delivered`/`skipped`/`idle` are per second and
 come from ScreenCaptureKit's own frames (`idle` = no pixel buffer and the status says so, `bad` =
 it claims `complete` but has no pixels), `write max`/`over5` are the worst `write(2)` block of the
-second and how many frames exceeded 5 ms, and `late` counts frames the loop declined because
-`--quality auto` had lowered the target rate.
+second and how many frames exceeded 5 ms, and `late` counts frames whose `write(2)` took longer than
+the rung the loop is aiming at (`1000/fps`), or whose last measured round trip exceeded
+`KRD_RTT_BUDGET_MS` — the causal version of "the link is losing" (`Desk.noteFrame`). It is *not*
+"frames the loop declined": a frame the governor declines is dropped before it is measured.
 
 **The frame-rate gate (`FrameGate`).** A rung below `--fps` is enforced by declining frames: the
 capture keeps arriving at `--fps` and the loop drops the ones it does not need, before anything is
@@ -467,6 +469,12 @@ pins the three rungs against 20/30/60 fps captures and prints that table.
   ahead of the callback (−10…+10 ms at 20 fps), which clamps to 0: those are timely frames, not
   unmeasured ones.
 - `pipe = callback → last byte written`: everything we do with the frame.
+- Both are **one sample per frame**, fed by the frame path (`Desk.recordFrameLatency`) and only *read*
+  by the 1 Hz tick. Until #91 the tick pushed one `lastPipeMs` per second, so `pipe p99` was the p99
+  of 20 fps worth of work seen through a 1 Hz keyhole: a frame that blocked for 1,368 ms was reported
+  as `pipe 0.30 p99 0.36` in the same tick whose `write max` said 1367.86. `pipe max` is the worst
+  frame in the ring — the nearest-rank p99 of 300 samples is the 4th worst, so *one* hiccup can only
+  show up there.
 - `e2e = cap + pipe` is the number the status bar prints as `frame` — or as `pipe` when `cap` is `—`,
   since with no capture half to add the sum *is* the pipe half.
 

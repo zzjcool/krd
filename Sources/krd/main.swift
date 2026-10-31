@@ -891,7 +891,8 @@ final class Desk {
     /// picture that is only encoded when the desk changes (design §12: no frame loop to pay for).
     private static let wallPanelLevel = 3
     /// Recent timings, newest captured each second. Percentiles rather than averages: a stutter is a
-    /// p99, and the mean is exactly what hides one (see `Series`).
+    /// p99, and the mean is exactly what hides one (see `Series`). `cap` and `pipe` are the exception:
+    /// they are fed by the frame path, one sample per *frame* (issue #91, see `recordFrameLatency`).
     private var capSeries = Series()
     private var pipeSeries = Series()
     private var zlibSeries = Series()
@@ -3246,6 +3247,10 @@ final class Desk {
             // A frame that changed nothing writes nothing, so it says nothing about the pipe
             // (issue #64). Those frames used to never reach this function at all (#95).
             if !dedupedFrame { lastPipeMs = benchNowMs() - started }
+            // Both halves of the `frame` row go into their series **here**, once per frame
+            // (issue #91): the 1 Hz tick only reads them. `capturer.lastCapMs` is this frame's own
+            // age of capture — the capture queue is serial, and it was set just before `onFrame`.
+            recordFrameLatency(capMs: capturer.lastCapMs, pipeMs: dedupedFrame ? nil : lastPipeMs)
             if writer.framesEmitted != emittedBefore {
                 noteFrame(writeMs: writer.lastWriteMs)
             }
@@ -3489,6 +3494,7 @@ final class Desk {
         out += "target \(m.target)\(m.title.isEmpty ? "" : " (\(m.title))")\n"
         out += "frame \(Series.show(m.e2eMs)) ms (cap \(m.capLabel) + pipe \(Series.show(m.pipeMs)))"
             + ", p99 cap \(m.capP99Label) pipe \(Series.show(m.pipeP99Ms))"
+            + ", pipe max \(Series.show(m.pipeMaxMs))"
             + ", input \(Series.show(m.inputMs)) ms, rtt \(m.rttLabel) (p99 \(m.rttP99Label))\n"
         out += String(format: "geometry %dx%d px, %dx%d cells of %gx%g (%@), scale %.3g%@\n",
                       m.pxW, m.pxH, m.cellsW, m.cellsH, m.cellW, m.cellH, m.geometrySource,
@@ -3504,8 +3510,9 @@ final class Desk {
         out += "log \(m.logPath)\n"
         if !m.recording.isEmpty { out += "recording \(m.recording)\n" }
         out += "\n== series (oldest first)\n"
-        out += series("cap", capSeries)
-        out += series("pipe", pipeSeries)
+        let latency = frameLatencySnapshot()
+        out += series("cap", latency.cap)
+        out += series("pipe", latency.pipe)
         out += series("zlib", zlibSeries, decimals: 2)
         out += series("write", writeSeries, decimals: 2)
         out += series("input", inputSeriesSnapshot())
@@ -3606,11 +3613,11 @@ final class Desk {
         if options.debug {
             let line = String(
                 format: "stats: %d tiles/s  %d dirty  %d KB  %.2f MB/s  "
-                    + "ms[cap=%.1f pipe=%.1f(p99 %.1f) zlib=%.0f write=%.0f max=%.0f over5=%d]  "
+                    + "ms[cap=%.1f pipe=%.1f(p99 %.1f max %.1f) zlib=%.0f write=%.0f max=%.0f over5=%d]  "
                     + "%dx%d px %dx%d cells  delivered=%d/s skipped=%d/s idle=%d/s bad=%d  "
                     + "input=%.1f rtt=%.1f late=%d/%d\n",
                 m.tilesPerSec, m.dirty, m.kbPerFrame, m.mbps,
-                m.capMs, m.pipeMs, m.pipeP99Ms, m.zlibMs, m.writeMs, m.writeMaxMs, m.writeOver5,
+                m.capMs, m.pipeMs, m.pipeP99Ms, m.pipeMaxMs, m.zlibMs, m.writeMs, m.writeMaxMs, m.writeOver5,
                 m.pxW, m.pxH, m.cellsW, m.cellsH,
                 Int(m.captureFps.rounded()), Int(m.skippedPerSec.rounded()),
                 Int(m.idlePerSec.rounded()), m.bad, m.inputMs,
@@ -3653,6 +3660,37 @@ final class Desk {
         rateCounters = current
         rateSampleAt = now
         return lastRates
+    }
+
+    /// The `frame` row's two series, fed by the frame path and read by the 1 Hz tick.
+    ///
+    /// **One sample per frame, not one per second** (issue #91). `pipe` used to enter its ring once a
+    /// second, from `sampleChrome()` pushing a single `lastPipeMs`: that is the p99 of 20 fps worth of
+    /// work seen through a 1 Hz keyhole. A frame that blocked for 1,368 ms reported `pipe_ms 0.30`
+    /// and `pipe_p99 0.36` in the same tick whose `write_max_ms` said 1367.86, and `pipe_p99` never
+    /// left 0.40 ms for a whole run. `Series` is a ring either way, so the honest version costs one
+    /// append per frame where it used to cost a property store per frame plus a sample per second.
+    ///
+    /// Written on the capture queue and read on the main queue (`sampleChrome`, `writeReport`), so
+    /// it goes through the same `stateLock` the grid and the previous frame already use for that
+    /// handoff.
+    private func recordFrameLatency(capMs: Double, pipeMs: Double?) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        // `cap >= 0` is "there is a presentation timestamp to measure against"; `--mock`, `--replay`
+        // and `--selftest` have none and must leave the series empty rather than record a zero.
+        if capMs >= 0 { capSeries.add(capMs) }
+        // `nil` = a frame that changed nothing: it wrote nothing, so it says nothing about the pipe
+        // (issue #64). It still says how old the capture already was, hence `cap` above.
+        if let pipeMs { pipeSeries.add(pipeMs) }
+    }
+
+    /// A copy of the two series for the tick and the report, taken under the same lock that
+    /// `recordFrameLatency` writes them with.
+    private func frameLatencySnapshot() -> (cap: Series, pipe: Series) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return (capSeries, pipeSeries)
     }
 
     /// Fill `chromeMetrics` from the same counters the `--debug` line prints, plus the rates
@@ -3708,14 +3746,18 @@ final class Desk {
         // `pipe` is everything we do with it until the last byte is out. `e2e` is their sum, and it
         // is the only number that answers "was it the capture or the write" (issue #52).
         let capNow = capturer.lastCapMs
-        if capNow >= 0 { capSeries.add(capNow) } else { capSeries = Series() }
-        pipeSeries.add(lastPipeMs)
+        // The two series were filled by the frame path, one sample per frame (issue #91). The tick
+        // reads them; it must not add to them, which is what made `pipe p99` a 1 Hz average.
+        let latency = frameLatencySnapshot()
+        m.capMs = capNow
+        m.capP99Ms = capNow >= 0 && !latency.cap.isEmpty ? latency.cap.percentile(0.99) : -1
+        m.pipeMs = lastPipeMs
+        m.pipeP99Ms = latency.pipe.isEmpty ? 0 : latency.pipe.percentile(0.99)
+        // A p99 over 300 frames is the 4th-worst of them, so *one* 1,368 ms frame cannot move it —
+        // `max` is the readout that shows a single hiccup (issue #91).
+        m.pipeMaxMs = latency.pipe.isEmpty ? 0 : latency.pipe.max
         zlibSeries.add(writer.lastCompressMs)
         writeSeries.add(writer.lastWriteMs)
-        m.capMs = capNow
-        m.capP99Ms = capSeries.isEmpty ? -1 : capSeries.percentile(0.99)
-        m.pipeMs = lastPipeMs
-        m.pipeP99Ms = pipeSeries.isEmpty ? 0 : pipeSeries.percentile(0.99)
         m.e2eMs = capNow >= 0 ? capNow + lastPipeMs : lastPipeMs
         m.zlibMs = writer.lastCompressMs
         m.zlibP99Ms = zlibSeries.isEmpty ? 0 : zlibSeries.percentile(0.99)
