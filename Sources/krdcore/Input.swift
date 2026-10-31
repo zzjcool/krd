@@ -139,13 +139,30 @@ public final class InputParser {
         switch buffer[1] {
         case 0x5B:                                  // CSI: ESC [ ... final
             var i = 2
+            // An SGR mouse report is read straight out of `buffer` (issue #105): the parameter
+            // body is digits and ';', so building a `String` for it only to `split` it back into
+            // numbers is 76 % of the cost of one report on a terminal with motion reporting on.
+            // `ascii` keeps the one case where the bytes and the text disagree: a body that is
+            // not valid UTF-8 is "" on the string side and so never a mouse report at all.
+            var ascii = true
             while i < buffer.count {
                 let b = buffer[i]
                 if b >= 0x40 && b <= 0x7E {
+                    // `M`/`m` only: `n` and `u` are read before the mouse branch in `handleCSI`,
+                    // and any other final still goes through it unchanged.
+                    if ascii, (b == 0x4D || b == 0x6D), buffer[2] == 0x3C,
+                       let report = buffer.withUnsafeBufferPointer({ bytes in
+                           Self.scanMouseSGR(bytes: bytes, start: 3, end: i,
+                                             isRelease: b == 0x6D)
+                       }) {
+                        emit(.mouse(report))
+                        return i + 1
+                    }
                     let params = String(bytes: buffer[2..<i], encoding: .utf8) ?? ""
                     handleCSI(params: params, final: b)
                     return i + 1
                 }
+                if b >= 0x80 { ascii = false }
                 i += 1
             }
             return nil
@@ -303,6 +320,74 @@ public final class InputParser {
         return mods
     }
 
+    /// One SGR mouse report, `CSI < b ; x ; y M|m`, scanned in place (issue #105).
+    ///
+    /// `bytes[start..<end]` is the parameter body just past the `<`; `end` is the index of the
+    /// final byte, so no terminator is needed. Nothing here allocates: no `String`, no `Substring`,
+    /// no array — the fields are accumulated as they are walked.
+    ///
+    /// It reads the body the way `handleMouse(_:isRelease:)` below reads it, field for field: the
+    /// integer rule is Swift's `Int(_:)` rule (a leading `+`/`-` is a sign, a value outside `Int`
+    /// is not a number), an empty field is skipped, and a field that is not a number is *dropped*
+    /// rather than failing the report — so `b;x;y` are the first three surviving fields, and fewer
+    /// than three means the sequence was never a report.
+    static func scanMouseSGR(bytes: UnsafeBufferPointer<UInt8>, start: Int, end: Int,
+                             isRelease: Bool) -> MouseReport? {
+        var b = 0, x = 0, y = 0
+        var fields = 0
+        var i = start
+        while i < end, fields < 3 {                             // the first three are the report
+            let fieldStart = i
+            while i < end, bytes[i] != 0x3B { i += 1 }           // ';'
+            if i > fieldStart, let value = integer(bytes, fieldStart, i) {
+                switch fields {
+                case 0: b = value
+                case 1: x = value
+                default: y = value
+                }
+                fields += 1
+            }
+            i += 1                                              // step over the ';'
+        }
+        guard fields >= 3 else { return nil }
+        return MouseReport(button: b & 3, x: x, y: y, isWheel: (b & 64) != 0,
+                           isRelease: isRelease, isMotion: (b & 32) != 0,
+                           mods: mouseModifiers(b))
+    }
+
+    /// `Int(_:)` over a byte range, accepting and rejecting exactly what the string initialiser
+    /// accepts and rejects: optional sign, then at least one digit, and `nil` when the value does
+    /// not fit in `Int` (no trap — the old path got `nil` from `Int` and dropped the field).
+    private static func integer(_ bytes: UnsafeBufferPointer<UInt8>,
+                                _ start: Int, _ end: Int) -> Int? {
+        guard start < end else { return nil }
+        var i = start
+        var negative = false
+        if bytes[i] == 0x2D { negative = true; i += 1 }         // '-'
+        else if bytes[i] == 0x2B { i += 1 }                     // '+'
+        guard i < end else { return nil }                       // "", "-", "+"
+        var magnitude: UInt64 = 0
+        while i < end {
+            let digit = Int(bytes[i] &- 0x30)
+            guard digit >= 0, digit <= 9 else { return nil }
+            let (scaled, overflowed) = magnitude.multipliedReportingOverflow(by: 10)
+            guard !overflowed else { return nil }
+            let (sum, carried) = scaled.addingReportingOverflow(UInt64(digit))
+            guard !carried else { return nil }
+            magnitude = sum
+            i += 1
+        }
+        // `Int.min` has one more magnitude than `Int.max`; anything past that is not an `Int`.
+        let limit = UInt64(Int.max) &+ 1
+        if negative, magnitude == limit { return Int.min }
+        guard magnitude < limit else { return nil }
+        return negative ? -Int(magnitude) : Int(magnitude)
+    }
+
+    /// The string form of the report, kept as the exactness fallback: it is what runs for a
+    /// parameter body that is not ASCII (a valid-UTF-8 body whose fields can still be numbers
+    /// must keep parsing, and one that is not valid UTF-8 must keep emitting nothing) and for a
+    /// `<`-prefixed CSI whose final byte is neither `M` nor `m`.
     private func handleMouse(_ params: String, isRelease: Bool) {
         let body = params.dropFirst()                       // strip '<'
         let parts = body.split(separator: ";").compactMap { Int($0) }
