@@ -356,6 +356,12 @@ put into a mode whose whole point is to send bytes to that reader. Any real inpu
 too (a key, a click, the wheel), so a picture frozen by `--unfocused-fps 0` comes back on the first
 thing you type or click, `CSI I` or no `CSI I`.
 
+**`CSI 5n` is the one query here with two callers, and both send it on a tick.** A mirror asks it from
+the 1 Hz diagnostics tick, at most once every 2 s (`probeRoundTrip()`, `main.swift`); `--wall` asks it
+from the wall's own 1 Hz tick (`wallTick`), because the wall draws the link's pill and ran no
+diagnostics tick at all before issue #199. Same 4 bytes, never more than one probe outstanding, and
+both stop asking after three unanswered probes.
+
 ### 7.1 Cell vs pixel coordinates, and the downgrade rule
 
 A cell coordinate can never exceed the terminal's grid, so:
