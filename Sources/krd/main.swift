@@ -2897,14 +2897,20 @@ final class Desk {
         // piled up in its userspace buffer. The round trip sees the same congestion earlier, because
         // its own answer queues behind those bytes (issue #52).
         let rttLate = rttProbe.lastMs > rttBudgetMs
-        let late = writeMs > 1000.0 / Double(max(target, 1)) || rttLate
+        // One rule, kept in `krdcore` so a test can feed it a synthetic timeline (issue #93). A frame
+        // whose `write` blocked for 2.5 s is **one** late frame but **2.5 s** of wall clock, and the
+        // ladder has to see the seconds: counting frames, the burst of fast frames that follows the
+        // hang diluted it to ~2.5 % of a 3 s window, so a link that froze the picture nine times in
+        // 34 s never left the top rung. `span` is that blocked time, floored at the frame interval.
+        let sample = QualityGovernor.frameSample(writeMs: writeMs, targetFps: target, rttLate: rttLate)
+        let late = sample.late
         if late { lateSinceTick += 1 }
         let now = benchNowMs() / 1000.0
         // Colour and frame rate first: they are cheap to give up and cheap to take back, and they
         // do not touch the capture stream. Resolution is the last lever and belongs to the other
         // governor, which must wait until this ladder has nothing left (see `QualityGovernor`).
         if options.qualityAuto {
-            if let change = qualityGovernor.observe(at: now, late: late) {
+            if let change = qualityGovernor.observe(at: now, late: late, span: sample.span) {
                 DispatchQueue.main.async { [weak self] in self?.applyQualityChange(change) }
             } else {
                 qualityGovernor.settle(at: now)

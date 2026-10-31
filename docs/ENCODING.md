@@ -189,6 +189,17 @@ to a 4-byte `CSI 5n` probe took longer than `KRD_RTT_BUDGET_MS` (250 ms by defau
 the picture, so it sees the backlog earlier). A terminal without DSR turns the probe off and leaves
 the governor with write latency, which is what it had before.
 
+A sample is **wall time, not a frame** (issue #93). Counting late frames is self-defeating on a pipe
+that stalls: a frame whose `write(2)` blocks for 2.5 s removes exactly the frames that would have been
+its samples, so one hang was worth **one** late frame, the burst of fast frames after it diluted the
+ratio to ~2.5 % of the 3 s window, and a link that froze the picture nine times in 34 s never left the
+top rung. Each sample therefore carries the blocked time of its own write, floored at one frame
+interval (`QualityGovernor.frameSample`), and the ratio is `Σ span(late) / Σ span` — the fraction of
+wall clock the pipe spent behind. One 2.5 s hang is 50 frame intervals of evidence and steps the
+ladder down on its own; a slow link that keeps moving is many small late spans, i.e. the behaviour
+that already worked. The span comes from the write duration and never from the gap between samples,
+so an idle screen — which emits no frames at all — cannot be mistaken for a stall.
+
 The frame-rate step is enforced in the frame loop rather than in ScreenCaptureKit: the capture keeps
 delivering at `--fps`, and the frames the loop declines cost no zlib, no bytes and no dirty-region
 pass. The panel's `fps` target follows the rung, so the plumbing stays visible.
