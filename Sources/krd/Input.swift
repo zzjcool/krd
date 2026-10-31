@@ -77,7 +77,21 @@ final class InputReader {
     private var loggedDiscardSerial = 0
     /// Prefix-mode byte handling for the TUI layer (`--dev`). Returns true when the byte belongs
     /// to the chrome, i.e. must not reach the remote desktop.
+    ///
+    /// Asked from three places, all of them the reader thread: `handleControl` (a control byte,
+    /// armed or not), `ingest` (the bytes of one read that arrive while the prefix is armed) and
+    /// `chromeChordByte` (the same rule stated for the parser's events). The last two are #115:
+    /// every documented chord key is *printable*, so the parser used to turn it into a keystroke
+    /// for the mirrored Mac before the chrome was ever asked.
     var onChromeKey: ((UInt8) -> Bool)?
+
+    /// Is the chrome waiting for the second key of its chord (`Ctrl-\` then `s`/`d`/`f`/`l`/`?`/`q`)?
+    ///
+    /// The prefix state belongs to the chrome (`Desk.chromeKey` is its only writer, on this same
+    /// thread), so the reader asks instead of keeping a second copy that could disagree. Never true
+    /// outside `--dev`, and never true in a wall session, which has no chrome and arms nothing: those
+    /// route byte-for-byte as they always did.
+    var chromePrefixArmed: (() -> Bool)?
     /// A click outside the picture, in 1-based cells: the status line and its panels, and — with
     /// `--wall` — the whole pane, which has no picture at all. The third argument is the wheel's
     /// direction: `0` for a click, `-1` for a notch up, `+1` for a notch down. A wall click is a
@@ -154,6 +168,9 @@ final class InputReader {
         self.dryRun = dryRun
         self.forward = forward
         self.onQuit = onQuit
+        // Wired here, not in `start()`: the parser is this class's decoder, and a test that drives
+        // `ingest` has to reach `apply` without owning a tty (`DevChordTests`, #115).
+        parser.onEvent = { [weak self] event in self?.apply(event) }
     }
 
     // MARK: lifecycle
@@ -190,7 +207,6 @@ final class InputReader {
             }
             tcsetattr(STDIN_FILENO, TCSANOW, &raw)
         }
-        parser.onEvent = { [weak self] event in self?.apply(event) }
         Thread.detachNewThread { [weak self] in self?.loop() }
         return true
     }
@@ -289,9 +305,61 @@ final class InputReader {
                 log("raw \(n) bytes: \(hex)")
             }
             readAt = benchNowMs()
-            parser.feed(chunk[0..<n])
+            ingest(chunk[0..<n])
             logDiscardEnd()
         }
+    }
+
+    /// One `read(2)`'s worth of bytes: the chrome's armed chord first, then the parser.
+    ///
+    /// `internal` for the same reason as `handleMouse` — it is the one entry point a read takes, and
+    /// that hand-off is exactly what #115 got wrong. The tty is the only part of `loop()` a test
+    /// process cannot have. Nothing changes for a session whose prefix is not armed: the bytes go to
+    /// `parser.feed` in one slice, as they always did.
+    func ingest(_ bytes: ArraySlice<UInt8>) {
+        var start = bytes.startIndex
+        if let armed = chromePrefixArmed, let chrome = onChromeKey {
+            while start < bytes.endIndex, armed() {
+                let byte = bytes[start]
+                // Only a key that is one byte on the wire and one key on the keyboard can be the
+                // second half of a chord: `ESC` starts a sequence (the parser is the only thing that
+                // can say which one, and it has to see the whole of it) and a byte with the high bit
+                // set is half a character. Both keep the old path and leave the prefix armed.
+                guard byte != 0x1B, byte < 0x80 else { break }
+                guard chrome(byte) else { break }
+                start += 1
+            }
+        }
+        if start < bytes.endIndex { parser.feed(bytes[start...]) }
+    }
+
+    /// The chrome's chord byte, when this event is the second key of an armed prefix (#115).
+    ///
+    /// `ingest` catches a chord byte before it is parsed, which is what keeps it out of the parser's
+    /// buffer. This is the same rule stated in the parser's own vocabulary, and it is not redundant:
+    /// `Ctrl-\` and the key after it usually arrive in *one* read (`input: raw 2 bytes: 1c 71`), so the
+    /// prefix is armed mid-chunk and the second key has already been parsed by the time it is due.
+    ///
+    /// Three shapes, because the wire has three: a control byte, `text` (the legacy encoding) and a
+    /// kitty key report (`CSI u`). Only unmodified single keys are chord keys — `Ctrl-C` keeps its
+    /// documented meaning of "forwarded to the remote", and no multi-byte character is one of
+    /// `s`/`d`/`f`/`l`/`?`/`h`/`q`.
+    private func chromeChordByte(_ event: Event) -> UInt8? {
+        guard chromePrefixArmed?() == true else { return nil }
+        let byte: UInt8?
+        switch event {
+        case let .control(b):
+            byte = b
+        case let .text(ch, mods):
+            byte = mods.isEmpty ? ch.asciiValue : nil
+        case let .key(report):
+            byte = report.mods == 0 && report.phase != .release ? UInt8(exactly: report.code) : nil
+        default:
+            byte = nil
+        }
+        // `ESC` is never a chord key: see `ingest`.
+        guard let byte, byte != 0x1B else { return nil }
+        return byte
     }
 
     // MARK: events from krdcore
@@ -299,6 +367,8 @@ final class InputReader {
     /// What one parsed event means for this machine (issue #45). The parser only says what the
     /// bytes were; the mapping, the IME policy, the click counter and the clipboard all live here.
     private func apply(_ event: Event) {
+        // The chord is the chrome's before it is the desktop's (see `chromeChordByte`).
+        if let chord = chromeChordByte(event), onChromeKey?(chord) == true { return }
         switch event {
         case let .key(report):
             handleKeyReport(report)
