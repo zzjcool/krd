@@ -1,5 +1,6 @@
 import XCTest
 @testable import krd
+import krdcore
 
 /// The chrome layer is the one part of krd allowed to write text to the tty, which means every
 /// invariant it breaks is a corrupted picture rather than a cosmetic bug. Each test here is a
@@ -1119,5 +1120,158 @@ final class ChromeBarTests: XCTestCase {
         XCTAssertTrue(text.contains("[ - ]"))
         XCTAssertFalse(text.contains("12:34:56"))
         XCTAssertEqual(chrome.hitTest(row: 1, col: 22, geometry: geo), .statusSegment("shrink"))
+    }
+}
+
+/// Issue #87: the bar carries the delay we already measure, and `[ ≡ ]` opens three sliders — colour
+/// (the bit depth `--quality` allows), quality (how eagerly the encoder spends it) and fps (1…20).
+/// Each tick is a `hit` id on a panel cell, so a click is the whole interaction: no key opens the
+/// menu and no key moves a slider (the chord table is somebody else's table, and the bar exists on
+/// pages without `--dev`).
+final class ChromeMenuTests: XCTestCase {
+    private func barText(_ m: ChromeMetrics, cols: Int = 120) -> String {
+        let geo = Chrome.layout(paneCols: cols, paneRows: 20, imageCols: cols, imageRows: 18,
+                                bar: true, dev: false, panel: nil)
+        let bytes = Chrome().draw(geometry: geo, metrics: m, state: ChromeState())
+        // Positioned writes, so the printable runs are in order and the escapes between them do not
+        // break a `contains`.
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private func menuMetrics(quality: Int = 80, label: String = "5-6-5", eager: Bool = false,
+                             fps: Int = 12) -> ChromeMetrics {
+        var m = ChromeMetrics()
+        m.title = "Terminal — admin — scroll.sh"
+        m.clock = "12:34:56"
+        m.fps = 18
+        m.mbps = 1.8
+        m.rttAvailable = true
+        m.rttMs = 38
+        m.quality = quality
+        m.qualityLabel = label
+        m.qualityEager = eager
+        m.qualityGoverned = true
+        m.fpsTarget = fps
+        return m
+    }
+
+    // MARK: the delay
+
+    /// The bar's delay is the measured round trip, with its unit, and the two "no measurement"
+    /// states are the ones `rttLabel` already distinguishes from a zero (issue #87: do not print 0).
+    func testTheBarShowsTheMeasuredRoundTripWithItsUnit() {
+        let text = barText(menuMetrics())
+        XCTAssertTrue(text.contains("38.0 ms"), "the round trip belongs on the bar: \(text)")
+        XCTAssertTrue(text.contains("[ ≡ ]"), "and the way into the three sliders")
+        XCTAssertTrue(text.contains("1.8 MB/s"), "…next to the rate, as the issue asks")
+        XCTAssertTrue(text.contains("12:34:56"), "…and the clock the user compares with their own")
+
+        var off = menuMetrics()
+        off.rttAvailable = false
+        off.rttMs = .nan
+        let unmeasured = barText(off)
+        XCTAssertTrue(unmeasured.contains("— ms"), "no probe / no DSR is not a number: \(unmeasured)")
+        XCTAssertFalse(unmeasured.contains("0.0 ms"), "a terminal without DSR is a capability, not zero")
+        XCTAssertFalse(unmeasured.contains("0 ms"), "a terminal without DSR is a capability, not zero")
+    }
+
+    /// The ladder, without a pane: fps > delay > clock > rate (issue #87).
+    func testTheBarDropsTheRateBeforeTheDelayAndTheFpsLast() {
+        func numbers(_ room: Int) -> String {
+            Chrome.barNumbers(room: room, fps: "  18 fps", mbps: "1.8 MB/s", delay: "38.0 ms",
+                              clock: "12:34:56")
+        }
+        XCTAssertEqual(numbers(200), "  18 fps · 1.8 MB/s · 38.0 ms · 12:34:56")
+        XCTAssertEqual(numbers(30), "  18 fps · 38.0 ms · 12:34:56", "the rate goes first")
+        XCTAssertEqual(numbers(26), "  18 fps · 38.0 ms", "then the clock")
+        XCTAssertEqual(numbers(8), "  18 fps", "the delay outlives the clock; fps never leaves")
+        XCTAssertEqual(numbers(0), "", "no room is no numbers, not a clipped one")
+    }
+
+    // MARK: the menu
+
+    /// Every tick is a control and everything else in the box is still the panel's (the wheel needs
+    /// it), which is the one thing this route change could have broken.
+    func testEveryMenuTickIsAClickTargetAndTheRestOfTheBoxIsStillThePanels() {
+        let geo = Chrome.layout(paneCols: 120, paneRows: 30, imageCols: 120, imageRows: 20,
+                                bar: true, dev: true, panel: .menu)
+        let chrome = Chrome()
+        _ = chrome.draw(geometry: geo, metrics: menuMetrics(), state: ChromeState(panel: .menu))
+        var ids: Set<String> = []
+        var panelCells = 0
+        for row in (geo.panelTop + 1)...(geo.panelTop + geo.panelHeight) {
+            for col in 1...geo.cols {
+                switch chrome.hitTest(row: row, col: col, geometry: geo) {
+                case .statusSegment(let id): ids.insert(id)
+                case .insidePanel: panelCells += 1
+                case .outside: XCTFail("row \(row) col \(col) is inside the box")
+                }
+            }
+        }
+        // The tick each axis is currently on, one id per drawn cell of the track.
+        XCTAssertTrue(ids.contains("rung:colour:2"), "80 is 5-6-5, the third rung: \(ids)")
+        XCTAssertTrue(ids.contains("rung:quality:0"), "guarded: \(ids)")
+        XCTAssertTrue(ids.contains("rung:fps:11"), "12 fps is step 11: \(ids)")
+        XCTAssertTrue(ids.contains("rung:colour:4"), "the lossless end is reachable: \(ids)")
+        XCTAssertTrue(ids.contains("rung:fps:19"), "…and so is 20 fps: \(ids)")
+        XCTAssertFalse(ids.contains("rung:fps:20"), "the track stops at the documented maximum")
+        XCTAssertGreaterThan(panelCells, 0, "the label column still belongs to the panel")
+    }
+
+    /// The bar's way in is a control like `[ - ]`, on the bar's own row.
+    func testTheBarOffersTheMenuNextToTheWayOut() {
+        let geo = Chrome.layout(paneCols: 120, paneRows: 20, imageCols: 120, imageRows: 18,
+                                bar: true, dev: false, panel: nil)
+        let chrome = Chrome()
+        _ = chrome.draw(geometry: geo, metrics: menuMetrics(), state: ChromeState())
+        var found: Set<String> = []
+        for col in 1...geo.cols {
+            if case .statusSegment(let id) = chrome.hitTest(row: 1, col: col, geometry: geo) {
+                found.insert(id)
+            }
+        }
+        XCTAssertEqual(found, ["shrink", "menu"], "the bar has exactly two controls: \(found)")
+    }
+
+    /// What a click means: one table, so a tick cannot draw one value and set another.
+    func testTheTracksAreClampedToTheDocumentedRanges() {
+        XCTAssertEqual(ChromeAxis.colourValues, [50, 70, 80, 90, 100])
+        XCTAssertEqual(ChromeAxis.colourStep(for: 80), 2)
+        XCTAssertEqual(ChromeAxis.colourStep(for: 100), 4)
+        XCTAssertEqual(ChromeAxis.colourStep(for: 0), 0)
+        XCTAssertEqual(ChromeAxis.colourValue(step: 0), 50)
+        XCTAssertEqual(ChromeAxis.colourValue(step: 99), 100, "a step past the end is the end")
+        XCTAssertEqual(ChromeAxis.fpsValue(step: 0), 1)
+        XCTAssertEqual(ChromeAxis.fpsValue(step: 19), 20)
+        XCTAssertEqual(ChromeAxis.fpsValue(step: 99), 20)
+        // …and the two halves of `--quality` are separate: the same number, guarded or eager.
+        XCTAssertEqual(QualityBudget(80).eager, false)
+        XCTAssertEqual(QualityBudget(80, eager: true).eager, true)
+        XCTAssertEqual(QualityBudget(80, eager: true).label, "5-6-5", "eager is not a bit depth")
+        XCTAssertEqual(QualityBudget(70).eager, true, "the rung's own default is unchanged")
+    }
+
+    /// The ids round-trip, and anything that is not one of ours is not a rung.
+    func testARungIdParsesBackToTheAxisAndStep() {
+        XCTAssertEqual(ChromeAxis.parse("rung:fps:11")?.axis, .fps)
+        XCTAssertEqual(ChromeAxis.parse("rung:fps:11")?.step, 11)
+        XCTAssertEqual(ChromeAxis.parse("rung:colour:4")?.axis, .colour)
+        XCTAssertNil(ChromeAxis.parse("rung:fps:20"), "past the last step")
+        XCTAssertNil(ChromeAxis.parse("rung:fps:-1"))
+        XCTAssertNil(ChromeAxis.parse("rung:scale:1"), "no such axis")
+        XCTAssertNil(ChromeAxis.parse("shrink"), "a bar button is not a rung")
+        XCTAssertNil(ChromeAxis.parse("rung:colour"))
+    }
+
+    /// A squeezed pane keeps the tracks it can draw and drops ticks, never draws text past the box.
+    func testANarrowBoxShrinksTheTrackInsteadOfTheBorder() {
+        for cols in [30, 40, 60, 100] {
+            let geo = Chrome.layout(paneCols: cols, paneRows: 30, imageCols: cols, imageRows: 20,
+                                    bar: true, dev: true, panel: .menu)
+            let bytes = Chrome().draw(geometry: geo, metrics: menuMetrics(),
+                                      state: ChromeState(panel: .menu))
+            let text = String(decoding: bytes, as: UTF8.self)
+            XCTAssertFalse(text.contains("\n"), "a newline scrolls the picture away at \(cols) cols")
+        }
     }
 }

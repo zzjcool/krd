@@ -722,6 +722,13 @@ final class Desk {
     /// frames rather than a last-draw mark, because a mark quantises every rung down to a multiple
     /// of the capture period: 15 fps out of a 20 fps capture was 10 fps (issue #140).
     private var frameGate = FrameGate(fps: 20)
+    /// The menu's frame-rate track was used: hold the rate the click asked for.
+    ///
+    /// `--fps` is the *capture* cadence and nothing gates frames for it; only the quality governor's
+    /// rung does, and only while `--quality auto` is in charge. A rate the user picked has to be held
+    /// the same way (`governed` in `handleFrame`), or the slider reads as doing nothing on a link that
+    /// delivers faster than the capture (issue #87).
+    private var fpsPinned = false
     /// Frames and late frames since the last stats tick, for the `late` column.
     private var framesSinceTick = 0
     private var lateSinceTick = 0
@@ -3141,7 +3148,11 @@ final class Desk {
         // mid-stream), and the frames the loop declines cost no zlib, no bytes and no `dirty` pass.
         // `FrameGate.tookFrame` is called *below*, once the frame is known to change something: a
         // frame that changes nothing must not consume the frame-rate slot (#95).
-        let governed = options.qualityAuto && effectiveFps < options.fps
+        //
+        // `fpsPinned` is the menu's frame-rate slider (issue #87): a rate the *user* picked has to be
+        // held the same way a governor's rung is, or the slider would look like it did nothing on a
+        // link that delivers faster than the capture does.
+        let governed = fpsPinned || (options.qualityAuto && effectiveFps < options.fps)
         if governed, !frameGate.owesFrame(at: started) { return }
         // Frames ScreenCaptureKit delivered to us, i.e. what `captureFps` is the rate of -- counted
         // here, before the layout guards, so it stays a different number from `framesHandled`
@@ -3626,6 +3637,10 @@ final class Desk {
         m.kbPerFrame = writer.lastFrameBytes / 1024
         m.quality = writer.quality.value
         m.qualityLabel = writer.quality.label
+        // The menu's three tracks read these (issue #87): which half of `--quality` is set, and
+        // whether a governor still owns the axis -- a slider whose value walks back needs to say so.
+        m.qualityEager = writer.quality.eager
+        m.qualityGoverned = options.qualityAuto
         m.quantisedTiles = writer.quantisedTiles
         m.skippedTiles = writer.skippedTiles
         m.tilesPerSec = Int(lastRates.tilesPerSec.rounded())
@@ -3906,6 +3921,22 @@ final class Desk {
                 shutdown()
                 return
             }
+            // The menu's three sliders (issue #87). The same button closes it: a menu with no way
+            // out but a key would be a keyboard control, and this one has to work on a page that
+            // has no `--dev` chord table at all.
+            if id == "menu" {
+                openPanel(chromeState.panel == .menu ? nil : .menu)
+                return
+            }
+            // A tick on one of the tracks: `rung:colour:2`, `rung:fps:11`, … Applied on the main
+            // queue -- this closure runs on the *reader* thread (`InputReader.onChromeClick`) while
+            // `applyRung` writes the writer's quality and the frame gate.
+            if let rung = ChromeAxis.parse(id) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyRung(rung.axis, rung.step)
+                }
+                return
+            }
             switch id {
             case "stats": openPanel(.stats)
             case "help": openPanel(.help)
@@ -3927,6 +3958,48 @@ final class Desk {
         case .picture:
             break
         }
+    }
+
+    /// One click on a tick in the menu's three tracks (issue #87), on the main queue.
+    ///
+    /// Colour and quality are the two halves of `--quality` and both are **hot**: `writer.quality`
+    /// is rebuilt in place, so the next frame is encoded at the new ceiling and nothing restarts.
+    /// They also **pin** it -- `qualityPinned` is exactly how `--quality <n>` already says "do not
+    /// adapt", and a governor that took the value back within a rung interval would make the slider
+    /// look broken ("a number that walks back by itself after the drag is the worst of the
+    /// options"). The frame-rate track pins the same way and is held by `frameGate`.
+    ///
+    /// The values are clamped by construction: `ChromeAxis` owns the rungs, so a step is always one
+    /// of `QualityBudget`'s documented bit depths or inside `--fps`'s 1…20.
+    private func applyRung(_ axis: ChromeAxis, _ step: Int) {
+        switch axis {
+        case .colour:
+            options.quality = QualityBudget(ChromeAxis.colourValue(step: step),
+                                            eager: options.quality.eager)
+            writer.quality = options.quality
+            options.qualityPinned = true
+            options.qualityAuto = false
+            Log.write("krd: menu colour \(step) -> q\(options.quality.value) \(options.quality.label)"
+                      + "\(options.quality.eager ? " eager" : "") (pinned: no governor)\n")
+        case .quality:
+            options.quality = QualityBudget(options.quality.value, eager: step == 1)
+            writer.quality = options.quality
+            options.qualityPinned = true
+            options.qualityAuto = false
+            Log.write("krd: menu quality \(step) -> q\(options.quality.value)"
+                      + "\(options.quality.eager ? " eager" : " guarded") (pinned: no governor)\n")
+        case .fps:
+            let fps = ChromeAxis.fpsValue(step: step)
+            options.fps = fps
+            effectiveFps = fps
+            frameGate = FrameGate(fps: fps)
+            fpsPinned = true
+            Log.write("krd: menu fps \(step) -> \(fps) fps (held by the frame gate)\n")
+        }
+        // Repaint now, not on the next 1 Hz tick: a slider that answers a second late reads as a
+        // click that missed.
+        chromeDirty = true
+        drawChrome()
     }
 
     /// Whether the chrome owns a cell, asked from the *reader* thread (`InputReader.chromeOwns`).
