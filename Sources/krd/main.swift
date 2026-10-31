@@ -218,6 +218,11 @@ func usage() -> String {
                           (--wall-quality) and --full-frame ignores both. 'auto' is the default:
                           it spends colour first (80 -> 70 -> 50), then frame rate
                           (20 -> 15 -> 10), and only then lets --scale auto take resolution.
+                          The frame-rate rungs are targets, not floors: the capture keeps
+                          arriving at --fps and the loop declines frames so the *average* is the
+                          rung, so 15 fps out of a 20 fps capture really is 15.0 fps. The
+                          delivered rate is the number --stats and the --dev bar print next to
+                          the target, so a rung that cannot be held is visible, not implied
                           Give a number to pin it (--quality 80 is then exactly the old behaviour)
       --no-quantise       same as --quality 100 (pinned, no ladder). It is the MIRROR's lossless:
                           the wall's is --wall-quality 100, and --no-quantise does not set it
@@ -713,7 +718,10 @@ final class Desk {
     /// Frames per second the loop is currently allowing. `--fps` is the capture target; this is what
     /// the encoder actually runs at when the governor has taken a step.
     private var effectiveFps = 20
-    private var lastDrawAt = Double(0)
+    /// Which of the capture's frames the current rung lets through. A deadline carried across
+    /// frames rather than a last-draw mark, because a mark quantises every rung down to a multiple
+    /// of the capture period: 15 fps out of a 20 fps capture was 10 fps (issue #140).
+    private var frameGate = FrameGate(fps: 20)
     /// Frames and late frames since the last stats tick, for the `late` column.
     private var framesSinceTick = 0
     private var lateSinceTick = 0
@@ -948,6 +956,7 @@ final class Desk {
             Log.write("krd: passthrough \(passthrough.on ? "on" : "off") (\(passthrough.why))\n")
         }
         effectiveFps = options.fps
+        frameGate = FrameGate(fps: options.fps)
         if options.qualityAuto {
             qualityGovernor = QualityGovernor(start: .init(quality: options.quality.value,
                                                            fps: options.fps))
@@ -2863,7 +2872,9 @@ final class Desk {
         guard options.qualityAuto else { return }
         writer.quality = QualityBudget(change.to.quality)
         effectiveFps = change.to.fps
-        lastDrawAt = 0
+        // A new rung owes a frame at once (the picture should not wait a period to get the better
+        // rate), and carries its deadline from there.
+        frameGate = FrameGate(fps: change.to.fps)
         chromeDirty = true
         Log.write("krd: \(change.line)\n")
     }
@@ -3128,10 +3139,10 @@ final class Desk {
         // A frame-rate step from the governor is enforced here, before anything is encoded: the
         // capture still delivers at `--fps` (ScreenCaptureKit's cadence is not worth reconfiguring
         // mid-stream), and the frames the loop declines cost no zlib, no bytes and no `dirty` pass.
-        // `lastDrawAt` is advanced *below*, once the frame is known to change something: a frame
-        // that changes nothing must not consume the frame-rate slot (#95).
+        // `FrameGate.tookFrame` is called *below*, once the frame is known to change something: a
+        // frame that changes nothing must not consume the frame-rate slot (#95).
         let governed = options.qualityAuto && effectiveFps < options.fps
-        if governed, started - lastDrawAt < 1000.0 / Double(max(effectiveFps, 1)) - 1 { return }
+        if governed, !frameGate.owesFrame(at: started) { return }
         // Frames ScreenCaptureKit delivered to us, i.e. what `captureFps` is the rate of -- counted
         // here, before the layout guards, so it stays a different number from `framesHandled`
         // ("drawn") and from `framesSkipped` ("delivered, and changed nothing"), #95.
@@ -3206,7 +3217,7 @@ final class Desk {
         // the panel's `frames x/y fps` row and `framesTotal` all mean "drawn"), so it advances here
         // and not above the identical check — a frame that changed nothing is not handled.
         framesHandled += 1
-        if governed { lastDrawAt = started }
+        if governed { frameGate.tookFrame(at: started) }
 
         // Recording happens before the tile pass, i.e. it captures exactly the frames the
         // pipeline would render (post-dedupe, post-resize).

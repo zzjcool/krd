@@ -91,6 +91,13 @@ log, help — reached with `Ctrl-\` then `s`/`d`/`f`/`l`/`?`, or by clicking the
 The picture keeps every row above the status line; a panel takes its rows out of the picture and
 gives them back when it closes. `make dev` is the shortcut.
 
+The `fps` segment is `delivered/target`. That slash matters under `--quality auto`: its frame-rate
+rungs (`20 -> 15 -> 10`) are **targets, not floors**. The capture keeps arriving at `--fps` and the
+loop declines frames so the *average* is the rung — a 20 fps capture asked for 15 draws
+`draw, drop, draw, draw, drop, …`, so single gaps alternate 50/100 ms while the delivered rate is
+15.0. A rung that cannot be held shows up as `11.2/15 fps` in the bar (and in `--stats`), never as a
+silently mislabelled 15 (issue #140).
+
 `--mock` swaps ScreenCaptureKit for a desktop drawn in process (`--mock-size WxH`, default
 1920x1200). Tiles, dirty rects, the encoder, the placements and the chrome are all the real
 code — only the pixels are synthetic, so it needs no permission and never stops. `make dev-mock`.
