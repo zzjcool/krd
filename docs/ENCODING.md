@@ -348,9 +348,9 @@ already has; `--scale 1` pins it, `--scale 0.4` fixes any value.
 `--bench`, `--selftest`, `--record` and `--replay` pin it to 1 and say so once
 (`krd: --record captures at scale 1 (...)`). They either have no pipe to measure, or they produce
 something a later run reads back: a recording whose frame size changed mid-file has every frame valid
-on its own and **nothing in the file marks the change**, and `--replay` would then feed frames that
-disagree with the header it read at the start. A fixed `--scale 0.5` is still allowed there, because
-it is constant.
+on its own and **nothing in the file marks the change**, and `--replay` refuses such a recording
+before the first frame instead of feeding frames that disagree with the header it read at the
+start. A fixed `--scale 0.5` is still allowed there, because it is constant.
 
 **The signal is backpressure, not encoder time.** A frame is *late* when it took longer to come out
 than the interval it has to fit in (`write_ms > 1000/fps`, and `--stats-json` reports the ratio per
