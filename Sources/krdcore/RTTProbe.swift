@@ -43,6 +43,13 @@ public struct RTTProbe: Equatable {
     public var lastMs: Double { series.last }
     public var p99Ms: Double { series.percentile(0.99) }
     public var p50Ms: Double { series.percentile(0.5) }
+    /// The smallest round trip in the ring, in ms (`nan` before the first answer).
+    ///
+    /// The one number that tells "held" from "slow" (issue #199): a fast minimum means no packet
+    /// was ever waiting, so a late median is the ssh client batching replies rather than a pipe that
+    /// is behind. `nan` on an empty ring, and `LinkVerdict.classify` treats that as no measurement
+    /// rather than as a very fast one.
+    public var minMs: Double { series.min }
 
     /// The frame path's lateness question about the link: "is the round trip bad enough that the next
     /// frame should count as late" (#52, #187).
@@ -67,6 +74,20 @@ public struct RTTProbe: Equatable {
     public func isLate(budgetMs: Double) -> Bool {
         guard isMeasuring, misses == 0, series.count >= 2 else { return false }
         return series.all.suffix(2).allSatisfy { $0 > budgetMs }
+    }
+
+    /// The link's symptom, from the probe's own history (issue #199). **The rule is
+    /// `LinkVerdict.classify`**; this function is the guard in front of it, and the guard is the same
+    /// one #187 put in front of `isLate`: no verdict may be derived from an answer that is no longer
+    /// a measurement.
+    ///
+    /// Three ways that happens, and all three answer `unknown`: the probe switched itself off (a
+    /// terminal without DSR), the newest probe expired unanswered (`expire()` deliberately leaves
+    /// `series` alone, so the last number that happened to land can sit there for good), and there is
+    /// no answer at all (`Series` answers `nan`, which must not be read as a minimum of zero).
+    public func linkVerdict() -> LinkVerdict {
+        guard isMeasuring, misses == 0 else { return .unknown }
+        return LinkVerdict.classify(minMs: series.min, p50Ms: p50Ms, count: series.count)
     }
 
     /// Should a probe be written now? A query only: pair it with `sent(at:)` once the bytes are out,

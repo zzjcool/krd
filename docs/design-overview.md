@@ -187,6 +187,57 @@ what the wall's first hover got wrong at 18 KB a move (PR #195). One control is 
 the `scale` readout names a number nothing on this page can move, so it neither hovers, nor presses,
 nor routes — the state the plan calls `disabled`, rather than a string no switch happens to answer.
 
+### 5.1 The link's symptom, as a pill (the OKT pill)
+
+A slow ssh session has two causes that look identical on screen, and only one of them is the network.
+The plan (`docs/design-ui-v2.zh-CN.md` §2.2, §5.3) measured the other one on a lossless link: p50 round
+trip **23.5 ms** with OpenSSH 10's `ObscureKeystrokeTiming` on, **0.59 ms** with `ObscureKeystrokeTiming
+no`, and the *minimum* **0.71 ms** in both cases. So a late median over a fast minimum is the client
+batching the terminal's own replies, and the fix is one line of `~/.ssh/config`.
+
+`LinkVerdict` (`krdcore/LinkVerdict.swift`) is that rule, and it is pure arithmetic over `RTTProbe`'s
+series — no clock, no terminal, no pty:
+
+| verdict | condition | what it means | on screen |
+|---|---|---|---|
+| `held` | min < 2 ms ∧ p50 ≥ 15 ms ∧ ≥ 8 answers | the wire is fast and the keystrokes are held | `[ keys held ]` |
+| `slow` | min ≥ 2 ms ∧ p50 ≥ 15 ms ∧ ≥ 8 answers | the wire itself is behind — congestion, the quality ladder's job (#187) | nothing |
+| `fine` | p50 < 15 ms | measured, nothing to say | nothing |
+| `unknown` | no answer, fewer than 8 answers, or the probe is off / its newest probe expired | nothing to say — the rest state | nothing |
+
+**The minimum is the whole design.** A congested link has no moment at which nothing is queued, so its
+minimum climbs with its median; that single comparison is what keeps the pill from telling a reader
+with a genuinely slow link that his link is fine. Both thresholds are the issue's numbers, frozen with
+~2× of slack over the measurements (`LinkVerdict.heldMinMs`, `.heldP50Ms`, `.minAnswers`), and "never
+while the probe has no fresh answer" is #187's own guard, reused rather than re-invented
+(`RTTProbe.linkVerdict()`: `isMeasuring && misses == 0`) — `expire()` leaves the ring alone on purpose,
+and the last number that happened to land in it is not a measurement of anything.
+
+The pill is drawn where the reader is, from **one string** (`LinkVerdict.pill`) so the two grids cannot
+describe one measurement differently: the **mirror's bar** (`Chrome.drawBar`, between the numbers and
+`[ ≡ ]`) and the **wall's header row** (`WallCanvas.drawHeader`, right-aligned, the counts keeping their
+cells). In the bar it is one widget in the same table as every other control (`ChromeWidget`: id
+`link`, action `.openPanel(.stats)`), so it hovers, presses and routes exactly as `[ - ]` does, and a
+click opens the stats panel whose `rtt` row names the setting that fixes it (`ssh holds the replies:
+ObscureKeystrokeTiming no`). In the wall it is a readout, deliberately: the wall has no panels to open,
+and inventing one for a single sentence would be a second navigation model — the clickable pill is one
+`[ - ]` away in the mirror's bar.
+
+Budgets, measured on a 120×30 bar and a 100×30 wall: the repaint that puts the pill on screen is
+**89 B** (bar) and **29 B** (wall), the one that takes it away **84 B** and **28 B** — all far under the
+600 B hover budget, let alone the menu's 6 KB — and a verdict that does *not* change paints **0 B**.
+That last figure is the wall's idle contract, so it is asserted by a process and not by a unit test:
+`LinkPillProcessTests` drives a fake terminal that answers `CSI 5n` on a 20 ms grid with three of its
+eight answers immediate, waits for the pill on the pane, and then requires that 3.5 s of further probes
+put **nothing but the probes themselves** on the pane.
+
+**The wall had no probe tick at all before this.** `startDiagnostics()` is mirror-only, so `--wall` sent
+no `CSI 5n` and the pill's state could never exist on the page that draws it. The wall's own 1 Hz tick
+(`wallTick`) now steps the same probe through the same machinery, publishes **one value under
+`stateLock`** (#187's shape: a painter reads the published value and never the probe) and repaints with
+the text-only paint the pointer and the focus ring already use — a link is never a reason to re-capture
+a picture — **only when the verdict changes**.
+
 ## 6. The bar on the right
 
 There is exactly one shape of scroll control that works in a terminal: **big, on the edge, always in the same

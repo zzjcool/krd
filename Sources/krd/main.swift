@@ -995,6 +995,10 @@ final class Desk {
     /// budget"), not a peek at its latest sample. Guarded by `stateLock`; `false` until the probe
     /// knows enough to say otherwise.
     private var rttLinkLate = false
+    /// The link's *symptom*, decided on the same tick and published the same way (#199): one value
+    /// under `stateLock`, read by the wallpaper's paint and by the chrome's metrics, never computed
+    /// by a painter from the probe itself. `unknown` until the probe knows enough to say otherwise.
+    private var rttLink = LinkVerdict.unknown
     private var lastRates = Rates()
     private var rateCounters = Rates.Counters()
     private var rateSampleAt = Double(0)
@@ -1030,6 +1034,13 @@ final class Desk {
         capturer.format = writer.format
         capturer.showsCursor = options.drawsCursor
         writer.resize(tiles: 0)
+        // The probe's cadence, for a test that cannot wait 15 s for eight answers (`swift test` runs
+        // the wall's pill test through a pty at one probe per tick). `setInterval` clamps to its own
+        // 500 ms floor, so this knob cannot make the probe cheaper than the design allows: 4 bytes
+        // every couple of seconds stays the shipped default (`RTTProbe.interval`).
+        if let raw = ProcessInfo.processInfo.environment["KRD_RTT_INTERVAL_MS"], let ms = Double(raw) {
+            rttProbe.setInterval(ms / 1000)
+        }
     }
 
     func run() async throws {
@@ -1781,6 +1792,16 @@ final class Desk {
     /// model. No window server call happens here — that is the whole difference to the old tick.
     private func wallTick() {
         guard !cleanedUp, wallState != nil, let drawn = wallPane else { return }
+        // The wall's own link probe (issue #199). `startDiagnostics()` is mirror-only, so `--wall`
+        // had no `CSI 5n` in it at all and the pill's state could never exist on the page that draws
+        // it. Same machinery, same rule, same publication as the mirror's tick (#187's shape); what
+        // differs is the paint: the wall re-sends nothing unless the *symptom* moved, so an answered
+        // probe on a link that is fine costs the 4 bytes it took to ask and nothing else. The repaint
+        // is the text-only one the pointer and the focus ring already use — a link is not a reason to
+        // re-capture a single picture.
+        if probeRoundTrip() {
+            drawWall(textOnly: true)
+        }
         // The grid can change without a resize report (an ssh client that resizes its own pty), so
         // it is re-read every tick - an ioctl, no query. The *cell* is not: it is re-measured on a
         // resize only (`remeasureWallPane`), because a terminal that answers `CSI 16t` late is not
@@ -2135,10 +2156,12 @@ final class Desk {
                 paints.notice = .screenRecordingDenied(terminal: program)
             }
         }
+        // The link's symptom, read once per paint: the header's pill is a fact about the last tick,
+        // and a paint that read the probe would be a second decision about the same series (#199).
         let text = canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
                                layout: layout, focus: state.focus,
                                cellW: pane.cellW, cellH: pane.cellH, paints: paints,
-                               pointer: state.pointer, ring: state.ring)
+                               pointer: state.pointer, ring: state.ring, link: currentLinkVerdict())
         // The canvas answers with no bytes when the frame it was asked for is the frame already on
         // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
         // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
@@ -3150,6 +3173,12 @@ final class Desk {
         return rttLinkLate
     }
 
+    /// The link's symptom, for anything that paints (see `rttLink` and issue #199).
+    private func currentLinkVerdict() -> LinkVerdict {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return rttLink
+    }
+
     /// ScreenCaptureKit wants the crop relative to the filter's content: the window frame for a
     /// window filter, the display for a display filter. A full-frame capture sends nil so the
     /// terminal keeps getting exactly what it got before zoom existed.
@@ -4023,8 +4052,12 @@ final class Desk {
             && options.record == nil && options.replay == nil
     }
 
-    private func probeRoundTrip() {
-        guard rttEnabled else { return }
+    /// - Returns: whether the link's *symptom* changed. The wall repaints on that answer and on
+    ///   nothing else (issue #199): a probe that arrives and changes nothing must be 0 bytes, because
+    ///   the wall's idle property is a byte contract and not a nicety.
+    @discardableResult
+    private func probeRoundTrip() -> Bool {
+        guard rttEnabled else { return false }
         let now = benchNowMs() / 1000
         // The answer, if one arrived since the last tick. Its timestamp is the input thread's, so
         // the round trip is accurate even though this runs at 1 Hz.
@@ -4049,15 +4082,31 @@ final class Desk {
         // says nothing at all. A `Bool` under `stateLock` is also what keeps `noteFrame` out of
         // `rttProbe` — a struct with a `Series` in it, mutated on this queue.
         let late = rttProbe.isLate(budgetMs: rttBudgetMs)
+        // …and the symptom, from the same history and on the same tick (#199). The rule is
+        // `LinkVerdict.classify`; what this line adds is the publication, so a painter never reads
+        // the probe (a struct with a `Series` in it, mutated here) and never decides the rule
+        // twice. `min`/`p50`/`count` are logged on a change, because "the pill lit" has to be
+        // answerable from the log too.
+        let link = rttProbe.linkVerdict()
         stateLock.lock()
         let flipped = rttLinkLate != late
+        let symptomChanged = rttLink != link
         rttLinkLate = late
+        rttLink = link
         stateLock.unlock()
         if flipped {
             Log.write(late
                 ? "krd: link late — the last two round trips were over \(Int(rttBudgetMs)) ms\n"
                 : "krd: link no longer late — under \(Int(rttBudgetMs)) ms again, or no answer to say\n")
         }
+        if symptomChanged {
+            // Interpolated rather than `String(format:)`: `%d` against a Swift `Int` reads 32 bits of
+            // a 64-bit word, and a log line is not worth that trap.
+            Log.write("krd: link \(link.rawValue) — min \(Series.show(rttProbe.minMs)) ms, p50 "
+                      + "\(Series.show(rttProbe.p50Ms)) ms, \(rttProbe.series.count) answers"
+                      + (link.advice.map { " (\($0))" } ?? "") + "\n")
+        }
+        return symptomChanged
     }
 
     /// The one 1 Hz diagnostics tick: sample once, then feed every consumer from that snapshot --
@@ -4288,7 +4337,10 @@ final class Desk {
         m.inputActive = input != nil
         m.rttMs = rttProbe.lastMs
         m.rttP99Ms = rttProbe.p99Ms
+        m.rttMinMs = rttProbe.minMs
         m.rttAvailable = rttEnabled && rttProbe.isMeasuring
+        // The pill's whole input (#199): one published value, not a rule re-run in the drawer.
+        m.link = currentLinkVerdict()
         m.inputMs = input?.lastInputMs ?? 0
         m.inputP99Ms = input?.inputP99Ms ?? 0
         m.dryRun = options.dryRun

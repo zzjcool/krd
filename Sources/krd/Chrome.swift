@@ -160,6 +160,13 @@ extension ChromeMetrics {
     /// without DSR is a capability, not a zero, and `0 ms` would be a lie.
     var delayLabel: String { "\(rttLabel) ms" }
 
+    /// The bar's link pill: the sentence `LinkVerdict` owns, drawn only while the link's symptom is
+    /// `held` (#199). The pill is the *minimum*'s verdict, so the delay readout next to it can read a
+    /// confident `22 ms` while nothing is wrong with the wire — which is exactly the confusion the
+    /// pill exists to end. `nil` is the rest state: no probe, too few answers, a terminal that does not
+    /// answer, or a link that is merely slow.
+    var linkPill: String? { link.pill }
+
     /// The whole frame, `cap + pipe`, or `—` when the capture half was not measured (`capMs < 0`:
     /// `--mock`, `--replay`, `--selftest`). With no `cap`, `e2eMs` *is* the pipe half, so printing it
     /// as the frame put a confident `0 ms` in one column of a row whose own note said
@@ -211,6 +218,12 @@ struct ChromeMetrics {
     var rttMs = Double.nan
     var rttP99Ms = Double.nan
     var rttAvailable = false
+    /// The smallest round trip in the probe's ring: with `rttMs` it is the pair the link pill's rule
+    /// is decided on, printed in the panel the pill opens (#199). `nan` = no answer yet.
+    var rttMinMs = Double.nan
+    /// The link's symptom (#199), published by the last probe tick. `unknown` is the rest state, and
+    /// it is also what a terminal without DSR gets: a capability is not a symptom.
+    var link: LinkVerdict = .unknown
     var inputMs = 0.0
     var inputP99Ms = 0.0
     /// Bytes sitting in the pty's own output buffer (`TIOCOUTQ`), -1 = not available.
@@ -670,6 +683,10 @@ final class Chrome {
     /// stops at our last write. It carries its unit, and `— ms` when there is no measurement
     /// (probe off, or a terminal that never answers `CSI 5n`); issue #87: do not print `0`.
     ///
+    /// `linkPill` sits between the numbers and the buttons while the link's symptom is `held`
+    /// (#199): a slow-looking session whose *minimum* is fast is OpenSSH holding the keys, and that
+    /// is one config line away from being fast.
+    ///
     /// The numbers share one ladder (`barNumbers`): fps > delay > clock > rate, so a narrow pane
     /// gives up the rate first and the delay outlives both the clock and the rate.
     private func drawBar(row: Int, geometry: ChromeGeometry, m: ChromeMetrics) {
@@ -694,13 +711,23 @@ final class Chrome {
         let button = " [ - ] "
         let menu = " [ ≡ ] "
         let buttons = DisplayWidth.of(button) + DisplayWidth.of(menu)
-        let numbers = Chrome.barNumbers(room: max(0, cols - x - buttons - 1),
+        // The link pill (#199): the sentence `LinkVerdict` owns, drawn only while the link's symptom
+        // is `held`, and reserved before the numbers ladder rather than as part of it — a symptom a
+        // rate readout trimmed away would be worse than no pill at all. It is drawn only when its
+        // own cells *and* eight for whatever sits to its left fit, so it can never land on a traffic
+        // light (one cell, one owner, #200): on a row too narrow for that the pill is a log line and
+        // not a painted lie.
+        let pill = m.linkPill.flatMap { p in
+            DisplayWidth.of(p) + 2 <= cols - x - buttons - 8 ? p : nil
+        }
+        let pillCells = pill.map { DisplayWidth.of($0) + 2 } ?? 0
+        let numbers = Chrome.barNumbers(room: max(0, cols - x - buttons - pillCells - 1),
                                         fps: String(format: "%4.0f fps", m.fps),
                                         mbps: String(format: "%.1f MB/s", m.mbps),
                                         delay: m.delayLabel,
                                         clock: m.clock)
         // The title gets whatever the right side does not need, and is cut rather than wrapped.
-        let right = buttons + (numbers.isEmpty ? 0 : DisplayWidth.of(numbers) + 2)
+        let right = buttons + pillCells + (numbers.isEmpty ? 0 : DisplayWidth.of(numbers) + 2)
         let room = max(0, cols - x - right - 1)
         if room > 8 {
             let title = DisplayWidth.truncate(m.title, to: room)
@@ -713,6 +740,16 @@ final class Chrome {
         paint("shrink", .control(.shrink)) { text(rx, row, button, .barBright) }
         rx -= DisplayWidth.of(menu)
         paint("menu", .control(.togglePanel(.menu))) { text(rx, row, menu, .barBright) }
+        if let pill {
+            rx -= DisplayWidth.of(pill) + 2
+            // A control, not a readout: what a click on it does is open the stats panel, whose `rtt`
+            // row carries the sentence and the setting that fixes it (`LinkVerdict.advice`). A pill
+            // that only says "something is wrong" is a worry; this one ends in a line of
+            // `~/.ssh/config`. Its id is the name the hover answers; the behaviour is the action.
+            paint("link", .control(.openPanel(.stats))) {
+                text(rx, row, "  " + pill, .barBright)
+            }
+        }
         if !numbers.isEmpty {
             rx -= DisplayWidth.of(numbers) + 2
             paint("numbers", .furniture) { text(rx, row, "  " + numbers, .barDim) }
@@ -1152,10 +1189,18 @@ final class Chrome {
                  String(format: "%@ · pipe %.0f p99 %.0f max %.0f", cap, m.pipeMs, m.pipeP99Ms,
                         m.pipeMaxMs))
             // The network's own share, which `pipe` cannot see: it is measured on the terminal's
-            // reply, so it includes whatever is still queued in front of the picture.
-            line(next(), "rtt", "\(m.rttLabel) ms",
-                 m.rttAvailable ? "p99 \(m.rttP99Label) · CSI 5n round trip"
-                     : (m.inputActive ? "no answer (terminal has no DSR)" : "off"))
+            // reply, so it includes whatever is still queued in front of the picture. When the link
+            // has a symptom the row says which one and what to do about it (#199) — p50 alone cannot
+            // tell "held" from "congested", and that pair is the whole pill.
+            let rttNote: String
+            if let advice = m.link.advice {
+                rttNote = "p99 \(m.rttP99Label) · min \(Series.show(m.rttMinMs)) · " + advice
+            } else if m.rttAvailable {
+                rttNote = "p99 \(m.rttP99Label) · CSI 5n round trip"
+            } else {
+                rttNote = m.inputActive ? "no answer (terminal has no DSR)" : "off"
+            }
+            line(next(), "rtt", "\(m.rttLabel) ms", rttNote)
             line(next(), "encoder", String(format: "zlib %.1f ms", m.zlibMs),
                  String(format: "write %.1f max %.1f over5 %d · q%d %@",
                         m.writeMs, m.writeMaxMs, m.writeOver5, m.quality, m.qualityLabel))

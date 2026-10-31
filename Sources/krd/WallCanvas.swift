@@ -697,9 +697,11 @@ final class WallCanvas {
               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
               paints: WallSlotPaints = WallSlotPaints(),
               pointer: WallPointer = WallPointer(),
-              ring: WallAction? = nil) -> [UInt8] {
+              ring: WallAction? = nil,
+              link: LinkVerdict = .unknown) -> [UInt8] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring)
+                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring,
+                          link: link)
         return render(cells, cols: cols, rows: rows)
     }
 
@@ -713,9 +715,11 @@ final class WallCanvas {
                focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
                paints: WallSlotPaints = WallSlotPaints(),
                pointer: WallPointer = WallPointer(),
-               ring: WallAction? = nil) -> [String] {
+               ring: WallAction? = nil,
+               link: LinkVerdict = .unknown) -> [String] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring)
+                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring,
+                          link: link)
         var out: [String] = []
         out.reserveCapacity(max(0, rows))
         for y in 0..<max(0, rows) {
@@ -742,14 +746,15 @@ final class WallCanvas {
                        focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
                        paints: WallSlotPaints = WallSlotPaints(),
                        pointer: WallPointer = WallPointer(),
-                       ring: WallAction? = nil) -> [Cell] {
+                       ring: WallAction? = nil,
+                       link: LinkVerdict = .unknown) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
         // Order matters only where two elements share a row: the footer and the band header place
         // their right-aligned tail first and draw the left-hand text second, into the budget the
         // tail leaves, so the tail keeps the cells it needs even if a degenerate pane makes them
         // collide.
-        drawHeader(&grid, model: model, layout: layout)
+        drawHeader(&grid, model: model, layout: layout, link: link)
         drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints,
                   pointer: pointer)
         drawStageCaption(&grid, model: model, layout: layout, pointer: pointer)
@@ -766,17 +771,42 @@ final class WallCanvas {
         return grid.cells
     }
 
-    /// `▪ krd    7 windows · 3 displays · most recently used first`
+    /// `▪ krd    7 windows · 3 displays · most recently used first`, and — while the link has a
+    /// symptom — the pill at the right end of the same row.
     ///
     /// The counts come from the model, not from the layout: the layout is geometry and may have
     /// been built for a stale model, while "how many windows are there" is a fact about the data.
-    private func drawHeader(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
+    ///
+    /// **The pill (issue #199).** The wall is where a reader sits, so it is where "this slow session
+    /// is not a slow link" has to be said; `LinkVerdict.pill` is the one string both this row and the
+    /// mirror's bar draw, so the two grids cannot describe one measurement differently. It is a
+    /// *readout* here rather than the bar's clickable control: the wall has no panels at all (its
+    /// controls are cards, the stage and the bar, and the keyboard reaches exactly what the mouse
+    /// reaches — `WallLayout.stops()`), so inventing a panel target for one sentence would be a
+    /// second navigation model. The clickable pill lives in the mirror's bar, one `[ - ]` away
+    /// (`Chrome.drawBar`), and that one opens the stats panel whose `rtt` row names the setting.
+    ///
+    /// It goes on the right, and the counts keep their cells: a wall that drops "3 displays" to make
+    /// room for a symptom has traded a fact for a warning.
+    private func drawHeader(_ grid: inout Grid, model: WallModel, layout: WallLayout,
+                            link: LinkVerdict = .unknown) {
         let content = min(layout.contentCols, grid.cols)
+        var budget = content
+        if let pill = link.pill {
+            let cells = DisplayWidth.of(pill)
+            // Room for the pill *and* the counts beside it, or nothing: the row is furniture, and a
+            // pill that pushed the counts off the end would be the same class of bug as a chip that
+            // clipped a title.
+            if cells + 12 <= content {
+                grid.text(pill, row: layout.headerRow, col: content - cells + 1, .accent)
+                budget = content - cells - 2
+            }
+        }
         let title = "\(symbols.bullet) krd"
-        let used = grid.text(title, row: layout.headerRow, col: 1, .bright, limit: content)
+        let used = grid.text(title, row: layout.headerRow, col: 1, .bright, limit: budget)
         let counts = "    \(model.windows.count) windows\(symbols.dot)\(model.displays.count) displays"
             + "\(symbols.dot)most recently used first"
-        grid.text(counts, row: layout.headerRow, col: 1 + used, .dim, limit: max(0, content - used))
+        grid.text(counts, row: layout.headerRow, col: 1 + used, .dim, limit: max(0, budget - used))
     }
 
     /// The stage. Phase 1 has no picture, so the panel's rectangle is a dim box with the display

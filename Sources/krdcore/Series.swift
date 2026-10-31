@@ -45,6 +45,10 @@ public struct Series: Equatable {
     }
 
     public var max: Double { values.max() ?? .nan }
+    /// The smallest sample, or `nan` when there is none — the pair of `max`, and the number
+    /// `LinkVerdict` turns a symptom on (issue #199: a minimum that stayed low while the median went
+    /// late is the ssh client batching replies, not a pipe that is behind).
+    public var min: Double { values.min() ?? .nan }
     public var mean: Double {
         guard !values.isEmpty else { return .nan }
         return values.reduce(0, +) / Double(values.count)
