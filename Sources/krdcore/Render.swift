@@ -510,9 +510,15 @@ public final class ScreenWriter {
     /// tile has) is known before the first one, so once `2·smooth > total` no remaining byte can
     /// change the answer, and once `2·(smooth + unread) <= total` it is already lost. On hash noise
     /// (3 % smooth) and on text (90 %) that fires halfway through the tile; the pass that cost
-    /// 9.85 ms/frame on the pinned 2329x1452 layout (issue #94) costs about a third of that, and the
-    /// **verdicts are identical by construction**: same integer counters, same threshold, just an
-    /// earlier exit and `UInt8` arithmetic instead of `Int` conversions.
+    /// 9.85 ms/frame on the pinned 2329x1452 layout (issue #94) costs about a third of that.
+    ///
+    /// The counters are the same integer counters as the `Int` reference, at the same threshold, and
+    /// the early exit is a *proof* of the same final answer, so the verdicts agree on every tile —
+    /// but not "by construction": this loop is `UInt8` arithmetic, and getting `|a - b|` out of it
+    /// is a place to be wrong. `SkipCompressionTests` pins it, at the pair level (all 65,536 pairs
+    /// against `abs(Int(a) - Int(b)) <= 4`) and at the tile level (counters and verdict on tiles
+    /// that sit on the cut), because the failure mode is silent: a wrong `UInt8` delta only ever
+    /// *adds* to `smooth`, so it can only ever say "compressible" on content zlib cannot touch.
     ///
     /// Sampling is what issue #94 proposed, and it is *not* what this does. A 1-in-4 sample of the
     /// first channel moves a tile that genuinely sits on the cut: the `photoReal` bench case (a
@@ -535,11 +541,15 @@ public final class ScreenWriter {
                 let start = y == 0 ? row + bpp : row
                 var i = start
                 while i < row + rowBytes {
-                    // Wrapping `UInt8` difference: `|a - b| <= 4` is `d <= 4 || d >= 252`, which
-                    // avoids a widen-to-Int per byte and is why this loop is not bound by the
-                    // conversion.
-                    let d = p[i] &- p[y == 0 ? i - bpp : i - rowBytes]
-                    if d <= 4 || d >= 252 { smooth += 1 }
+                    // The `UInt8` absolute difference, unsigned, without widening to `Int`. This
+                    // has to be the absolute value: the wrapping difference alone is `(a-b) mod 256`,
+                    // so `d >= 252` would also fire on `|a-b| ∈ {252...255}` — 20 of the 65,536 byte
+                    // pairs, and they are the *most* unsmooth ones, which is backwards. Ordering the
+                    // operands first costs a comparison and saves the `Int` conversion, which is
+                    // what bound this loop.
+                    let a = p[i], b = p[y == 0 ? i - bpp : i - rowBytes]
+                    let d = a > b ? a &- b : b &- a
+                    if d <= 4 { smooth += 1 }
                     i += 1
                 }
                 compared += row + rowBytes - start

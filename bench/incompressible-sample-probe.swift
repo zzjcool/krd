@@ -79,8 +79,11 @@ func looksCompressibleFast(_ pixels: [UInt8], rect: TileRect) -> Bool {
             let start = y == 0 ? row + bpp : row
             var i = start
             while i < row + rowBytes {
-                let d = p[i] &- p[y == 0 ? i - bpp : i - rowBytes]
-                if d <= 4 || d >= 252 { smooth += 1 }
+                // `UInt8` absolute difference: the wrapping delta alone is `(a-b) mod 256`, and
+                // `d >= 252` on it also fires on `|a-b| ∈ {252...255}` (20 of 65,536 pairs).
+                let a = p[i], b = p[y == 0 ? i - bpp : i - rowBytes]
+                let d = a > b ? a &- b : b &- a
+                if d <= 4 { smooth += 1 }
                 i += 1
             }
             compared += row + rowBytes - start
