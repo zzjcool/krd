@@ -432,7 +432,8 @@ second and how many frames exceeded 5 ms, and `late` counts frames the loop decl
   ahead of the callback (−10…+10 ms at 20 fps), which clamps to 0: those are timely frames, not
   unmeasured ones.
 - `pipe = callback → last byte written`: everything we do with the frame.
-- `e2e = cap + pipe` is the number the status bar prints as `frame`.
+- `e2e = cap + pipe` is the number the status bar prints as `frame` — or as `pipe` when `cap` is `—`,
+  since with no capture half to add the sum *is* the pipe half.
 
 `cap` is `—` (and `-1` in JSON) when there is no timestamp to measure against: `--mock` and
 `--replay` have none, and a zero there would read as "a very fast capture" rather than "not

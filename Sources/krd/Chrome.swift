@@ -85,6 +85,12 @@ extension ChromeMetrics {
         guard rttAvailable else { return "—" }
         return Series.show(rttP99Ms)
     }
+
+    /// The whole frame, `cap + pipe`, or `—` when the capture half was not measured (`capMs < 0`:
+    /// `--mock`, `--replay`, `--selftest`). With no `cap`, `e2eMs` *is* the pipe half, so printing it
+    /// as the frame put a confident `0 ms` in one column of a row whose own note said
+    /// `cap — (no PTS)` (#117). The unit belongs to the caller, like its two neighbours.
+    var e2eLabel: String { capMs < 0 ? "—" : "\(Int(e2eMs))" }
 }
 
 /// One second of numbers: the same counters the `--debug` stats line prints, plus the rates it
@@ -400,8 +406,12 @@ final class Chrome {
         let scale: Seg = ("\(String(format: "%.2g", m.scale))×", m.scaleAuto ? .accent : .warn, "scale")
         let bw: Seg = ("\(String(format: "%.1f", m.mbps)) MB/s", .plain, "stats")
         // `frame`, not `pipe`: since #52 this number is cap + pipe, and the bar must not call all of
-        // it ours -- at 10 fps the capture half is ~50 ms on its own.
-        let lat: Seg = (cols >= 84 ? "frame \(Int(m.e2eMs)) ms" : "\(Int(m.e2eMs)) ms", latStyle, "stats")
+        // it ours -- at 10 fps the capture half is ~50 ms on its own. With no `cap` measured the sum
+        // *is* the pipe half, so the segment takes the panel's name for that half; `frame 0 ms` read
+        // as a measured end to end (#117).
+        let latencyName = m.capMs < 0 ? "pipe" : "frame"
+        let lat: Seg = (cols >= 84 ? "\(latencyName) \(Int(m.e2eMs)) ms"
+                                   : "\(Int(m.e2eMs)) ms", latStyle, "stats")
         let menu: Seg = (prefix ? "^\\ … " : "^\\ menu ", .dim, "help")
         let scaled = m.scale < 0.999
         switch cols {
@@ -459,61 +469,59 @@ final class Chrome {
         }
         switch panel {
         case .stats:
-            line(0, "bandwidth", String(format: "%.2f MB/s", m.mbps),
+            // Rows are counted, not written out by hand: the sparklines used to be positioned with
+            // `y + 9`, which is the `pty buffer` row, so their label painted over that row's name
+            // while its value and note survived (#117). A row appended now cannot land on another.
+            var row = 0
+            func next() -> Int { defer { row += 1 }; return row }
+            line(next(), "bandwidth", String(format: "%.2f MB/s", m.mbps),
                  "\(m.kbPerFrame) KB last frame · \(m.tilesPerSec) tiles/s")
-            line(1, "frames", String(format: "%.1f / %d fps", m.fps, m.fpsTarget),
+            line(next(), "frames", String(format: "%.1f / %d fps", m.fps, m.fpsTarget),
                  String(format: "capture %.1f/s · dirty %d/%d tiles", m.captureFps, m.dirty, m.tilesTotal),
                  m.fpsTarget > 0 && m.fps < Double(m.fpsTarget) * 0.85 ? .warn : .plain)
             // The split that answers "was it the capture or the write" (issue #52).
             let cap = m.capMs < 0 ? "cap — (no PTS)"
                 : String(format: "cap %.0f p99 %.0f", m.capMs, m.capP99Ms)
-            line(2, "frame", "\(Int(m.e2eMs)) ms",
+            line(next(), "frame", "\(m.e2eLabel) ms",
                  String(format: "%@ · pipe %.0f p99 %.0f", cap, m.pipeMs, m.pipeP99Ms))
             // The network's own share, which `pipe` cannot see: it is measured on the terminal's
             // reply, so it includes whatever is still queued in front of the picture.
-            line(3, "rtt", "\(m.rttLabel) ms",
+            line(next(), "rtt", "\(m.rttLabel) ms",
                  m.rttAvailable ? "p99 \(m.rttP99Label) · CSI 5n round trip"
                      : (m.inputActive ? "no answer (terminal has no DSR)" : "off"))
-            line(4, "encoder", String(format: "zlib %.1f ms", m.zlibMs),
+            line(next(), "encoder", String(format: "zlib %.1f ms", m.zlibMs),
                  String(format: "write %.1f max %.1f over5 %d · q%d %@",
                         m.writeMs, m.writeMaxMs, m.writeOver5, m.quality, m.qualityLabel))
-            line(5, "capture", String(format: "%.1f/s frames", m.captureFps),
+            line(next(), "capture", String(format: "%.1f/s frames", m.captureFps),
                  String(format: "skipped %.0f/s · idle %.0f/s · bad %d · total %d/%d/%d",
                         m.skippedPerSec, m.idlePerSec, m.bad, m.delivered, m.skipped, m.idle))
-            line(6, "geometry", "\(m.pxW)×\(m.pxH) px",
+            line(next(), "geometry", "\(m.pxW)×\(m.pxH) px",
                  "\(m.cellsW)×\(m.cellsH) cells · cell \(Int(m.cellW))×\(Int(m.cellH)) · \(m.geometrySource)"
                  + " · scale \(String(format: "%.2g", m.scale))×"
                  + (m.scaleAuto ? " (auto)" : ""),
                  m.scale < 0.999 && m.scaleAuto ? .warn : .plain)
-            line(7, "wire", m.format,
+            line(next(), "wire", m.format,
                  "sync \(m.sync) · q=\(m.quiet) · \(m.tileSpec) cells · "
                  + "quantised \(m.quantisedTiles) raw \(m.skippedTiles)")
+            let ptyRow = next()
             if m.queueBytes >= 0 {
-                line(8, "pty buffer", "\(m.queueBytes) B",
+                line(ptyRow, "pty buffer", "\(m.queueBytes) B",
                      String(format: "%.0f ms at this rate · sshd took %.1f MB/s", m.queueMs, m.drainMbps))
             } else {
-                line(8, "pty buffer", "—", "TIOCOUTQ unavailable on this tty")
+                line(ptyRow, "pty buffer", "—", "TIOCOUTQ unavailable on this tty")
             }
-            if inside > 9 {
-                text(2, y + 9, "MB/s".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
-                text(17, y + 9, spark(m.mbpsHistory, width: max(8, w - 20)), .accent)
-            }
-            if inside > 10 {
-                text(2, y + 10, "pipe".padding(toLength: 14, withPad: " ", startingAt: 0), .dim)
-                text(17, y + 10, spark(m.latencyHistory, width: max(8, w - 20)), .warn)
-            }
-            if inside > 11 {
-                line(11, "input",
-                     m.inputActive ? String(format: "%.1f ms", m.inputMs) : "off",
-                     m.dryRun ? "dry-run: parsed, never posted"
-                         : String(format: "p99 %.1f · parse → CGEvent.post", m.inputP99Ms))
-            }
-            if inside > 12 {
-                line(12, "cursor", m.cursorDrawn ? "drawn into the picture (--cursor)" : "hidden (the default)")
-            }
-            if inside > 13 { line(13, "recording", m.recording) }
-            if inside > 14 { line(14, "log", m.logPath) }
-            if inside > 15 { line(15, "env", m.envSwitches) }
+            // The sparks are rows like any other: `line` owns the label and value columns, so a
+            // hand-written column here could drift from them just as the hand-written row did.
+            line(next(), "MB/s", spark(m.mbpsHistory, width: max(8, w - 20)), "", .accent)
+            line(next(), "pipe", spark(m.latencyHistory, width: max(8, w - 20)), "", .warn)
+            line(next(), "input",
+                 m.inputActive ? String(format: "%.1f ms", m.inputMs) : "off",
+                 m.dryRun ? "dry-run: parsed, never posted"
+                     : String(format: "p99 %.1f · parse → CGEvent.post", m.inputP99Ms))
+            line(next(), "cursor", m.cursorDrawn ? "drawn into the picture (--cursor)" : "hidden (the default)")
+            line(next(), "recording", m.recording)
+            line(next(), "log", m.logPath)
+            line(next(), "env", m.envSwitches)
         case .settings:
             let items: [(String, String, Style)] = [
                 ("--fps", "\(m.fpsTarget)", .plain),
