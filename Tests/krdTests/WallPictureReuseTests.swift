@@ -156,7 +156,16 @@ final class WallPictureReuseTests: XCTestCase {
         let cache = WallPictures.PanelCache()
         let page = demoPlan(cardStart: 0)
         _ = await WallPictures.capture(page, cache: cache)
+        let stage = page.first { $0.slot == WallPanels.stageSlot }!
+        XCTAssertFalse(cache.isOnScreen(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect),
+                       "nothing is on screen before the first paint records it")
+        cache.didPlace(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect)
+        XCTAssertTrue(cache.isOnScreen(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect))
         cache.forgetStage()
+        // Both halves, or the stage would be re-photographed and then not re-emitted: the wall would
+        // keep the process's first pixels for ever.
+        XCTAssertFalse(cache.isOnScreen(slot: WallPanels.stageSlot, key: key(stage), rect: stage.rect),
+                       "a desk change must force the stage out on the wire, not only into the memo")
         let after = await WallPictures.capture(page, cache: cache)
         XCTAssertFalse(after.reused.contains(0), "the desk changed: the display is shot again")
         XCTAssertTrue(after.reused.contains(1), "the card's window did not")

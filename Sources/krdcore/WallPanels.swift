@@ -83,6 +83,10 @@ public struct PanelSource: Equatable {
 }
 
 public enum WallPanels {
+    /// The stage's slot. 1... are the cards of the current page, so anything that has to say "the
+    /// stage and not a card" says this rather than a literal 0.
+    public static let stageSlot = 0
+
     /// The stage's picture and the visible cards' pictures, in layout order.
     ///
     /// `cardSources` is aligned with `layout.cards`: the caller resolved the page, because which

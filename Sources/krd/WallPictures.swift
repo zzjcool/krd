@@ -176,11 +176,11 @@ enum WallPictures {
         func forgetStage() {
             lock.lock()
             defer { lock.unlock() }
-            sent.removeValue(forKey: 0)
-            for key in order where key.source.isDisplay {
-                byKey.removeValue(forKey: key)
-                order.removeAll { $0 == key }
-            }
+            // Slot 0 is the stage (`WallPanels.plan`): both halves go, or the stage would be
+            // re-photographed and then *not* re-emitted - the process's first pixels, for ever.
+            sent.removeValue(forKey: WallPanels.stageSlot)
+            order.removeAll { $0.source.isDisplay }
+            byKey = byKey.filter { !$0.key.source.isDisplay }
         }
 
         /// Forget everything: the terminal no longer holds these images (the wall dropped them, or a
