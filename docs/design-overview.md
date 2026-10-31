@@ -33,8 +33,9 @@ English | [简体中文](design-overview.zh-CN.md)
   for windows. `▲` at the top, `▼` at the bottom, a `█` thumb in between; click a plain cell to jump there.
   **No more little `◀ ▶` triangles.**
 - One caption row under each panel (`🖥 name - resolution`, `▣ app - title`); picture and caption both enter.
-- After entering, a `⬅ 🖥 back` row. **No keyboard vocabulary**: every key belongs to the remote desktop;
-  `Ctrl-\\` is the only exception.
+- After entering, a `⬅ 🖥 back` row. **The keyboard reaches exactly what the mouse can** (§5): `Tab` walks
+  every item and control the click table knows, `Enter` does what a click does, and the arrows move inside
+  a band. Every other key is swallowed — a wall has no remote desktop — and `Ctrl-\\` still quits.
 
 ## 2. Why three
 
@@ -95,7 +96,12 @@ English | [简体中文](design-overview.zh-CN.md)
 | click a `│` in the middle | jump proportionally (the `█` thumb shows where you are) |
 | click `⤢` | cycle the row width 2 → 3 → 4 → 2 cards per row; only the widths this pane can honour are offered (a card never falls under `minCardCols`), and a width that drops out of the list is skipped |
 | click `⬅ 🖥 back` | return to the landing screen |
-| any key | forwarded to the remote desktop |
+| `Tab` / `Shift-Tab` | next / previous stop of the focus ring: every display, card and control a click can reach, in reading order |
+| `Left` `Up` / `Right` `Down` | previous / next stop *inside the current band* (the stage, the shelf, the wall's own furniture) |
+| `Enter` / `Space` | what a click on the focused stop does |
+| `Esc` | clear the focus ring; with no ring, the footer's `back` |
+| `Ctrl-\\` | quit |
+| any other key | swallowed: there is no remote desktop behind a wall |
 
 An end with nothing further is dimmed and inert - no dead cells that swallow clicks.
 
@@ -114,6 +120,31 @@ re-send pictures: the first implementation did, and crossing four cards cost 18 
 `paintWall` re-emitted every kitty image. A pointer-only paint therefore reuses the slot states of
 the frame already on screen (`wallLastPaints`) and sends text alone. Moving within the same item
 costs 0 B — no report, no paint.
+
+**The keyboard reaches exactly what the mouse can, because both read the action table.** `Tab` does
+not walk a hand-written list of controls — it walks `WallLayout.stops()`, which is one scan of
+`action(row:col:)` over the pane (deduplicated by action, in reading order). A control added to the
+table is reachable by `Tab` the day it is added, and one removed cannot be left behind in a second
+list; that is the property that decays when it is written twice. `WallState.ring` holds *one
+`WallAction`* — the very value a click on the same thing produces — and `Enter` hands it to the
+click's own `apply`, so activation has no switch of its own to drift.
+
+The ring is a **different signal from the hover**, because a mouse move must not look like a focus
+change: the pointer keeps reverse video on the caption row, the keyboard *underlines* it. SGR 4 and
+SGR 7 are different bits of the same attribute list, so a hovered *and* focused caption says both
+things at once (`7;4`), and neither signal is taken away from the other. Underlining also costs no
+content: no cell's text changes, so a long title is not truncated by a character because the keyboard
+arrived, and a card whose picture covers its box still has the caption row to mark — the same reason
+the pointer's universal signal is the caption.
+
+A focus move is a **text-only repaint** (`drawWall(textOnly:)`, the path the hover already uses), so
+it re-sends no picture: measured **97–147 B** on a 120x34 wall from a real pty (`Tab`, an arrow and
+`Shift-Tab`), and **137 B worst case** across all 18 stops on a 137x44 pane (`WallTabTests` pins the
+same 600 B budget the hover has, and asserts that no focus repaint carries a kitty image). Moving
+within one stop is 0 B. An *activation* is a click, so it paints as a click paints — a page step has
+to, because the cards of the new page are different windows. The footer gains the keyboard's half of
+its hint (`Tab selects · Enter opens · Esc clears`) only once the ring is on, which is why the four
+golden dumps are byte for byte what they were.
 
 ## 6. The bar on the right
 

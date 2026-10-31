@@ -94,7 +94,7 @@ public enum WallSlot: Equatable {
 
 /// What a click does. Payloads are already resolved: a `.enterCard` carries the index into the
 /// whole window list, not the page slot, so the receiver never has to redo the arithmetic.
-public enum WallAction: Equatable {
+public enum WallAction: Hashable {
     case enterStage(Int)   // payload = display index, already clamped to 0..<displayCount
     case enterCard(Int)    // payload = index into the window list, already clamped
     case stageStep(Int)    // ±1
@@ -103,6 +103,42 @@ public enum WallAction: Equatable {
     case stageJump(Int)    // payload = the display that becomes the visible one
     case cyclePer(Int)     // payload = the row width that becomes `per`, a member of `perCycle`
     case back              // the footer row
+}
+
+/// Which part of the wall an action belongs to. The band is a property of the *action*, not of the
+/// cell it was found in: `stageStep`/`stageJump` are the bar's two arrows over the stage and
+/// `cardStep`/`cardJump` are the ones over the shelf, so the two segments of the bar are separated
+/// by exactly the same rule that separates the two bands of the picture. The keyboard uses it to
+/// answer "where may an arrow go from here" without a second look at the rectangles.
+public enum WallBand: Equatable {
+    /// The stage: the display on it, and the bar's controls over it.
+    case stage
+    /// The shelf of recent windows: the cards of this page, and the bar's controls over them.
+    case shelf
+    /// The wall's own furniture: the row-width control and the footer's way back.
+    case chrome
+
+    public init(_ action: WallAction) {
+        switch action {
+        case .enterStage, .stageStep, .stageJump: self = .stage
+        case .enterCard, .cardStep, .cardJump: self = .shelf
+        case .cyclePer, .back: self = .chrome
+        }
+    }
+}
+
+/// One thing a click can do on this pane, and the cell the walk found it in.
+///
+/// A stop is an *action*, not a rectangle: the same action answers for every cell of a card (its box
+/// and its caption both enter it), and a page of six cards is six stops because it is six actions.
+/// `row`/`col` are the first cell that answered it in reading order, which is what makes the ring's
+/// order the wall's own order.
+public struct WallStop: Equatable {
+    public let action: WallAction
+    public let row: Int
+    public let col: Int
+
+    public var band: WallBand { WallBand(action) }
 }
 
 public struct WallLayout: Equatable {
@@ -571,6 +607,30 @@ public struct WallLayout: Equatable {
         }
         if row == footerRow { return .back }
         return nil
+    }
+
+    /// Every distinct thing a click anywhere on this pane can do, in reading order.
+    ///
+    /// This is one scan of `action(row:col:)` over the pane and nothing else, which is the whole
+    /// point: the keyboard's reach is the click table's reach *by construction*, so a control that
+    /// is added to the table is reachable by `Tab` the day it is added, and one that is removed
+    /// cannot be left behind in a second list nobody remembers to edit (issue #201).
+    ///
+    /// Reading order — row, then column — is the wall's own order: the eye takes the header, the
+    /// stage and the bar beside it, the rule, the band header with its `⤢`, the shelf, the footer.
+    /// Deduplicating by action is what turns a rectangle into a thing: a card's box and its caption
+    /// answer the same `.enterCard`, and a shaft whose two cells jump to the same page is one stop.
+    public func stops() -> [WallStop] {
+        var out: [WallStop] = []
+        guard cols > 0, rows > 0 else { return out }
+        for row in 1...rows {
+            for col in 1...cols {
+                guard let action = action(row: row, col: col) else { continue }
+                if out.contains(where: { $0.action == action }) { continue }
+                out.append(WallStop(action: action, row: row, col: col))
+            }
+        }
+        return out
     }
 
     /// A wheel notch over a cell: one display or one card, decided by which band the row is in.

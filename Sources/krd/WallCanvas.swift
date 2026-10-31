@@ -195,8 +195,35 @@ enum WallNotice: Equatable {
     }
 }
 
-/// The wall's whole keyboard policy, in one named place: it is a *policy* (`--wall` has no
-/// keyboard vocabulary), not an accident of where the reader happens to route bytes.
+/// One key the wall acts on, in the wall's own vocabulary.
+///
+/// Deliberately the smallest set that reaches the whole wall (issue #201): `Tab`/`Shift-Tab` walk
+/// the stop list `WallLayout.stops()` derives from the click table, the four arrows walk it inside
+/// the band the ring is in, `Enter`/`Space` do what a click on the stop does, and `Esc` puts it
+/// away. Everything else stays swallowed — a wall has no remote desktop to forward to — and
+/// `Ctrl-\` is not in this set at all: it is the *reader's* quit (`WallInput.consumes` hands it
+/// back, `InputReader` turns it into `onQuit`), which is the one key a wall still owes the user.
+enum WallKey: Equatable {
+    /// `Tab`: next stop in reading order, wrapping.
+    case next
+    /// `Shift-Tab`: the same ring backwards.
+    case previous
+    /// `Left` / `Up`: the previous stop *inside the current band*.
+    case backward
+    /// `Right` / `Down`: the next stop inside the current band.
+    case forward
+    /// `Enter` / `Space`: what a click on this stop does.
+    case activate
+    /// `Esc`: clear the ring; with no ring, leave the pick (the footer's own cell).
+    case cancel
+}
+
+/// The wall's whole keyboard policy, in one named place: which bytes mean something
+/// (`key(for:)`) and which the reader hands back (`consumes`).
+///
+/// `consumes` is unchanged from phase 1 and that is the point: the wall still owns every byte it
+/// is handed, because there is no remote desktop behind it. What is new is that a handful of them
+/// now *do* something before they are dropped.
 enum WallInput {
     /// Every key belongs to a remote that does not exist; `Ctrl-\` is the one the reader still owes
     /// the user (it becomes "quit" after this closure returns false). `0x1C` is spelled out rather
@@ -204,6 +231,67 @@ enum WallInput {
     /// sends it as `.control(0x1C)` and `InputReader` reads it as "leave" once the chrome says it
     /// does not own it.
     static func consumes(_ byte: UInt8) -> Bool { byte != 0x1C }
+
+    /// What one parsed key event means to the wall, or `nil` for the ones that mean nothing.
+    ///
+    /// It lives here rather than in `Input.swift` for the same reason `consumes` does: the wall's
+    /// vocabulary is the wall's, and the reader should not grow a second opinion about which keys
+    /// a TUI owns. The reader keeps the one job it is good at — knowing what the *terminal* sent
+    /// (a legacy `CSI Z`, a kitty report, a bare control byte, a space that arrives as text) — and
+    /// this turns that into one of six verbs.
+    ///
+    /// Only unmodified keys are the wall's, `Shift` excepted on `Tab`:
+    /// `Ctrl-Left` is a word step and `Alt-Enter` is a newline — those belong to a desktop, and
+    /// the wall must not quietly eat a key it would not act on anyway (the same rule the chrome's
+    /// own chord table states).
+    static func key(for event: Event) -> WallKey? {
+        switch event {
+        case let .press(code, mods, phase):
+            // A release is not a second press: a wall that acted on one would act twice per key.
+            guard phase != .release else { return nil }
+            guard mods.intersection([.maskControl, .maskAlternate, .maskCommand]).isEmpty else {
+                return nil
+            }
+            switch code {
+            case Keys.tab: return mods.contains(.maskShift) ? .previous : .next
+            case Keys.enter, Keys.space: return .activate
+            case Keys.esc: return .cancel
+            case Keys.left, Keys.up: return .backward
+            case Keys.right, Keys.down: return .forward
+            default: return nil
+            }
+        case let .text(ch, mods):
+            // A space is text in the legacy encoding (and a tab in a terminal that reports it
+            // that way), which is why the vocabulary is stated for both spellings of a key.
+            guard mods.isEmpty else { return nil }
+            switch ch {
+            case " ", "\r", "\n": return .activate
+            case "\t": return .next
+            default: return nil
+            }
+        case let .key(report):
+            // The kitty protocol's `CSI code;mods u`: the codes are code points for the keys that
+            // are ASCII and Private-Use numbers for the rest, and the arrows arrive through
+            // `.press` in every encoding krd parses, so only these four code points are ours.
+            guard report.phase != .release else { return nil }
+            guard report.mods & 0b1110 == 0 else { return nil }
+            switch report.code {
+            case 9: return report.mods & 0b1 != 0 ? .previous : .next
+            case 13, 32: return .activate
+            case 27: return .cancel
+            default: return nil
+            }
+        case let .control(byte):
+            switch byte {
+            case 0x09: return .next
+            case 0x0A, 0x0D, 0x20: return .activate
+            case 0x1B: return .cancel
+            default: return nil          // `0x1C` included: it is the reader's quit, not a wall key
+            }
+        default:
+            return nil
+        }
+    }
 }
 
 /// The wall's cursor: which display is on stage, which page of windows is in the shelf, and
@@ -224,6 +312,15 @@ struct WallState: Equatable {
     var stageStart: Int = 0
     var cardStart: Int = 0
     var focus: Focus? = nil
+    /// Where the *keyboard* is: the action a click on the same item or control would perform, or
+    /// `nil` while nobody has pressed a key — which is the reason the opening frame is unchanged
+    /// (the four goldens in `WallCanvasTests` hold the wall PR #195 left behind).
+    ///
+    /// One value at a time, and the value is an *action*, not a rectangle: `WallLayout.stops()`
+    /// derives the list from the click table, so the ring can only ever sit on something a click
+    /// would act on. The hover is `pointer.over` and the pick is `focus`; three questions, three
+    /// fields, and no two of them can answer for each other.
+    var ring: WallAction? = nil
     /// Where the pointer is, and whether it is down. Not part of `apply`: a click changes what is on
     /// stage, a hover only changes how what is already there is drawn.
     var pointer = WallPointer()
@@ -347,6 +444,119 @@ struct WallState: Equatable {
         stageStart = layout.stageStart
         cardStart = layout.cardStart
     }
+
+    // MARK: the keyboard
+
+    /// The ring's action, when this pane still draws it.
+    ///
+    /// A ring that names a stop the current layout does not have — the window list shrank under it,
+    /// the pane lost its `⤢` — is not somewhere to act from, and this is what says so. The stop list
+    /// is the authority, exactly as it is for `Tab`.
+    func ringStop(in layout: WallLayout) -> WallAction? {
+        guard let ring, layout.stops().contains(where: { $0.action == ring }) else { return nil }
+        return ring
+    }
+
+    /// One key, as the wall understands it.
+    ///
+    /// The only branch that *does* something is `activate`, and even it does nothing itself: it
+    /// hands the ring's own `WallAction` back, and the caller runs it through `apply` — the click
+    /// policy. There is deliberately no second `switch` over the actions in the keyboard, which is
+    /// the duplication issue #201 is about: one table, one policy, two ways in.
+    ///
+    /// Returns the action to perform, or `nil` when the key only moved the ring (or did nothing).
+    mutating func key(_ key: WallKey, in layout: WallLayout) -> WallAction? {
+        let stops = layout.stops()
+        switch key {
+        case .next:
+            moveRing(step: 1, stops: stops, withinBand: false)
+            return nil
+        case .previous:
+            moveRing(step: -1, stops: stops, withinBand: false)
+            return nil
+        case .forward:
+            moveRing(step: 1, stops: stops, withinBand: true)
+            return nil
+        case .backward:
+            moveRing(step: -1, stops: stops, withinBand: true)
+            return nil
+        case .activate:
+            guard let ring, stops.contains(where: { $0.action == ring }) else { return nil }
+            return ring
+        case .cancel:
+            // Focus first, and nothing else: `Esc` is the way out of the ring, and a reader who
+            // presses it twice means "and out of this pick too" — which is the footer's `back`.
+            // With neither there is nothing to leave, and `Esc` is then nothing at all.
+            if ring != nil {
+                ring = nil
+                return nil
+            }
+            return focus == nil ? nil : .back
+        }
+    }
+
+    /// One step through the ring.
+    ///
+    /// `withinBand` is what the arrow keys ask for: the stops of the band the ring is on, in the same
+    /// reading order, so `Right` in the shelf steps cards and page steps and never wanders onto the
+    /// stage. A ring that is on no stop (nothing pressed yet, or the world moved under it) starts at
+    /// the front going forward and at the back going backwards, the way a ring buffer reads.
+    private mutating func moveRing(step: Int, stops: [WallStop], withinBand: Bool) {
+        let here = ring.flatMap { action in stops.first { $0.action == action } }
+        let pool = withinBand ? stops.filter { $0.band == (here?.band ?? .stage) } : stops
+        guard !pool.isEmpty else {
+            ring = nil
+            return
+        }
+        guard let index = here.flatMap({ stop in pool.firstIndex { $0.action == stop.action } })
+        else {
+            ring = (step > 0 ? pool.first : pool.last)?.action
+            return
+        }
+        ring = pool[((index + step) % pool.count + pool.count) % pool.count].action
+    }
+
+    /// After an action moved the world, keep the ring on a stop this pane still draws.
+    ///
+    /// Most activations leave their own stop in place (the bar's `▼` is still the bar's `▼` after it
+    /// paged), and then this does nothing — that is what makes `Enter` repeatable. The one that does
+    /// not is `⤢`: its payload *is* the next width, so applying it rewrites the very stop that was
+    /// pressed. The ring then stays in the same band rather than disappearing (a ring nobody can see
+    /// while the footer says `Tab selects` would be a lie about where the keyboard is).
+    mutating func settleRing(in layout: WallLayout) {
+        guard let ring else { return }
+        let stops = layout.stops()
+        if stops.contains(where: { $0.action == ring }) { return }
+        let band = WallBand(ring)
+        self.ring = stops.first { $0.band == band }?.action
+    }
+}
+
+/// The wall's per-cell style: `Chrome.Style`'s table, spelled exactly as the chrome spells it so the
+/// two cannot drift to different colours, plus one attribute the chrome has no use for — the
+/// underline that says "the keyboard is here".
+///
+/// A style is an SGR string rather than an enum case because the ring has to *compose* with what is
+/// already on the cell. The pointer's reverse video and the keyboard's underline are different bits
+/// of one SGR (`7` and `4`), which is what lets both sit on the same item at once instead of one
+/// hiding the other; a case list could only ever hold one of them.
+struct WallStyle: Equatable {
+    var sgr: String
+
+    init(_ sgr: String) { self.sgr = sgr }
+
+    static let plain = WallStyle(Chrome.Style.plain.sgr)
+    static let dim = WallStyle(Chrome.Style.dim.sgr)
+    static let bright = WallStyle(Chrome.Style.bright.sgr)
+    static let accent = WallStyle(Chrome.Style.accent.sgr)
+    static let reverse = WallStyle(Chrome.Style.reverse.sgr)
+
+    /// The focus ring, on whatever the cell already carries: SGR 4 appended, so the pointer's `7`
+    /// becomes `7;4` (reversed *and* underlined), a dim row becomes `2;37;4`, and neither signal is
+    /// taken away from the other. Appending is safe for every member of the table because an SGR
+    /// parameter list is a set of independent attributes; nothing in it is order-sensitive the way a
+    /// reset would be.
+    var underlined: WallStyle { WallStyle(sgr + ";4") }
 }
 
 /// The text painter for `--wall`: a whole-pane cell grid plus a per-cell diff renderer.
@@ -390,7 +600,7 @@ final class WallCanvas {
     /// start of a run, never trimmed as a trailing blank, and never written on its own.
     private struct Cell: Equatable {
         var ch: Character = " "
-        var style: Chrome.Style = .plain
+        var style: WallStyle = .plain
         var continuation = false
     }
 
@@ -411,7 +621,7 @@ final class WallCanvas {
         /// One cell, 1-based. Out-of-pane writes are dropped instead of clipped, and the final
         /// cell of the final row is never written (invariant 2) — no caller has to remember
         /// either rule, which is the point of putting it here rather than at the call sites.
-        mutating func set(row: Int, col: Int, _ ch: Character, _ style: Chrome.Style) {
+        mutating func set(row: Int, col: Int, _ ch: Character, _ style: WallStyle) {
             guard row >= 1, row <= rows, col >= 1, col <= cols else { return }
             guard !(row == rows && col == cols) else { return }
             let width = DisplayWidth.of(ch)
@@ -432,7 +642,7 @@ final class WallCanvas {
         /// Returns the cells it used, so a caller can continue on the same row (that is what makes
         /// "label, then a dim range" possible without measuring the label twice).
         @discardableResult
-        mutating func text(_ s: String, row: Int, col: Int, _ style: Chrome.Style,
+        mutating func text(_ s: String, row: Int, col: Int, _ style: WallStyle,
                            limit: Int = .max) -> Int {
             var c = col
             var used = 0
@@ -446,6 +656,28 @@ final class WallCanvas {
                 used += width
             }
             return used
+        }
+
+        /// Underline what is already drawn in `rect`, without touching a single glyph.
+        ///
+        /// This is what makes the focus ring's promise true: it is an *attribute*, so a card's title
+        /// keeps every cell it had, nothing reflows, and no caption is one character shorter because
+        /// the keyboard arrived. Blanks are skipped — underlining a space would put bytes on the pane
+        /// to say nothing, and the ring costs what its text costs and no more. The second half of a
+        /// wide glyph is skipped too: it is not a cell of its own (the terminal advances two for the
+        /// glyph, and the renderer never writes it), so restyling it would only make the diff see a
+        /// change it cannot write.
+        mutating func underline(rect: CellRect) {
+            guard !rect.isEmpty else { return }
+            for row in rect.row...rect.maxRow {
+                guard row >= 1, row <= rows else { continue }
+                for col in rect.col...rect.maxCol {
+                    guard col >= 1, col <= cols else { continue }
+                    let i = (row - 1) * cols + (col - 1)
+                    guard !cells[i].continuation, cells[i].ch != " " else { continue }
+                    cells[i].style = cells[i].style.underlined
+                }
+            }
         }
     }
 
@@ -467,12 +699,17 @@ final class WallCanvas {
 
     /// The paint, as bytes ready for `ScreenWriter.writeChrome`. Never contains `\n`, never ends a
     /// run on `(rows, cols)`, and is empty when nothing changed since the last call.
+    ///
+    /// `ring` is `WallState.ring`, the keyboard's position: `nil` (nobody has pressed a key) draws
+    /// exactly the wall PR #195 left behind, which is what keeps the four golden dumps byte for
+    /// byte and the idle wall free.
     func draw(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
               paints: WallSlotPaints = WallSlotPaints(),
-              pointer: WallPointer = WallPointer()) -> [UInt8] {
+              pointer: WallPointer = WallPointer(),
+              ring: WallAction? = nil) -> [UInt8] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer)
+                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring)
         return render(cells, cols: cols, rows: rows)
     }
 
@@ -485,9 +722,10 @@ final class WallCanvas {
     func lines(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
                focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
                paints: WallSlotPaints = WallSlotPaints(),
-               pointer: WallPointer = WallPointer()) -> [String] {
+               pointer: WallPointer = WallPointer(),
+               ring: WallAction? = nil) -> [String] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer)
+                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring)
         var out: [String] = []
         out.reserveCapacity(max(0, rows))
         for y in 0..<max(0, rows) {
@@ -513,7 +751,8 @@ final class WallCanvas {
     private func build(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
                        focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
                        paints: WallSlotPaints = WallSlotPaints(),
-                       pointer: WallPointer = WallPointer()) -> [Cell] {
+                       pointer: WallPointer = WallPointer(),
+                       ring: WallAction? = nil) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
         // Order matters only where two elements share a row: the footer and the band header place
@@ -529,8 +768,11 @@ final class WallCanvas {
         drawCards(&grid, model: model, layout: layout, paints: paints, pointer: pointer)
         drawCardCaptions(&grid, model: model, layout: layout, paints: paints, pointer: pointer)
         drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice,
-                   demoNote: paints.demoNote)
+                   demoNote: paints.demoNote, ring: ring)
         drawBar(&grid, layout: layout)
+        // The ring last, and as an attribute: it underlines what is already drawn, so it cannot
+        // move a caption by one cell or re-truncate a title (issue #201).
+        drawRing(&grid, layout: layout, ring: ring)
         return grid.cells
     }
 
@@ -719,7 +961,7 @@ final class WallCanvas {
             let col = rect.col + 2
 
             // The block is built first so it can be positioned as a whole.
-            var lines: [(text: String, style: Chrome.Style)] = [
+            var lines: [(text: String, style: WallStyle)] = [
                 (DisplayWidth.truncate("\(symbols.window) \(window.app)", to: inner), .bright),
             ]
             if let title = wallTitle(window) {
@@ -740,7 +982,7 @@ final class WallCanvas {
                 // Only the card's first line (the app name) deepens on a press: reversing the whole
                 // block would repaint every row of a card for one click, and the box already says
                 // which card it is.
-                let style: Chrome.Style = lit && pointer.down && i == 0 ? .reverse : line.style
+                let style: WallStyle = lit && pointer.down && i == 0 ? .reverse : line.style
                 grid.text(line.text, row: row, col: col, style, limit: inner)
                 row += 1
             }
@@ -778,9 +1020,13 @@ final class WallCanvas {
 
     /// The footer: how many panels there are (right, right-aligned) and what a click does here
     /// (left). After a pick it becomes the way back, which in phase 1 is the whole of "entered".
+    ///
+    /// `ring` only decides one sentence: once the keyboard is in use the click hint gains its
+    /// keyboard twin (issue #201). Not before — the opening frame says what a reader with a mouse
+    /// needs, and it is the frame the four goldens hold.
     private func drawFooter(_ grid: inout Grid, model: WallModel, layout: WallLayout,
                             focus: WallState.Focus?, notice: WallNotice? = nil,
-                            demoNote: String? = nil) {
+                            demoNote: String? = nil, ring: WallAction? = nil) {
         let content = min(layout.contentCols, grid.cols)
         let budget = drawTail(&grid, row: layout.footerRow, content: content,
                               "\(1 + layout.cards.count) panels", .dim)
@@ -796,8 +1042,18 @@ final class WallCanvas {
         case nil:
             // A frame with something to report says that instead of how to click: the reader's
             // question at that moment is "why is this empty", not "what does a click do".
-            lead = notice?.text(bullet: symbols.bullet, dash: symbols.dash)
-                ?? "\(symbols.bullet) click a card\(symbols.dot)wheel or the right bar scrolls"
+            //
+            // Two hints, not one line holding everything: the mouse's is the wall's whole vocabulary
+            // until a key is pressed, and the keyboard's only matters once `Tab` has been. `Esc` is
+            // in the second because it is the way *out* of that vocabulary, and a key nobody can
+            // discover is a key nobody uses.
+            if notice == nil, ring != nil {
+                lead = "\(symbols.bullet) Tab selects\(symbols.dot)Enter opens"
+                    + "\(symbols.dot)Esc clears"
+            } else {
+                lead = notice?.text(bullet: symbols.bullet, dash: symbols.dash)
+                    ?? "\(symbols.bullet) click a card\(symbols.dot)wheel or the right bar scrolls"
+            }
         case .display(let i):
             let name = model.displays.indices.contains(i) ? model.displays[i].name : "no display"
             lead = "\(symbols.back) \(symbols.display) back\(symbols.dot)picked \(name)"
@@ -866,6 +1122,47 @@ final class WallCanvas {
         }
     }
 
+    /// The focus ring: an underline on the row the stop's own label lives on, or — for the bar's
+    /// controls, which have no label of their own — on the one cell a click there is aimed at.
+    ///
+    /// Why an underline and not the pointer's reverse video: a mouse move must never look like a
+    /// focus change, and the two signals have to be able to sit on one item at once. SGR 4 and 7 are
+    /// different bits of one attribute list (`7;4` is both), so a hovered *and* focused caption says
+    /// both things at once instead of one of them winning. It also costs no content:
+    /// `WallStyle.underlined` restyles cells that are already drawn, so a long title is not
+    /// truncated by one character because the keyboard arrived, and a card whose *picture* covers its
+    /// box still has the caption row to underline (the same reason the pointer's universal signal is
+    /// the caption).
+    private func drawRing(_ grid: inout Grid, layout: WallLayout, ring: WallAction?) {
+        guard let ring else { return }
+        switch ring {
+        case .enterStage:
+            grid.underline(rect: layout.stageCaption)
+        case .enterCard(let index):
+            // The slot is absolute-minus-page, exactly as a click resolves it: the ring is an
+            // `.enterCard` for the window, and the caption belongs to the card showing it.
+            let slot = index - layout.cardStart
+            guard layout.cardCaptions.indices.contains(slot) else { return }
+            grid.underline(rect: layout.cardCaptions[slot])
+        case .cyclePer:
+            grid.underline(rect: layout.bandTail)
+        case .back:
+            // The footer's own row. The `N panels` tail on the right is not part of the control, so
+            // the ring stops where the tail starts — the same arithmetic `drawFooter` uses for the
+            // budget it hands its lead text.
+            let content = min(layout.contentCols, grid.cols)
+            let tail = DisplayWidth.of("\(1 + layout.cards.count) panels")
+            grid.underline(rect: CellRect(col: 1, row: layout.footerRow,
+                                          cols: max(0, content - tail - 1), rows: 1))
+        case .stageStep, .stageJump, .cardStep, .cardJump:
+            // The bar is one column wide and every glyph in it means something (`▲` a step back,
+            // `█` where the shelf is): the ring goes *on* that cell and never replaces it, and the
+            // cell is the one the click table answered — the stop's own first cell.
+            guard let stop = layout.stops().first(where: { $0.action == ring }) else { return }
+            grid.underline(rect: CellRect(col: stop.col, row: stop.row, cols: 1, rows: 1))
+        }
+    }
+
     // MARK: primitives
 
     /// A dim frame filling `rect`. The caller guarantees `rows >= 3 && cols >= 2` (the corners are
@@ -890,7 +1187,7 @@ final class WallCanvas {
     /// Screen Recording grant, a display that is not shareable) is *all* masks, and a hover that
     /// did nothing on it would look like the input path was broken.
     private func drawMask(_ grid: inout Grid, rect: CellRect, reason: String? = nil,
-                          style: Chrome.Style = .dim) {
+                          style: WallStyle = .dim) {
         guard !rect.isEmpty else { return }
         guard rect.rows >= 3, rect.cols >= 2 else {
             let label = DisplayWidth.truncate(symbols.dash, to: rect.cols)
@@ -911,7 +1208,7 @@ final class WallCanvas {
     /// The frame around a card or the stage. `style` is the pointer's to choose: `.dim` is the wall
     /// at rest, `.accent` is "under the pointer", and nothing else about the box moves — a highlight
     /// that changed the geometry would reflow the card and cost a full row of bytes.
-    private func drawBox(_ grid: inout Grid, rect: CellRect, style: Chrome.Style = .dim) {
+    private func drawBox(_ grid: inout Grid, rect: CellRect, style: WallStyle = .dim) {
         guard rect.rows >= 3, rect.cols >= 2 else { return }
         let run = String(repeating: symbols.boxH, count: rect.cols - 2)
         grid.text(symbols.boxTL + run + symbols.boxTR, row: rect.row, col: rect.col, style,
@@ -930,7 +1227,7 @@ final class WallCanvas {
     /// then truncated into what is left.
     @discardableResult
     private func drawTail(_ grid: inout Grid, row: Int, content: Int, _ text: String,
-                          _ style: Chrome.Style) -> Int {
+                          _ style: WallStyle) -> Int {
         let width = DisplayWidth.of(text)
         let start = 1 + DisplayWidth.rightAlignedStart(text, cells: content)
         grid.text(text, row: row, col: start, style, limit: width)
@@ -992,7 +1289,7 @@ final class WallCanvas {
         }
         let old = prev
         var out: [UInt8] = []
-        var style: Chrome.Style?
+        var style: WallStyle?
         for y in 0..<max(0, rows) {
             var x = 0
             while x < cols {

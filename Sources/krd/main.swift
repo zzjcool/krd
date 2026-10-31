@@ -332,6 +332,8 @@ func usage() -> String {
                           (`krd ax --help` for the full surface and the exit codes)
 
     keys: Ctrl-\\ quits (Ctrl-C is forwarded to the remote desktop)
+          --wall: Tab/Shift-Tab select, the arrows move inside a band, Enter/Space opens,
+                  Esc clears (everything else is swallowed: a wall has no remote desktop)
     """
 }
 
@@ -1887,11 +1889,27 @@ final class Desk {
     /// Paint from the cached model. The click path uses this and never `refreshWall(force: true)`:
     /// a click has to be drawn against the list it was made on, and re-enumerating every window
     /// dictionary inside a click handler is not a thing to do.
-    /// The slot states of the last frame that carried pictures, so a pointer-only repaint can draw
-    /// the same wall without recomputing (or re-sending) anything about the pictures.
+    /// The slot states of the last frame that carried pictures, so a text-only repaint (the pointer,
+    /// the focus ring) can draw the same wall without recomputing — or re-sending — anything about
+    /// the pictures.
     private var wallLastPaints = WallSlotPaints()
 
-    private func drawWall(pointerOnly: Bool = false) {
+    /// The layout this wall is drawn with, from the state and the pane it is on.
+    ///
+    /// Every gesture and every paint asks the same question, so they must not be able to disagree
+    /// about which cell means what: a click, a hover, a key and a frame all go through here.
+    private func wallLayout(_ state: WallState, pane: PaneGeometry) -> WallLayout {
+        state.layout(cols: pane.cols, rows: pane.rows,
+                     displays: wallModel.displays.count,
+                     windows: wallModel.windows.count,
+                     stageAspect: stageAspect(wallModel, state),
+                     cellAspect: pane.cellAspect)
+    }
+
+    /// - Parameter textOnly: repaint the *text* of the frame that is already on screen and nothing
+    ///   else — no capture, no kitty image, no model read. The pointer and the focus ring are the two
+    ///   gestures that change how the wall is drawn without changing what is on it (issue #195, #201).
+    private func drawWall(textOnly: Bool = false) {
         guard let state = wallState, let pane = wallPane else {
             // Silence here was the worst kind: the wall would sit on an alternate screen with nothing
             // in it and no line anywhere saying why. Every other early return in the paint path says
@@ -1899,11 +1917,7 @@ final class Desk {
             Log.write("krd: wall paint skipped, no \(wallState == nil ? "state" : "pane")\n")
             return
         }
-        let layout = state.layout(cols: pane.cols, rows: pane.rows,
-                                  displays: wallModel.displays.count,
-                                  windows: wallModel.windows.count,
-                                  stageAspect: stageAspect(wallModel, state),
-                                  cellAspect: pane.cellAspect)
+        let layout = wallLayout(state, pane: pane)
         // The layout clamps both offsets to what this pane and this model can show, so its answer is
         // the page the reader is about to see. Write it back: `⤢` changes the page size without
         // touching the model or the pane, and `refreshWall` returns before its own clamp while those
@@ -1916,7 +1930,7 @@ final class Desk {
             // Nothing to photograph (a mock, a display whose id nobody filled in): the phase-1
             // wall, placeholders and all.
             paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:],
-                      resendPictures: !pointerOnly)
+                      resendPictures: !textOnly)
             return
         }
         // The first paint does not wait for pixels. ScreenCaptureKit's first call in a session can
@@ -1926,7 +1940,7 @@ final class Desk {
         // The placeholders are the phase-1 wall, they cost a few KB of text, and the picture frame
         // overwrites them a moment later. Later paints skip this: a repaint is cheap only because it
         // is one frame, and by then the previous picture is already on screen.
-        // A pointer-only paint never re-sends a picture: the frame is the same frame, one item of it
+        // A text-only paint never re-sends a picture: the frame is the same frame, one item of it
         // is drawn differently. `wallPaintedOnce` is not touched by it, because the flag tracks "a
         // frame with its pictures went out" and this one deliberately carries none.
         if !wallPaintedOnce {
@@ -1935,10 +1949,11 @@ final class Desk {
             wallPaintedOnce = paintWall(layout: layout, model: model, panels: [],
                                         pictures: [], failures: [:])
         }
-        // A pointer-only repaint is text and nothing else: the pictures on screen are the ones this
+        // A text-only repaint is text and nothing else: the pictures on screen are the ones this
         // frame was drawn with (`wallLastPaints`), no capture is started, and nothing about the model
-        // moved. It is the one paint in the wall that must not cost a frame's worth of pixels.
-        if pointerOnly {
+        // moved. It is the one paint in the wall that must not cost a frame's worth of pixels — the
+        // pointer crosses a card border many times a second, and `Tab` may be held down.
+        if textOnly {
             _ = paintWall(layout: layout, model: model, panels: panels, pictures: [],
                           failures: [:], resendPictures: false, reusing: wallLastPaints)
             return
@@ -2107,7 +2122,7 @@ final class Desk {
         let text = canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
                                layout: layout, focus: state.focus,
                                cellW: pane.cellW, cellH: pane.cellH, paints: paints,
-                               pointer: state.pointer)
+                               pointer: state.pointer, ring: state.ring)
         // The canvas answers with no bytes when the frame it was asked for is the frame already on
         // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
         // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
@@ -4324,6 +4339,17 @@ final class Desk {
         reader.onChromeClick = { [weak self] row, col, wheel in
             self?.chromeClick(row: row, col: col, wheel: wheel)
         }
+        // The wall's own keyboard: `Tab`/`Shift-Tab`, the arrows, `Enter`/`Space`, `Esc`
+        // (issue #201). Installed only in wall mode — a mirrored desktop has a keyboard of its own,
+        // and every one of these keys is a keystroke for *it* — and asked before the desktop sees the
+        // event (`InputReader.apply`). Same hop as the pointer, because what a key changes is what
+        // the painter draws.
+        if wallMode {
+            reader.onWallKey = { [weak self] key in
+                DispatchQueue.main.async { [weak self] in self?.wallKey(key) }
+                return true
+            }
+        }
         // The pointer, for the wall's hover: same thread and same hop as a click, because it ends in
         // a repaint. `nil` outside wall mode -- a mirrored desktop has a real pointer of its own, and
         // lighting up a status-line button would be krd inventing feedback the target never sent.
@@ -4458,11 +4484,7 @@ final class Desk {
     /// pointer, and the only thing it may change is how one item is drawn.
     func wallHover(row: Int, col: Int, down: Bool) {
         guard var state = wallState, let pane = wallPane, !mirroring else { return }
-        let layout = state.layout(cols: pane.cols, rows: pane.rows,
-                                  displays: wallModel.displays.count,
-                                  windows: wallModel.windows.count,
-                                  stageAspect: stageAspect(wallModel, state),
-                                  cellAspect: pane.cellAspect)
+        let layout = wallLayout(state, pane: pane)
         let over = state.focus(atRow: row, col: col, in: layout)
         // A press outside an item is not a press *on* one: `down && over != nil` keeps a drag that
         // started on the header from lighting the card it wanders over.
@@ -4483,7 +4505,73 @@ final class Desk {
             Log.write("krd: wall pointer (\(row),\(col)) over \(name(next.over))"
                       + (next.down ? " down" : "") + "\n")
         }
-        drawWall(pointerOnly: true)
+        drawWall(textOnly: true)
+    }
+
+    /// A key the wall answers (issue #201): `Tab`/`Shift-Tab` walk the focus ring, the arrows walk it
+    /// inside one band, `Enter`/`Space` do what a click on the stop does, `Esc` clears.
+    ///
+    /// Same queue as a click: the reader hops to the main queue (`startInput`), so everything below
+    /// this line — the state, the canvas's previous-cell grid, the offsets — is touched by exactly one
+    /// thread. The *policy* is `WallState.key`, which knows nothing about a terminal, and the
+    /// *action* is `performWall`, which is the click path: what is left here is the repaint, and the
+    /// two ways to draw are the whole of the wall's budget:
+    ///
+    ///  * a ring **move** changes no offset, no model and no picture, so it is a text-only repaint
+    ///    (`drawWall(textOnly:)`) — the same one the pointer uses. Measured on a real pty: 97–147 B
+    ///    per move on a 120x34 wall; across all 18 stops of a 137x44 one, 137 B worst (`WallTabTests`
+    ///    pins the hover's 600 B budget);
+    ///  * an **activation** is a click, so it paints exactly as a click paints (a page step has to:
+    ///    the cards of the new page are different windows with different pictures).
+    func wallKey(_ key: WallKey) {
+        guard !mirroring, let pane = wallPane else { return }
+        switch key {
+        case .next, .previous, .forward, .backward:
+            guard var state = wallState else { return }
+            let before = state.ring
+            // A move never returns an action (only `activate` does), so the answer is dropped: this
+            // branch has nothing to perform, it has somewhere to go.
+            _ = state.key(key, in: wallLayout(state, pane: pane))
+            guard state.ring != before else { return }
+            wallState = state
+            if options.debug {
+                Log.write("krd: wall focus \(state.ring.map(String.init(describing:)) ?? "off")\n")
+            }
+            drawWall(textOnly: true)
+
+        case .activate:
+            // A gesture that can enter a window resyncs first, exactly as a click does: the id in the
+            // cached model may belong to a window that closed since the last enumeration.
+            refreshWall(force: false, trigger: .input)
+            guard let state = wallState, let pane = self.wallPane else { return }
+            let layout = wallLayout(state, pane: pane)
+            guard let action = state.ringStop(in: layout) else { return }
+            performWall(action, layout: layout)
+            // The action may have moved the world out from under the ring (`⤢` rewrites its own
+            // payload, a page step rewrites the cards): keep it on a stop this pane still draws.
+            if var after = wallState {
+                after.settleRing(in: wallLayout(after, pane: pane))
+                if after.ring != state.ring {
+                    wallState = after
+                    drawWall(textOnly: true)
+                }
+            }
+
+        case .cancel:
+            guard var state = wallState else { return }
+            let layout = wallLayout(state, pane: pane)
+            let hadRing = state.ring != nil
+            let action = state.key(key, in: layout)      // clears the ring, or hands back `.back`
+            wallState = state
+            if hadRing {
+                // The ring goes away and nothing else moves: text, like every other key here.
+                drawWall(textOnly: true)
+            } else if let action {
+                // No ring: `Esc` is the way out of the pick too — exactly the footer's own cell.
+                // Text only, because `back` moves no offset and no picture.
+                performWall(action, layout: layout, textOnly: true)
+            }
+        }
     }
 
     /// The wall consumes every click on the pane: the whole pane is text, so "outside the picture"
@@ -4679,26 +4767,38 @@ final class Desk {
         // the input path — an unchanged world costs one fingerprint and no enumeration, and the card
         // under the cursor is still the card on screen.
         refreshWall(force: false, trigger: .input)
-        guard var state = wallState, let pane = wallPane else { return }
-        let displays = wallModel.displays.count
-        let windows = wallModel.windows.count
-        let layout = state.layout(cols: pane.cols, rows: pane.rows,
-                                  displays: displays, windows: windows,
-                                  stageAspect: stageAspect(wallModel, state),
-                                  cellAspect: pane.cellAspect)
+        guard let state = wallState, let pane = wallPane else { return }
+        let layout = wallLayout(state, pane: pane)
         // nil = header, the divider, the gap column, a dead end of the bar, a shelf with nothing to
         // scroll: those cells belong to the wall too, so the gesture ends here.
         let action = wheel == 0 ? layout.action(row: row, col: col)
                                 : layout.wheelAction(row: row, col: col, direction: wheel)
         guard let action else { return }
-        state.apply(action, displays: displays, windows: windows, capacity: layout.capacity)
+        performWall(action, layout: layout)
+    }
+
+    /// Apply one action of the click table: the *single* place a gesture changes the wall, and the
+    /// single place "entering" a slot becomes the mirror.
+    ///
+    /// The pointer and the keyboard both end here (issue #201), which is the whole point: `Enter` on
+    /// a card runs this very function, so it cannot drift from a click on that card's caption — not
+    /// the offsets, not the pick, not the hand-over. A second `switch action` in the keyboard path
+    /// would be a second table, and the second table is what decays.
+    /// - Parameter textOnly: draw the frame that is already on screen again (`drawWall(textOnly:)`)
+    ///   instead of a whole frame. A click never passes it — a click's paint is a click's paint. The
+    ///   keyboard passes it for `back`, the one activation that moves nothing but the footer's own
+    ///   sentence, and a whole frame for one row would be the wall's most expensive keystroke.
+    private func performWall(_ action: WallAction, layout: WallLayout, textOnly: Bool = false) {
+        guard var state = wallState else { return }
+        state.apply(action, displays: wallModel.displays.count, windows: wallModel.windows.count,
+                    capacity: layout.capacity)
         wallState = state
         switch action {
         case .enterStage(let index): enterFocus(.display(index))
         case .enterCard(let index): enterFocus(.window(index))
         default: break
         }
-        drawWall()
+        drawWall(textOnly: textOnly)
     }
 
     /// A panel changes the layout: the picture keeps its rows when the panel fits underneath,

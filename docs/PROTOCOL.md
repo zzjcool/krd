@@ -386,6 +386,22 @@ the pane on the alternate screen — pixel coordinates are relative to that orig
 There **is** a kitty keyboard handshake — §7.3 — but a terminal that ignores it keeps the legacy
 encoding above unchanged, which is what every row in this table describes.
 
+**In `--wall` nothing is forwarded** — there is no remote desktop behind a wall — and six of the keys
+above stop being keystrokes and become the wall's own vocabulary (`WallInput.key(for:)`, the whole of
+it in one place):
+
+| Key | Wall |
+|---|---|
+| `Tab` / `ESC [ Z` (Shift-Tab) | next / previous stop of the focus ring |
+| `ESC [ A`/`B`/`C`/`D` (and SS3 `ESC O A–D`) | previous / next stop inside the current band |
+| `0x0D`, `0x20`, `0x0A` (Enter, Space, Return) | activate: what a click on the stop does |
+| lone `ESC` (`0x1B`) | clear the focus ring; with no ring, the footer's `back` |
+| `0x1C` | still **quit** — the one key the wall hands back to the reader |
+| every other byte | swallowed, unchanged from the wall's first version |
+
+Only unmodified keys are the wall's (`Shift` excepted on `Tab`): `Ctrl-Left` is a word step and
+`Alt-Enter` a newline, and a mode that ate them would be eating keys it would not act on.
+
 ### 7.3 Keyboard protocol (kitty)
 
 Without it, `Cmd` combinations, key release and repeat never arrive: macOS gets a keyboard that can
