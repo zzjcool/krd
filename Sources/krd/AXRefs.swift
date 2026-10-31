@@ -12,6 +12,7 @@
 // Nothing in this file talks to the accessibility API, so it is covered by
 // Tests/krdTests/AXRefsTests.swift -- the AX side only supplies "the children of this element".
 
+import CoreGraphics
 import Foundation
 import krdcore
 
@@ -94,6 +95,47 @@ enum AXRoot: String, Codable {
     case menuBar
 }
 
+/// The printed frame, as four clamped integers: a diff compares the printed form, so this is
+/// the same rounding `AXText.frameText` applies.
+///
+/// Storing the printed form rather than a `CGRect` is what keeps a diff honest: a node whose
+/// frame moved by half a point changed nothing a reader can see, and a `CGRect` that came from
+/// another process can hold a value `Int(_:)` would trap on.
+struct AXFrame: Codable, Equatable {
+    var x: Int
+    var y: Int
+    var w: Int
+    var h: Int
+
+    init(x: Int, y: Int, w: Int, h: Int) {
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+    }
+
+    /// `nil` exactly when `AXText.frameText` prints nothing: no frame, or no area. A NaN or
+    /// infinite size fails the same test, so the four numbers always come from a real rect.
+    init?(_ rect: CGRect?) {
+        guard let rect, rect.width > 0, rect.height > 0 else { return nil }
+        self.init(x: AXText.coordinate(rect.minX), y: AXText.coordinate(rect.minY),
+                  w: AXText.coordinate(rect.width), h: AXText.coordinate(rect.height))
+    }
+
+    /// Exactly `AXText.frameText`'s "[x,y wxh]".
+    var text: String { "[\(x),\(y) \(w)x\(h)]" }
+}
+
+/// The walk parameters a dump was produced with. A baseline dumped with other parameters is not
+/// a baseline: `--all` adds hundreds of nodes, so the diff would be noise.
+struct AXSnapshotScope: Codable, Equatable {
+    var interactiveOnly: Bool
+    var all: Bool
+    var menuBar: Bool
+    var depth: Int
+    var maxNodes: Int
+}
+
 /// What one node of a dump looked like, and how to walk back to it.
 struct AXSnapshotNode: Codable, Equatable {
     var ref: String
@@ -101,11 +143,25 @@ struct AXSnapshotNode: Codable, Equatable {
     var chain: [AXStep]
     /// Absent in snapshots written before this field existed; those are window chains.
     var root: AXRoot?
+
+    // Schema 2. All optional, so a v1 snapshot still decodes -- the synthesized decoder reads an
+    // optional with `decodeIfPresent`, so a node that never had these keys comes back with nil
+    // and the diff compares structure only. Pinned by `AXDiffStoreTests` with a literal v1 JSON.
+    /// The sanitized name the dump printed.
+    var name: String?
+    /// The printed `value="…"` / `id=…`; empty string when the node printed neither.
+    var detail: String?
+    /// The short actions the dump printed ("press", …).
+    var actions: [String]?
+    /// `nil` when the node had no frame.
+    var frame: AXFrame?
 }
 
 /// One `krd ax tree` / `krd ax find` output, written to disk so refs survive the process.
 struct AXSnapshot: Codable, Equatable {
-    static let schema = 1
+    /// 2 added the node fields above and `scope`. The index keeps its own schema: this number
+    /// only says what a snapshot file contains, and a v1 file still decodes.
+    static let schema = 2
 
     var schema: Int
     /// Random per dump; also the file name, and what `--snapshot` accepts.
@@ -118,10 +174,19 @@ struct AXSnapshot: Codable, Equatable {
     var windowTitle: String
     var windowCount: Int
     var nodes: [AXSnapshotNode]
+    /// The walk parameters this dump was made with; nil in a v1 snapshot. `--diff` refuses a
+    /// baseline whose scope is nil or differs.
+    var scope: AXSnapshotScope?
 
     func node(ref: String) -> AXSnapshotNode? {
         nodes.first { $0.ref == ref }
     }
+}
+
+/// The newest previous dump of one window, from the index the caller already read.
+struct AXBaseline: Equatable {
+    var generation: String
+    var snapshot: AXSnapshot
 }
 
 /// One line of `index.json`: a ref, and which dump last printed it.
@@ -445,5 +510,38 @@ struct AXRefStore {
         for generation in doomed {
             try? FileManager.default.removeItem(at: snapshotPath(generation: generation))
         }
+    }
+}
+
+extension AXRefStore {
+    /// The dump a `--diff` compares against: the newest entry for this bundle+window in `index`
+    /// whose generation is not `except`. `nil` when there is none (a first-ever run).
+    ///
+    /// `index` is the read the caller already has -- `beginDump().loaded.index`. `--diff` sits on
+    /// the read path `tree` already pays for, so this must not cost a second read of `index.json`
+    /// (#102) and must not decode the dumps it passes over: the ordering lives in the `at` each
+    /// entry already carries, the same way `prune` orders without opening a file. Exactly one
+    /// snapshot file is read, the baseline itself; a baseline that no longer decodes is `nil` and
+    /// the caller fails open to a full tree rather than to a guess.
+    ///
+    /// Nothing here writes: refs stay monotonic and a diff never resolves, renumbers or prunes.
+    func previousSnapshot(bundle: String, window: Int, excluding except: String?,
+                          index: AXIndex) -> AXBaseline? {
+        // A dump's entry is repeated for every ref it printed, so collect one date per generation.
+        var dates: [String: Date] = [:]
+        for list in index.refs.values {
+            for entry in list where entry.bundle == bundle && entry.window == window {
+                dates[entry.generation] = entry.at
+            }
+        }
+        // Newest first; ties fall back to the id, so the same index picks the same baseline twice
+        // (the ordering `prune` uses, for the same reason).
+        let ordered = dates.filter { $0.key != except }
+            .sorted { $0.value == $1.value ? $0.key > $1.key : $0.value > $1.value }
+        guard let baseline = ordered.first else { return nil }
+        // One read, this one: `load(generation:)` is also what `--snapshot` uses, and its
+        // `snapshotReads` bump is the honest count of what a `--diff` costs.
+        guard let snapshot = load(generation: baseline.key) else { return nil }
+        return AXBaseline(generation: baseline.key, snapshot: snapshot)
     }
 }

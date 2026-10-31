@@ -112,6 +112,7 @@ krd ax doctor                # is Accessibility granted, does the window server 
 krd ax windows               # app, pid, window index, title, frame
 krd ax tree --app Finder -d 3 -i    # one window, shallow, actionable nodes only
 krd ax tree --app Finder --json     # same, for a program
+krd ax tree --app Finder --diff     # only what changed since the last dump, or `unchanged`
 krd ax screen                # every on-screen window, plus the focused element
 ```
 
