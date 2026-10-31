@@ -388,9 +388,19 @@ APC G i=<iid>;OK ST                     # success
 APC G i=<iid>;<ERRNO>:<text> ST         # e.g. EINVAL: decompression failed, ENOENT: ...
 ```
 
-krd never parses replies. They arrive on stdin, and since stdin is in raw mode and being parsed as
-input, a reply will be interpreted as keystrokes (starting with Alt-`G`) and typed into the
-captured desktop. **Use `KRD_Q=0` together with `--no-input`**, or read `KRD_DUMP` offline instead.
+krd *does* parse replies (issue #109). The body of an `APC` (`ESC _ … ST`) — and of the rest of the
+string-terminated family, `DCS`/`SOS`/`PM` — becomes one typed `Event.graphicReply` and is counted
+as a reply, never as input: no byte of it can reach the mirrored desktop, whatever `KRD_Q` says.
+The first refusal per image is logged once, where the log panel already is:
+
+```
+krd: image 137 refused: EINVAL: decompression failed
+```
+
+So `KRD_Q=1` (success suppressed, failures reported — the kitty recommendation) is safe to use with
+input on; `KRD_Q=0` adds the per-success `OK` line and is mainly useful with `--debug`. A body krd
+cannot classify is reported as `unparsed` rather than guessed at, and only `ESC _ G` is treated as a
+reply: any other `ESC _` stays the Alt-`_` keystroke it always was.
 
 ## 9. References
 

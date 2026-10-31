@@ -47,10 +47,11 @@ fixes it, it is a terminal bug worth reporting upstream, not a krd bug.
 ### 2. Black pane and no error anywhere
 
 **Cause.** `q=2` suppresses every protocol reply, including errors. This is the right default
-(replies would otherwise arrive on stdin and be typed into the desktop), but it hides the reason
-nothing was drawn.
-**Fix.** Reproduce with `KRD_Q=0 krd --no-input` and read the replies (`OK` / `EINVAL: …` /
-`ENOENT: …`). Do not use `KRD_Q=0` with input enabled.
+(replies cost bytes on a healthy link), but it hides the reason nothing was drawn.
+**Fix.** `KRD_Q=1` (failures only) or `KRD_Q=0` (everything): since issue #109 krd parses replies, so
+a refusal is one log line — `krd: image 137 refused: EINVAL: decompression failed` — and no byte of
+the reply is typed into the desktop. `KRD_Q=0 --no-input` still works and is the quietest way to
+read the raw `OK`/`EINVAL: …`/`ENOENT: …` bodies.
 
 ### 3. A per-tile delete wipes the whole picture
 
@@ -256,11 +257,13 @@ Two things worth knowing:
   `posting to pid 1234 (window mode)` and `pid 1234 <- 1 at 804,298`), so "where did that click go"
   is answerable instead of guesswork.
 
-### 21. `KRD_Q=0` types garbage into the desktop
+### 21. `KRD_Q=0` typed garbage into the desktop
 
 **Cause.** Protocol replies arrive on stdin, which is in raw mode and parsed as input; the first
-byte sequence looks like Alt-`G` and the rest becomes text.
-**Fix.** Only use `KRD_Q=0` with `--no-input`, or inspect `KRD_DUMP` offline.
+byte sequence looked like Alt-`G` and the rest became text. Fixed by issue #109: `APC G … ST` (and
+`DCS`/`SOS`/`PM`) is parsed into a typed reply event, counted and logged, and is never injected.
+**Fix.** Update. In a build without the fix: only use `KRD_Q=0` with `--no-input`, or inspect
+`KRD_DUMP` offline.
 
 ### 22. Pressing F11 or F12 kills the process
 

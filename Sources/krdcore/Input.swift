@@ -27,8 +27,76 @@ public enum Event: Equatable {
     /// The terminal's answer to `CSI 5n`: the device status report the round-trip probe measures
     /// (issue #52). Not input — nothing is injected for it.
     case statusReport
+    /// A string-terminated sequence that is **not** input: an `APC G … ST` (the channel kitty's
+    /// graphics protocol answers on), or a `DCS`/`SOS`/`PM` body such as a `tmux` passthrough
+    /// (issue #109). `krd` counts it and says why a tile was refused; nothing is injected for it.
+    case graphicReply(GraphicsReply)
     /// A parse-level diagnostic for `--debug` (e.g. an OSC that grew past the cap).
     case notice(String)
+}
+
+/// One reply from a string-terminated sequence: `APC G i=31;OK ST`, `APC G i=31;EINVAL: … ST`, or
+/// whatever body a `DCS`/`SOS`/`PM` carried.
+///
+/// Numbers and the terminal's own words only. The parser never guesses that a body it does not
+/// recognise was a keystroke — `status` is then `unparsed` and `krd` says so instead of typing it.
+public struct GraphicsReply: Equatable {
+    /// The body between the introducer and `ST`, untouched (`Gi=31;OK` for the example above).
+    public var body: String
+    /// `i=<id>`: the image the reply is about.
+    public var image: Int?
+    /// `I=<number>`: an image *number*, the other way kitty names an image.
+    public var imageNumber: Int?
+    /// `p=<id>`: the placement, on a reply to `a=p`.
+    public var placement: Int?
+    /// `OK`, the terminal's own error text (`EINVAL: decompression failed`), or `unparsed`.
+    public var status: String
+
+    /// Every kitty error code starts with `E` (`EINVAL`, `ENOENT`, `ENOSPC`, …); `OK` does not.
+    public var isError: Bool { status.first == "E" }
+    public var isOK: Bool { status == "OK" }
+    /// The body's selector: `G` for graphics, otherwise whatever the sequence started with.
+    public var selector: String { body.first.map(String.init) ?? "" }
+
+    /// Classify `G i=<id>[,p=<id>][,I=<n>];<OK | E…>` and nothing else.
+    ///
+    /// Both the transmit (`a=t`) and the placement (`a=p`) replies carry the status the same way,
+    /// and kitty sends the error text without a leading identifier: `ESC _ G EINVAL: … ST` is a
+    /// legal reply about no particular image, so the `;` is optional in this grammar.
+    public init(body: String) {
+        self.body = body
+        var rest = Substring(body)
+        guard rest.first == "G" else {
+            status = "unparsed"
+            return
+        }
+        rest = rest.dropFirst()
+        let meta: Substring
+        let result: Substring
+        if let semicolon = rest.firstIndex(of: ";") {
+            meta = rest[..<semicolon]
+            result = rest[rest.index(after: semicolon)...]
+        } else {
+            meta = ""
+            result = rest
+        }
+        for field in meta.split(separator: ",") {
+            let pair = field.split(separator: "=", maxSplits: 1)
+            guard pair.count == 2, let value = Int(pair[1]) else { continue }
+            switch pair[0] {
+            case "i": image = value
+            case "I": imageNumber = value
+            case "p": placement = value
+            default: break
+            }
+        }
+        // `OK` or an error code; the wildcard case is `unparsed`, never a guess.
+        guard let first = result.first, first == "O" || first == "E" else {
+            status = "unparsed"
+            return
+        }
+        status = String(result)
+    }
 }
 
 /// An SGR mouse report: `CSI < b ; x ; y M|m`. Numbers only — `x`/`y` are whatever the terminal
@@ -64,6 +132,10 @@ public final class InputParser {
     /// terminator (or `reset()`) ends it: a reply that never terminates leaves the parser
     /// discarding, which is deliberate — the alternative is typing its payload.
     private var discardingOSC = false
+    /// The same for an over-cap `APC`/`DCS`/`SOS`/`PM` body (issue #109). A separate field because
+    /// the terminator rule differs: a string sequence ends on `ST` only, so a `BEL` inside one is
+    /// payload and must not end the discard.
+    private var discardingString = false
     /// The last read ended in `ESC`, the first half of an `ST` (`ESC \`) terminator. Held outside
     /// `buffer` on purpose: a lone `ESC` there is the Esc key to the read loop, and its `reset()`
     /// would drop the discard state in the middle of the sequence.
@@ -85,6 +157,7 @@ public final class InputParser {
     public func reset() {
         buffer.removeAll(keepingCapacity: true)
         discardingOSC = false
+        discardingString = false
         discardSawESC = false
     }
 
@@ -97,6 +170,11 @@ public final class InputParser {
     /// legal reply, not a second payload budget.
     private static let maxOSCSequence = maxEncodedOSC + 32
 
+    /// Upper bound for an `APC`/`DCS`/`SOS`/`PM` body. A kitty graphics reply is ~40 bytes and a
+    /// `tmux` passthrough carries the payload it relays, so this is generous headroom rather than a
+    /// budget; past it the sequence is swallowed whole, never typed (see `discardingString`).
+    public static let maxStringSequence = 64 << 10
+
     private func emit(_ event: Event) { onEvent?(event) }
 
     private func drain() {
@@ -105,6 +183,12 @@ public final class InputParser {
                 guard let used = discardOSC() else { return }
                 buffer.removeFirst(used)
                 discardingOSC = false
+                continue
+            }
+            if discardingString {
+                guard let used = discardString() else { return }
+                buffer.removeFirst(used)
+                discardingString = false
                 continue
             }
             guard let first = buffer.first else { return }
@@ -181,16 +265,90 @@ public final class InputParser {
                 return nil
             }
             return nil
+        case 0x5F, 0x50, 0x58, 0x5E:            // APC: ESC _ … ST; DCS ESC P; SOS ESC X; PM ESC ^
+            // A graphics reply is `ESC _ G … ST` (issue #109) and the other three are the same
+            // class of sequence: a reply or a passthrough, never a key. Alt-`_` is a legal
+            // keystroke though, so any `ESC _` that is not the reply prefix keeps today's meaning
+            // exactly — one byte of lookahead, then the Alt-text path below.
+            if buffer[1] == 0x5F {
+                guard buffer.count >= 3 else { return nil }
+                guard buffer[2] == 0x47 else { return altText() }
+            }
+            return parseStringSequence()
         default:
-            if buffer[1] < 0x20 {
-                emit(.press(Keys.esc, [], .press))
-                return 1
-            }
-            if let ch = String(bytes: [buffer[1]], encoding: .utf8)?.first {
-                emit(.text(ch, [.maskAlternate]))
-            }
-            return 2
+            return altText()
         }
+    }
+
+    /// `ESC` + one printable byte: how a legacy terminal encodes Alt, and this parser's fallback for
+    /// every escape it does not recognise. One keystroke, unchanged by any of the above.
+    private func altText() -> Int? {
+        if buffer[1] < 0x20 {
+            emit(.press(Keys.esc, [], .press))
+            return 1
+        }
+        if let ch = String(bytes: [buffer[1]], encoding: .utf8)?.first {
+            emit(.text(ch, [.maskAlternate]))
+        }
+        return 2
+    }
+
+    /// `APC`/`DCS`/`SOS`/`PM`: `ESC x … ST`. The body is a reply's payload, never input, so it
+    /// becomes exactly one `.graphicReply` — an unrecognised body included, as `unparsed`.
+    ///
+    /// `ST` is the only terminator here (`BEL` ends an `OSC` and nothing else), and the scan stops at
+    /// the cap: past it the sequence is dropped whole rather than buffered or typed.
+    private func parseStringSequence() -> Int? {
+        let scanTo = min(buffer.count, Self.maxStringSequence)
+        var i = 2
+        while i < scanTo {
+            if buffer[i] == 0x1B, i + 1 < buffer.count, buffer[i + 1] == 0x5C {
+                handleStringSequence(String(bytes: buffer[2..<i], encoding: .utf8) ?? "")
+                return i + 2
+            }
+            i += 1
+        }
+        if buffer.count > Self.maxStringSequence {
+            emit(.notice("string sequence dropped: over cap"))
+            if let used = discardString() { return used }
+            discardingString = true
+            return nil
+        }
+        // Still arriving: the body stays in `buffer` and nothing is emitted, so a reply split
+        // across reads cannot be typed while it is incomplete.
+        return nil
+    }
+
+    /// One string-sequence body, classified. The distinction from a keystroke is made *here*, by the
+    /// fact that the sequence arrived: `krd` must never guess these bytes were input.
+    private func handleStringSequence(_ body: String) {
+        emit(.graphicReply(GraphicsReply(body: body)))
+    }
+
+    /// Swallow the body of an over-cap `APC`/`DCS`/`SOS`/`PM` up to its `ST`, for the reason
+    /// `discardOSC` documents. Same contract, one difference: `BEL` is payload in a string sequence,
+    /// so it does not end the discard — ending there would type the rest of the reply.
+    private func discardString() -> Int? {
+        if discardSawESC {
+            guard let first = buffer.first else { return nil }
+            discardSawESC = false
+            if first == 0x5C { return 1 }         // `ESC \` split across two reads
+        }
+        var i = 0
+        while i < buffer.count {
+            if buffer[i] == 0x1B {
+                guard i + 1 < buffer.count else {
+                    // The read ended on the first half of `ST`: hold it for the next read.
+                    discardSawESC = true
+                    buffer.removeAll(keepingCapacity: true)
+                    return nil
+                }
+                if buffer[i + 1] == 0x5C { return i + 2 }
+            }
+            i += 1
+        }
+        buffer.removeAll(keepingCapacity: true)
+        return nil
     }
 
     /// Swallow the body of an over-cap OSC. Returns how many buffered bytes to drop (through the
@@ -355,6 +513,12 @@ extension Event {
             return "keyboardFlags \(flags.map(String.init) ?? "?")"
         case .statusReport:
             return "statusReport"
+        case let .graphicReply(r):
+            // The status text is the terminal's words about a payload, so the trace reports the
+            // selector, the ids and the length — never the body (the `osc` rule).
+            return "graphicReply \(r.selector) i=\(r.image.map(String.init) ?? "-")"
+                + " p=\(r.placement.map(String.init) ?? "-")"
+                + " \(r.isOK ? "ok" : r.isError ? "error" : "unparsed") \(r.body.utf8.count) B"
         case let .notice(text):
             return "notice \(text)"
         }

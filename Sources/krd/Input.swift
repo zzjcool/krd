@@ -23,6 +23,15 @@ final class InputReader {
     /// have been. Read by the diagnostics tick, which owns the probe's send time.
     private(set) var lastStatusReplyAt = Double(0)
     private(set) var statusReplies = 0
+    /// Graphics replies the terminal sent (`APC G i=…;OK|E… ST`, issue #109), and how many of them
+    /// were refusals. Data about the picture, never input: nothing here reaches `postKey`.
+    private(set) var graphicReplies = 0
+    private(set) var imageErrors = 0
+    /// The last refusal, sanitized for a log line — `EINVAL: decompression failed`.
+    private(set) var lastImageError: String?
+    /// `(image, status)` pairs already reported. A refused tile is redrawn every frame and the
+    /// terminal answers every time; the human needs the sentence once, not 20 times a second.
+    private var reportedImageErrors: Set<String> = []
     var inputP99Ms: Double { inputSeries.percentile(0.99) }
     /// A copy of the recent samples, for the `SIGUSR2` report bundle.
     var inputSamples: Series { inputSeries }
@@ -191,6 +200,14 @@ final class InputReader {
                 if parser.buffer == [0x1B] {
                     parser.reset()
                     postKey(Keys.esc, [])
+                    continue
+                }
+                // `ESC _` with nothing after it is Alt-`_` (a legal keystroke) that this read did
+                // not complete: the parser holds it to see whether a graphics reply follows, and
+                // here the wait is over.
+                if parser.buffer == [0x1B, 0x5F] {
+                    parser.reset()
+                    postUnicode("_", [.maskAlternate])
                 }
                 continue
             }
@@ -231,9 +248,42 @@ final class InputReader {
         case let .keyboardFlags(flags):
             keyboardFlags = flags
             if trace { log("keyboard protocol flags=\(flags.map(String.init) ?? "unparsed")") }
+        case let .graphicReply(reply):
+            handleGraphicReply(reply)
         case let .notice(text):
             if trace { log(text) }
         }
+    }
+
+    /// A graphics reply is a statement about the wire, not a keystroke (issue #109). It used to be
+    /// typed into the mirrored desktop as Alt-`G`-and-friends when `KRD_Q` asked the terminal to
+    /// answer; now it is counted, and the *first* refusal per `(image, status)` becomes one line in
+    /// the log, which is where a human already looks for a black tile.
+    private func handleGraphicReply(_ reply: GraphicsReply) {
+        graphicReplies += 1
+        let status = Self.logSafe(reply.status)
+        guard reply.isError else {
+            if trace {
+                log("graphic reply \(reply.isOK ? "ok" : "unparsed")"
+                    + " image=\(reply.image.map(String.init) ?? "-")"
+                    + " placement=\(reply.placement.map(String.init) ?? "-")"
+                    + " status=\(status)")
+            }
+            return
+        }
+        imageErrors += 1
+        lastImageError = status
+        guard reportedImageErrors.insert("\(reply.image.map(String.init) ?? "-")/\(status)").inserted
+        else { return }
+        let image = reply.image.map(String.init) ?? (reply.imageNumber.map { "number \($0)" } ?? "?")
+        Log.write("krd: image \(image) refused: \(status)\n")
+    }
+
+    /// The terminal's own words, made safe for a one-line log: no control bytes (a reply is
+    /// attacker-influenceable text on a tty), no newline, and a length a human can read.
+    private static func logSafe(_ text: String) -> String {
+        let cleaned = String(text.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F })
+        return String(cleaned.prefix(200))
     }
 
     /// Same bits on both sides of the boundary (issue #45): `CGEventFlags` and `Modifiers` agree on

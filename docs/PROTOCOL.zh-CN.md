@@ -356,9 +356,17 @@ APC G i=<iid>;OK ST                     # 成功
 APC G i=<iid>;<ERRNO>:<text> ST         # 例如 EINVAL: decompression failed、ENOENT: …
 ```
 
-krd 从不解析回复。它们到达 stdin，而 stdin 处于 raw 模式、正在被当作输入解析，所以一条回复会被理解成
-键盘输入（开头是 Alt-`G`），然后被打进被控桌面。**`KRD_Q=0` 一定要配 `--no-input` 用**，或者干脆离线
-读 `KRD_DUMP`。
+krd **会**解析回复（issue #109）。`APC`（`ESC _ … ST`，以及同一族的 `DCS`/`SOS`/`PM`）的正文会变成
+一个带类型的 `Event.graphicReply`，按“回复”计数，永远不会被当成输入：不论 `KRD_Q` 是什么，它的任何
+一个字节都不会进入被控桌面。每个 image 的第一次拒绝会在日志里说一次，就在人本来就会看的地方：
+
+```
+krd: image 137 refused: EINVAL: decompression failed
+```
+
+所以 `KRD_Q=1`（成功静默、失败上报——kitty 推荐的值）可以放心和输入一起用；`KRD_Q=0` 另外给每条
+成功也加一行 `OK`，主要配 `--debug`。krd 认不出的正文按 `unparsed` 上报而不是猜，并且只有 `ESC _ G`
+当回复：其它 `ESC _` 仍然是 Alt-`_` 这个按键。
 
 ## 9. 参考
 
