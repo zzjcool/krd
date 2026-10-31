@@ -3765,6 +3765,10 @@ final class Desk {
             guard !wallMode else { return WallInput.consumes(byte) }
             return self?.chromeKey(byte) ?? false
         }
+        // The other half of the chord the reader owes the chrome (#115): while the prefix is armed,
+        // the next key is the chrome's, whether it is a control byte or a printable one. Asked from
+        // the reader thread, which is where `chromeKey` set it — one writer, one reader, one thread.
+        reader.chromePrefixArmed = { [weak self] in self?.chromeState.prefix ?? false }
         reader.onChromeClick = { [weak self] row, col, wheel in
             self?.chromeClick(row: row, col: col, wheel: wheel)
         }
@@ -3832,7 +3836,12 @@ final class Desk {
     }
 
     /// `Ctrl-\` (prefix) and the byte after it. Returns true when the byte belongs to the chrome.
-    private func chromeKey(_ byte: UInt8) -> Bool {
+    ///
+    /// Runs on the *reader* thread (`InputReader.onChromeKey`), which is also the only writer of
+    /// `chromeState.prefix` — the flag `InputReader.chromePrefixArmed` hands back to the reader. Not
+    /// `private`: the chord is one table, and `DevChordTests` drives this exact function rather than
+    /// a copy of it (#115).
+    func chromeKey(_ byte: UInt8) -> Bool {
         guard chromeEnabled else { return false }
         if chromeState.prefix {
             chromeState.prefix = false
