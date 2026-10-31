@@ -401,6 +401,16 @@ ScreenCaptureKit 帧，按 sample attachments 里的 status 区分（`idle` = �
 不回应答时，连续三次就自动关掉探针，governor 退回只看写延迟——数字保持 `—`，绝不显示 `0`。
 阈值是 `KRD_RTT_BUDGET_MS`（默认 250），`KRD_NO_RTT=1` 可完全关闭。
 
+一次应答不足以判定链路迟到（`RTTProbe.isLate`）。往返是抖动信号的单次采样：OpenSSH 10 的击键混淆把
+`CSI 0n` 应答压在 20 ms 的栅格上，一次唤醒晚到就按整格重排，于是往返 25 ms 的链路偶尔也会答 258 ms
+（实测，`probe/termcaps.py` 走 `ssh -t`；`docs/design-ui-v2.zh-CN.md` §2.2）。探针两秒答一次，所以在旧的
+`lastMs > budget` 规则下，这样一次应答在接下来的两秒里都被读成「迟到」——20 fps 下是 40 帧，占满 governor
+的 3 秒窗口，四分之一秒的抖动就花掉一档（issue #187）。连续两次超预算才是链路真的落后，一次只是噪声。
+最新那条探针没得到应答时也永不判定迟到：`expire()` 有意不清 `series`（报告要保留历史），否则最后落下的那个
+数字会永远停在 `lastMs` 上，ladder 自己走到最底而面板显示 `rtt —`。帧线程根本不读 `RTTProbe`——那是个内含
+`Series` 的 struct，在主队列上被改——`probeRoundTrip` 在 1 Hz tick 上判定，并在 `stateLock` 下发布一个
+`Bool`（`rttLinkLate`）。
+
 **报告包。** `kill -USR2 <krd>` 会写 `$TMPDIR/krd-report.txt`：一句判定（告诉我们哪一半更大）、当前所有
 数字、每条序列最近 300 个采样（cap / pipe / zlib / write / input）、生效的 `KRD_*` 开关、几何信息，以及
 最近 200 行日志。它的意义是——**慢到没法在终端里读的会话，依然能从另一个终端诊断**：整个流程就是

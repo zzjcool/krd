@@ -492,6 +492,20 @@ terminal that never answers switches the probe off after three misses and the go
 on write latency alone — the numbers stay `—`, never `0`. `KRD_RTT_BUDGET_MS` (default 250) is the
 threshold, `KRD_NO_RTT=1` disables the probe.
 
+One answer is not enough to call the link late (`RTTProbe.isLate`). A round trip is a single sample
+of a bursty thing: OpenSSH 10's keystroke obfuscation holds the `CSI 0n` reply on a 20 ms grid and a
+late wake re-bases the delay by whole intervals, so a link whose round trip is 25 ms answers 258 ms
+now and then (measured, `probe/termcaps.py` over `ssh -t`; `docs/design-ui-v2.zh-CN.md` §2.2). The
+probe answers every two seconds, so under the old `lastMs > budget` rule one such answer read as
+"late" for the two seconds that followed — 40 frames at 20 fps, a majority of the governor's 3 s
+window — and a quarter second of jitter spent a rung (issue #187). Two answers in a row over the
+budget is a link that is behind; one is noise. A probe that has missed its newest answer is never
+late either: `expire()` leaves `series` alone on purpose (the report wants the history), so the last
+number that happened to land would otherwise sit in `lastMs` for good and walk the ladder to the
+bottom while the panel shows `rtt —`. The frame path does not read `RTTProbe` at all — it is a
+struct holding a `Series`, mutated on the main queue — `probeRoundTrip` decides on the 1 Hz tick and
+publishes one `Bool` under `stateLock` (`rttLinkLate`).
+
 **The report bundle.** `kill -USR2 <krd>` writes `$TMPDIR/krd-report.txt`: a one-line verdict naming
 the bigger half of the delay, the current numbers, the last 300 samples of every series (cap, pipe,
 zlib, write, input), the active `KRD_*` switches, the geometry and the last 200 log lines. The point
