@@ -1360,8 +1360,8 @@ enum AXCommand {
 
 // MARK: - walking
 
-/// Breadth-first, budgeted, and attribute-batched: three IPC per node
-/// (`CopyMultipleAttributeValues`, action names, children) instead of eight.
+/// Breadth-first, budgeted, and attribute-batched: **two** IPC per node
+/// (`CopyMultipleAttributeValues` — children included — plus action names) instead of nine.
 /// One emitted line, plus what it takes to find that line's element again in another process.
 struct AXEntry {
     var node: AXNode
@@ -1373,6 +1373,69 @@ struct AXEntry {
     var root: AXRoot = .window
 }
 
+/// The accessibility reads a walk is built out of, behind one seam.
+///
+/// Why a seam: a walk's cost *is* its round trips, and a round trip can be neither counted nor
+/// timed from a process that holds no Accessibility grant (this machine answers `err=-25208` and
+/// every slot is nil). With the reads injectable, `AXWalkRoundTripTests` runs a synthetic tree
+/// through the real `walk` and asserts the calls per node and the tree that comes out — which is
+/// the only way the "3 → 2" of issue #104 can be stated as a number rather than a claim.
+///
+/// Production is `.system`: these three calls, in this order, and nothing else. They are
+/// `AXCommand`'s own helpers so the failure handling (`multi` tolerating holes, `actionNames`
+/// dropping private actions, `value` swallowing a bad app) does not fork.
+struct AXAccess {
+    /// `AXUIElementCopyMultipleAttributeValues`, normalized to one slot per requested name.
+    var batch: (AXUIElement, [String]) -> [AnyObject?]
+    /// `AXUIElementCopyActionNames`, filtered to standard actions and short names.
+    var actions: (AXUIElement) -> [String]
+    /// `AXUIElementCopyAttributeValue`. The walk itself only needs it for the children fallback
+    /// below; the reads around the walk (`windows`, `frame`, the ref chain) still use it.
+    var value: (AXUIElement, String) -> AnyObject?
+    /// Whether `batch` carries `AXChildren` in its last slot.
+    ///
+    /// Real AX does (#104: `err=0, n=8`, children as the 8th value; an unsupported name in the
+    /// same batch does not fail it). `false` is the pre-#104 shape — children from a read of
+    /// their own — and exists so `AXWalkRoundTripTests` can run both shapes over one tree and
+    /// require one output from them; nothing in the production path sets it to `false`.
+    var carriesChildren: Bool = true
+
+    static let system = AXAccess(batch: AXCommand.multi, actions: AXCommand.actionNames,
+                                 value: AXCommand.value)
+
+    /// The children of `element`, reusing `values` when they rode in the batch.
+    ///
+    /// A hole in the children slot is **not** read as "leaf": it takes the separate read. Two
+    /// reasons. A leaf answers with an *empty* array, not with nothing — the issue's own locked
+    /// session reports `AXChildren == 0` for every window, i.e. an answer of zero elements — so a
+    /// hole means the element did not answer the attribute, and "does not answer" must not be
+    /// spelled the same way as "has nothing under it": that is the one way this change could lose
+    /// a subtree silently, and reporting a broken subtree as empty is the worst answer a tool
+    /// whose product is "what is on screen" can give. And a hole is exactly the node the
+    /// pre-#104 walk paid a read for, so this can only ever cost what the walk already cost.
+    ///
+    /// The all-nil batch (an app that does not implement multi-value reads, or a grant that
+    /// lapsed mid-walk) lands here too, which is what keeps such a subtree walkable.
+    func children(of element: AXUIElement, from values: [AnyObject?]) -> [AXUIElement] {
+        if carriesChildren, let inBatch = AXAccess.elements(values.last ?? nil) { return inBatch }
+        return AXAccess.elements(value(element, kAXChildrenAttribute)) ?? []
+    }
+
+    /// The `AXUIElement`s in `raw`, or `nil` when it is not a list of elements.
+    ///
+    /// Two casts on purpose: the batch hands back the raw `CFArray` (`AnyObject`), and a value
+    /// that only bridges as `[AnyObject]` should still be read as children rather than costing a
+    /// redundant read. The per-element test is `AXCommand.asElement`'s, the same one the ref
+    /// chain already trusts.
+    static func elements(_ raw: AnyObject?) -> [AXUIElement]? {
+        guard let raw else { return nil }
+        if let typed = raw as? [AXUIElement] { return typed }
+        guard let list = raw as? [AnyObject] else { return nil }
+        let elements = list.compactMap { AXCommand.asElement($0) }
+        return elements.count == list.count ? elements : nil
+    }
+}
+
 struct AXWalker {
     let interactiveOnly: Bool
     let emitEverything: Bool
@@ -1382,7 +1445,7 @@ struct AXWalker {
     let maxDepth: Int
     let maxShown: Int
     let maxVisited: Int
-    /// Wall-clock budget. A hung app costs up to 1.5 s per IPC and the walk makes three per
+    /// Wall-clock budget. A hung app costs up to 1.5 s per IPC and the walk makes two per
     /// node, so the node budget alone can take hours; this is the backstop that matters.
     let deadline: Date
     /// First ref number to hand out. Refs are monotonic per window (see AXIndex.counters):
@@ -1390,6 +1453,9 @@ struct AXWalker {
     let refStart: Int
     /// Which element the chains of this walk start from. (`root` alone is the walk parameter.)
     let chainRoot: AXRoot
+    /// The accessibility reads this walk is allowed to make. `.system` in production; the
+    /// synthetic tree in `AXWalkRoundTripTests` counts them instead of paying for them (#104).
+    let access: AXAccess
 
     var entries: [AXEntry] = []
     var nodes: [AXNode] { entries.map { $0.node } }
@@ -1406,7 +1472,8 @@ struct AXWalker {
     /// shows up in CI.
     init(interactiveOnly: Bool, emitEverything: Bool, includeMenus: Bool,
          maxDepth: Int, maxShown: Int, maxVisited: Int, deadline: Date, refStart: Int = 1,
-         root: AXRoot = .window) {
+         root: AXRoot = .window, access: AXAccess = .system) {
+        self.access = access
         self.refStart = max(refStart, 1)
         self.chainRoot = root
         self.interactiveOnly = interactiveOnly
@@ -1418,11 +1485,32 @@ struct AXWalker {
         self.deadline = deadline
     }
 
-    private static let attributeNames: [String] = [
+    /// Everything one node is read for, in one `CopyMultipleAttributeValues`. The order is the
+    /// slot order `walk` indexes into, so `children` stays last.
+    ///
+    /// `AXChildren` is here because it is an ordinary attribute and a batch is one round trip
+    /// whatever it carries — which is the claim this change makes, and the only one it needs.
+    /// The issue measures that batch twice on an M4 Pro/macOS 27: `batch(7 attrs)` = 0.059 ms and
+    /// `batch(7 + children)` = 0.265 ms in the constants table, 0.305 ms in the summary — i.e. the
+    /// children array costs 0.2–0.25 ms *of marshalling, not of a round trip*, and the batch still
+    /// answers `err=0, n=8`. So the wall clock per node is a wash-to-slightly-worse in the worst
+    /// reading (0.310 → 0.325 ms) and the round trips — what dominates on the documented apps and
+    /// what survives a slow app — are a third fewer. An unsupported *name* in the same batch does
+    /// not fail it either (it comes back as a hole), so this cannot cost a round trip (issue #104).
+    static let attributeNames: [String] = [
         kAXRoleAttribute as String, kAXTitleAttribute as String, kAXValueAttribute as String,
         kAXIdentifierAttribute as String, kAXPositionAttribute as String, kAXSizeAttribute as String,
-        kAXDescriptionAttribute as String,
+        kAXDescriptionAttribute as String, kAXChildrenAttribute as String,
     ]
+
+    /// The same read for a node whose children will be thrown away (`--max` depth reached): the
+    /// array is the 0.2–0.25 ms above, so a node at the limit must not pay to marshal it. Before
+    /// #104 such a node paid nothing for children either; it still pays exactly two round trips.
+    ///
+    /// Only the depth prune is covered here — a menu node pruned by `--no-menubar` still carries
+    /// the children array in its batch, because `role` is not known before the read. The cost is
+    /// bounded by the menu bar itself, which is walked only when asked for.
+    static let attributeNamesAtLimit: [String] = Array(attributeNames.dropLast())
 
     mutating func walk(root: AXUIElement, rootDepth: Int, countAsRoot: Bool) {
         // (element, depth, the chain that led here, index inside the parent's AXChildren)
@@ -1438,7 +1526,11 @@ struct AXWalker {
             let depth = item.depth
             guard seen.insert(CFHash(element)).inserted else { continue }
             visited += 1
-            let values = AXCommand.multi(element, AXWalker.attributeNames)
+            // Known before the read, unlike `role`: a node at the depth limit has its children
+            // discarded, so it must not ask for them.
+            let atLimit = depth >= maxDepth
+            let values = access.batch(element, atLimit ? AXWalker.attributeNamesAtLimit
+                                                       : AXWalker.attributeNames)
             let role = (values[0] as? String) ?? ""
             var name = (values[1] as? String) ?? ""
             if name.isEmpty { name = (values[6] as? String) ?? "" }
@@ -1455,7 +1547,7 @@ struct AXWalker {
             let frame = origin.flatMap { point in size.map { CGRect(origin: point, size: $0) } }
 
             let cleanName = AXText.sanitize(name)
-            let actions = AXCommand.actionNames(element).map(AXText.shortAction)
+            let actions = access.actions(element).map(AXText.shortAction)
             // The first element of a walk is the thing the caller asked about (a window, a menu
             // bar). It earns a line even when its role is not in any list, otherwise a filter
             // can make a whole window look empty.
@@ -1489,8 +1581,8 @@ struct AXWalker {
                     rawTitle: rawTitle,
                     root: chainRoot))
             }
-            if depth >= maxDepth || (isMenu && !includeMenus) { continue }
-            for (index, child) in ((AXCommand.value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []).enumerated() {
+            if atLimit || (isMenu && !includeMenus) { continue }
+            for (index, child) in access.children(of: element, from: values).enumerated() {
                 queue.append((child, depth + 1, chain, index))
             }
         }
