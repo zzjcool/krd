@@ -270,6 +270,8 @@ to decide "is this the terminal or is this krd?" — each one prints its own nar
 | `probe/kclick.py` | maps clicks back to image pixels by hit-testing a known placement rect |
 | `probe/kdrag.py` | press/drag/release + wheel through `?1002h ?1006h`, no retransmission |
 | `probe/kbench.py`, `probe/kpace.py` | pipe throughput and backpressure at a fixed frame rate |
+| `probe/termcaps.py` | everything a UI may assume about one terminal, and what asking costs: identity, `U=1`, `a=f`, keyboard, sizes, colours, DECRQM, the 2033/2048 reports, glyph widths with and without mode 2027, REP, the DSR round trip, and 20 queries one by one vs in one write. Run it locally and over `ssh -t` and compare (`--json`, `--report`) |
+| `probe/placeholder_overlay.py` | whether text drawn over `U=1` placeholder cells hides the picture there (a menu over the mirror), whether writing the placeholders back brings it back without resending, and whether OSC 22 changes the pointer. The text buffer always shows the overlay, so read pixels: capture the screen and look for the magenta picture inside the three patches |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`, `CGPreflightPostEventAccess()`, display/window enumeration (run on the target Mac to see whether TCC is the problem) |
 | `probe/ax_probe.swift` | what a headless client can read: the AX warm-up trap, window list without Screen Recording, per-window node counts and walk timing, pruned vs raw size (read-only) |
 | `probe/zoom_update_probe.swift` | whether `SCStream.updateConfiguration` can re-crop a *running* stream: 10 pans with latency, settle time, pixel evidence, and a liveness check inside each crop (this is the gate issue #54 was built behind) |
