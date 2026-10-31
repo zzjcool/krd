@@ -69,6 +69,102 @@ final class QuantiseTests: XCTestCase {
         }
     }
 
+    // MARK: the hoisted loop is the same function (issue #92)
+
+    /// The implementation #92 replaced, kept verbatim as the oracle: a `specs` tuple array,
+    /// `enumerated()` inside the pixel loop, bounds-checked `Array` subscripts. Re-deriving the
+    /// replication identity here would only prove that two *expressions* agree; keeping the old body
+    /// proves the shipped function still returns what `main` returned on everything this test can
+    /// throw at it -- byte values, strides, partial-pixel tails, mixed depths. That the agreement is
+    /// not a property of the sample is licensed by the loop body being the same expression; this is
+    /// what would notice if it ever stopped being one.
+    private func referenceQuantise(_ pixels: [UInt8], bits: QualityBudget.Bits,
+                                   bytesPerPixel bpp: Int = 3) -> [UInt8] {
+        guard bpp >= 3 else { return pixels }
+        let channels = [bits.r, bits.g, bits.b]
+        guard channels.allSatisfy({ (4...7).contains($0) }) else { return pixels }
+        let specs: [(shift: UInt8, low: UInt8)] = channels.map { (8 - $0, $0) }
+        var out = pixels
+        var i = 0
+        while i + 2 < out.count {
+            for (c, spec) in specs.enumerated() {
+                let high = out[i + c] >> spec.shift
+                out[i + c] = (high << spec.shift) | (high >> (spec.low - spec.shift))
+            }
+            i += bpp
+        }
+        return out
+    }
+
+    /// Every byte value meets every channel of every rung, old result against new: if the hoisting
+    /// moved a shift or a replicate count by one, one of these 3072 comparisons fails.
+    func testHoistedLoopIsByteIdenticalForEveryByteValue() {
+        let rungs = [QualityBudget.fiveSixFive, QualityBudget.sixSixSix,
+                     QualityBudget.fiveFiveFive, QualityBudget.fourFourFour]
+        for bits in rungs {
+            for v in 0...255 {
+                let byte = UInt8(v)
+                for channel in 0..<3 {
+                    var px: [UInt8] = [0, 0, 0]
+                    px[channel] = byte
+                    XCTAssertEqual(ScreenWriter.quantise(px, bits: bits),
+                                   referenceQuantise(px, bits: bits),
+                                   "\(bits.label) channel \(channel) v=\(v)")
+                }
+            }
+        }
+    }
+
+    /// Random buffers: partial pixels at the tail, buffers shorter than one pixel, both shipping
+    /// strides (3 for the mirror's RGB tiles, 4 for the wall's RGBA panels) and strides that leave
+    /// the generic path in charge, plus per-channel bit depths drawn independently from 4...7.
+    /// Alpha is pinned here as well, not only in the single-seed test above.
+    func testHoistedLoopIsByteIdenticalOnRandomBuffers() {
+        var x: UInt32 = 0xC0FF_EE01
+        func next() -> UInt32 {
+            x ^= x << 13; x ^= x >> 17; x ^= x << 5
+            return x
+        }
+
+        var rungs = [QualityBudget.fiveSixFive, QualityBudget.sixSixSix,
+                     QualityBudget.fiveFiveFive, QualityBudget.fourFourFour]
+        for _ in 0..<24 {
+            rungs.append(QualityBudget.Bits(r: UInt8(4 + next() % 4), g: UInt8(4 + next() % 4),
+                                            b: UInt8(4 + next() % 4)))
+        }
+
+        // 0...64 covers every partial-pixel tail for strides 3 and 4; the random lengths are the
+        // same case on buffers big enough to reach the loop more than once.
+        var lengths = Array(0...64)
+        for _ in 0..<64 { lengths.append(Int(next() % 3000)) }
+
+        // `bpp < 3` returns the buffer untouched, so it belongs in the sweep too: it is the branch
+        // that must never start quantising. 3 and 4 are the shipping strides, 5 and 8 the generic one.
+        for bpp in [-1, 0, 1, 2, 3, 4, 5, 8] {
+            for n in lengths {
+                var px = [UInt8](repeating: 0, count: n)
+                for i in 0..<n { px[i] = UInt8(truncatingIfNeeded: next()) }
+                let control = px
+                for bits in rungs {
+                    let want = referenceQuantise(px, bits: bits, bytesPerPixel: bpp)
+                    let got = ScreenWriter.quantise(px, bits: bits, bytesPerPixel: bpp)
+                    XCTAssertEqual(got, want, "bpp \(bpp) n \(n) \(bits.label)")
+                    XCTAssertEqual(got.count, n, "the pixel count never changes")
+                    // `quantise` is idempotent per rung, so a pointer loop that wrote through to the
+                    // caller's buffer would still agree with the oracle on the next rung: compare
+                    // the input against a copy taken before the call, so in-place mutation is a
+                    // failure instead of an invisible coincidence.
+                    XCTAssertEqual(px, control, "the caller's buffer must not be written in place")
+                    if bpp == 4 {
+                        for i in stride(from: 3, to: n, by: 4) {
+                            XCTAssertEqual(got[i], px[i], "alpha at \(i), n \(n)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func testQuantisedNoiseCompresses() throws {
         let pixels = noise(count: 32 * 32 * 3)
         // Lossless: zlib on noise does not pay, so the tile goes out raw (#53).
