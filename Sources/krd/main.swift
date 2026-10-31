@@ -2060,9 +2060,15 @@ final class Desk {
     /// --scale 0.5` exits 1 with nothing on stdout or stderr), which main.swift already notes next to
     /// the `--quality` refusal. A replay that stops without a word is the failure this module exists
     /// to refuse, so every refusal in `runReplay` leaves through here.
+    ///
+    /// Both destinations, nothing said twice: `Log` has a file only when `--debug`/`--log`/
+    /// `--stats-json`/wall mode gave it one, and its sink *is* stderr otherwise (see the body).
     private func failReplay(_ message: String) -> Never {
         Log.write("krd: \(message)\n")
-        FileHandle.standardError.write(Data("krd: \(message)\n".utf8))
+        // `Log`'s sink is stderr unless `--debug`/`--log`/`--stats-json`/wall mode gave it a file --
+        // and without a file the write above already reached the reader, so writing both would print
+        // the sentence twice (measured with `--replay --mirror`).
+        if Log.path != nil { FileHandle.standardError.write(Data("krd: \(message)\n".utf8)) }
         exit(1)
     }
 
@@ -2113,8 +2119,8 @@ final class Desk {
         var wire: [Double] = [], wall: [Double] = []
         for i in 0..<replay.entries.count {
             guard let pixels = replay.frame(i) else {
-                // Unreachable after the pre-flight unless a file changed underneath us; the session
-                // is live here, so hand the terminal back before saying why.
+                // The pre-flight cannot see this one coming: a `.raw` with mode 000 passes `stat` and
+                // fails the read. The session is live here, so hand the terminal back before saying so.
                 writer.endSession()
                 failReplay(replay.refusal(i, layoutWidth: layout.pixelW, layoutHeight: layout.pixelH,
                                           bpp: layout.bpp)

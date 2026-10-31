@@ -143,6 +143,8 @@ struct FrameReplay {
         // A hand-edited line can declare a size no `Int` holds, and `Entry.byteCount` multiplies it:
         // refused here, where the manifest is read, rather than trapping the pre-flight later.
         func renderable(_ entry: Entry) -> Bool {
+            // 3 or 4 are the only wire formats (`PixelFormat`), and a line declaring fewer bytes per
+            // pixel is not a frame any build renders.
             guard entry.width > 0, entry.height > 0, entry.bpp >= 3 else { return false }
             let (pixels, widthOverflow) = entry.width.multipliedReportingOverflow(by: entry.height)
             let (_, bytesOverflow) = pixels.multipliedReportingOverflow(by: entry.bpp)
@@ -195,15 +197,19 @@ struct FrameReplay {
                 + "but its manifest line declares \(entry.declaredSize)"
         }
         guard entry.width == layoutWidth, entry.height == layoutHeight, entry.bpp == bpp else {
-            // A recording carries no scale of its own (`docs/ENCODING.md`), so a recording whose lines
-            // all agree can still miss this layout: the reader replayed it without the `--scale` it was
-            // made with. Say that, instead of blaming the manifest for being consistent.
             let linesAgree = entries.allSatisfy {
                 $0.width == entries[0].width && $0.height == entries[0].height && $0.bpp == entries[0].bpp
             }
+            // Only a missing `--scale` can make an agreeing recording fit a layout it does not match,
+            // and it has to scale both dimensions by the same factor. With a mismatched *header*
+            // (`--cell 4x7` over a 4x6 recording) no scale reproduces the line, so there the honest
+            // answer is that header and lines disagree.
+            let scaleX = Double(entry.width) / Double(layoutWidth)
+            let scaleY = Double(entry.height) / Double(layoutHeight)
+            let aScaleExplainsIt = linesAgree && abs(scaleX - scaleY) < 0.02 && abs(scaleX - 1) > 0.001
             return "replay frame \(index) (\(entry.name)) is \(entry.width)x\(entry.height) px, \(entry.bpp) bpp "
                 + "but this replay renders \(layoutWidth)x\(layoutHeight) px, \(bpp) bpp (from the manifest header); "
-                + (linesAgree
+                + (aScaleExplainsIt
                    ? "the recording carries no scale, so replay it with the --scale it was made with"
                    : "a recording's header and its frame lines have to describe the same layout")
         }
