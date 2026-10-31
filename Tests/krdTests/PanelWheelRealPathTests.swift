@@ -7,7 +7,7 @@ import XCTest
 /// `PanelWheelTests` pins the pieces — `InputReader.chromeCell`, `Chrome.route`, `Chrome.panelWindow`
 /// — but a previous gate found the feature did not work in a real terminal, and none of those
 /// pieces could have said so: each of them was individually correct while the thing the reader calls
-/// (`Desk.chromeClick`) still routed by `Chrome.hitTest` (which ignores the wheel), still took the
+/// (`Desk.chromeClick`) still routed by the chrome's old rectangle hit test (which ignored the wheel), still took the
 /// viewport path first in pixel mode, and still had to survive a hop to the main queue before
 /// `scrollPanel` ran. So these tests start where the reader starts and end at the bytes the drawer
 /// writes:
@@ -53,6 +53,10 @@ final class PanelWheelRealPathTests: XCTestCase {
         // number that happens to feed it.
         var drawn: [UInt8] = []
         desk.writer.sink = { drawn.append(contentsOf: $0) }
+        // …and the frame the reports below are made over, painted by the product's own drawer: a
+        // notch is answered by the table the last paint built, so the fixture paints before it
+        // knocks (issue #200 — a pane nothing has painted has claimed no box yet).
+        desk.drawChrome()
         return (desk, { drawn })
     }
 
@@ -207,10 +211,11 @@ final class PanelWheelRealPathTests: XCTestCase {
         desk.chromeGeometry = Chrome.layout(paneCols: 40, paneRows: 15, imageCols: 40,
                                             imageRows: pictureRows, bar: false, dev: true,
                                             panel: nil)
-        // The pane really is the picture: nothing to route to but row 1's own cells and the status
-        // line's undrawn ones, so a `false` here means "the picture", not "the chrome never drew".
+        // The pane really is the picture: fourteen rows of it, and the only chrome row is the status
+        // line at the bottom, so a `false` here means "the picture", not "the chrome never drew".
         XCTAssertEqual(desk.chromeGeometry?.panelHeight, 0, "no box to route to")
         XCTAssertEqual(desk.chromeGeometry?.imageRows, 14, "fourteen rows of picture under the status line")
+        desk.drawChrome()
 
         // Pixel mode: a `?1016h` report over the picture's own row. px(160,112) is the *panel* cell
         // in the wheel tests; over the picture the report is px(160,8), i.e. py 8 = row 1.
@@ -221,9 +226,9 @@ final class PanelWheelRealPathTests: XCTestCase {
         XCTAssertNil(InputReader.chromeCell(row: 1, col: 21, pixelMouse: false, wheel: -1,
                                             cellSize: ttyCell, owns: desk.chromeOwns),
                      "cell mode: row 1 is the picture, so the desktop keeps the notch")
-        // …and the status line, with nothing drawn on it, is nobody's either: a notch there must not
-        // be swallowed by the chrome, which is what `route`'s "a `hit` id or nothing" rule buys.
-        XCTAssertFalse(desk.chromeOwns(row: 2, col: 1))
+        // …and the status line below the picture is the chrome's own row, which is the other half of
+        // #200: a notch there is swallowed by the chrome instead of scrolling the desktop.
+        XCTAssertTrue(desk.chromeOwns(row: 15, col: 1))
     }
 
     // MARK: (e) a press the chrome takes keeps its whole gesture
@@ -281,16 +286,61 @@ final class PanelWheelRealPathTests: XCTestCase {
         XCTAssertFalse(reader.chromePressInFlight, "a press that is not the chrome's clears the flag")
     }
 
-    // MARK: (d) a wall click is not a panel click
+    // MARK: (d) who owns a row, once the drawer has painted the frame
 
-    func testAnUndrawnChromeOwnsNothingSoTheStatusLineStillFallsThrough() {
-        let (desk, _) = deskWithLogPanel()
-        // The status line is a chrome row, but a cell with no button drawn on it is nobody's: the
-        // rectangle is the *panel's*, and widening it to "everything below the picture" is the
-        // bug `route` exists to avoid.
-        XCTAssertFalse(desk.chromeOwns(row: 2, col: 1))
-        // And a notch that is not over the box is not the panel's either, so the desktop keeps it.
-        XCTAssertTrue(desk.chromeOwns(row: 15, col: 21), "the box reaches the pane's last row")
+    func testTheChromeOwnsItsOwnRowsAndTheBoxIsThePanels() {
+        let (desk, _) = deskWithLogPanel()      // paints the frame the reports are made over
+        // The box's rows are the panel's: a notch there scrolls it (the wheel tests above drive that
+        // through the product).
+        XCTAssertTrue(desk.chromeOwns(row: 8, col: 21), "the box is the panel's")
+        XCTAssertTrue(desk.chromeOwns(row: 3, col: 1), "the box's own border is the panel's too")
+        // The status line is a chrome row: no control on this cell, so it is the chrome's background —
+        // swallowed, where before #200 the same cell was `.picture` and the click path dropped it as a
+        // dead cell (that is the fix, and the reason this test used to say the opposite).
+        XCTAssertTrue(desk.chromeOwns(row: 2, col: 1))
+        // The pane's last row is the drawer's to skip (it never writes the final cell): it is
+        // background, not the panel, so a notch there does not scroll a box that was never drawn.
+        XCTAssertTrue(desk.chromeOwns(row: 15, col: 21), "the chrome's row, not the picture")
+        // And the picture keeps its scroll.
         XCTAssertFalse(desk.chromeOwns(row: 1, col: 21), "row 1 is the picture")
+    }
+
+    // MARK: (e) a press keeps the control it started on
+
+    /// The press must not follow the drag: `down` is true for every motion report of a gesture, so
+    /// without a frozen target dragging off `[ ≡ ]` onto `[ - ]` would light the button the finger
+    /// is not on — and the button it started on would stop looking pressed (#200).
+    func testADragKeepsTheControlThePressStartedOn() {
+        var options = Options()
+        options.wall = false
+        options.dev = true          // the status line, and therefore the bar's `[ - ]`
+        options.bar = true
+        options.mock = true
+        let desk = Desk(options: options)
+        let pictureRows = Chrome.pictureRows(paneRows: 15, bar: true, panel: nil, chrome: true)
+        desk.chromeGeometry = Chrome.layout(paneCols: 40, paneRows: 15, imageCols: 40,
+                                            imageRows: pictureRows, bar: true, dev: true,
+                                            panel: nil)
+        desk.writer.sink = { _ in }
+        desk.drawChrome()
+        // Where the drawer put the two boxes, so the gesture names no column by hand.
+        let menu = desk.chrome.widgets.first { $0.id == "menu" }
+        let shrink = desk.chrome.widgets.first { $0.id == "shrink" }
+        XCTAssertNotNil(menu)
+        XCTAssertNotNil(shrink)
+        guard let menu, let shrink else { return }
+        let from = menu.rect.col + 1, to = shrink.rect.col + 1
+
+        desk.chromeHover(row: 1, col: from, down: false)
+        XCTAssertEqual(desk.chromeState.pointer, Pointer(over: "menu", down: false))
+        desk.chromeHover(row: 1, col: from, down: true)
+        XCTAssertEqual(desk.chromeState.pointer, Pointer(over: "menu", down: true),
+                       "the press lit the box under it")
+        desk.chromeHover(row: 1, col: to, down: true)
+        XCTAssertEqual(desk.chromeState.pointer, Pointer(over: "menu", down: true),
+                       "the drag reached another control and the press stayed where it started")
+        desk.chromeHover(row: 1, col: to, down: false)
+        XCTAssertEqual(desk.chromeState.pointer, Pointer(over: "shrink", down: false),
+                       "the release hands the pointer back to the cell it is on")
     }
 }

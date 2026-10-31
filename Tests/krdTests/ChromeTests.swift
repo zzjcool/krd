@@ -284,23 +284,25 @@ final class ChromeTests: XCTestCase {
         XCTAssertTrue(bar(24).contains("ms"))
     }
 
-    /// Clicking the bar is the primary way in, so hit ids must line up with what is drawn.
-    func testHitTestFindsTheStatusSegments() {
+    /// Clicking the bar is the primary way in, so a segment's widget must line up with what is drawn.
+    func testTheStatusLineSegmentsAreWidgets() {
         let chrome = Chrome()
         let geo = Chrome.layout(paneCols: 120, paneRows: 40, imageCols: 120, imageRows: 39, panel: nil)
         _ = chrome.draw(geometry: geo, metrics: metrics(cols: 120), state: ChromeState())
         var found: Set<String> = []
         for col in 1...120 {
-            if case .statusSegment(let id) = chrome.hitTest(row: geo.statusRow + 1, col: col, geometry: geo) {
+            if case .widget(let id) = chrome.route(row: geo.statusRow + 1, col: col, geometry: geo) {
                 found.insert(id)
             }
         }
-        XCTAssertTrue(found.contains("stats"))
+        // The two segments that open the stats panel carry their own ids, so a hover lights the one
+        // number the pointer is on and not both (#200).
+        XCTAssertTrue(found.contains("bandwidth"))
+        XCTAssertTrue(found.contains("latency"))
         XCTAssertTrue(found.contains("help"))
         XCTAssertTrue(found.contains("target"))
-        if case .outside = chrome.hitTest(row: 1, col: 1, geometry: geo) {} else {
-            XCTFail("a cell inside the picture must not be reported as chrome")
-        }
+        XCTAssertEqual(chrome.route(row: 1, col: 1, geometry: geo), .picture,
+                       "a cell inside the picture must not be reported as chrome")
     }
 
     // MARK: the stats panel's rows (#117)
@@ -1094,15 +1096,23 @@ final class ChromeBarTests: XCTestCase {
         XCTAssertTrue(text.contains("18 fps"))
     }
 
-    func testTheButtonIsOneClickTargetAcrossTheWholeRow() {
+    /// The two boxes are the click target, and the title between them is not.
+    func testTheTwoBoxesAreTheTargetAndTheTitleIsNot() {
         let geo = geometry()
         let (_, chrome) = drawn(geo)
         // The right end of the row is the button; the traffic lights on the left do the same thing.
-        XCTAssertEqual(chrome.hitTest(row: 1, col: geo.cols - 2, geometry: geo),
-                       .statusSegment("shrink"))
-        XCTAssertEqual(chrome.hitTest(row: 1, col: 2, geometry: geo), .statusSegment("shrink"))
+        XCTAssertEqual(chrome.route(row: 1, col: geo.cols - 2, geometry: geo), .widget("shrink"))
+        XCTAssertEqual(chrome.route(row: 1, col: 2, geometry: geo), .widget("shrink"))
+        // The window's name is drawn between them and is a readout: hovering it lights nothing, and a
+        // click on it is nobody's (the row itself is still the chrome's, never the picture's).
+        let title = chrome.widgets.first { $0.id == "title" }
+        XCTAssertNotNil(title, "the bar draws the window's name")
+        if let title {
+            XCTAssertEqual(title.role, .furniture)
+            XCTAssertEqual(chrome.route(row: 1, col: title.rect.col + 1, geometry: geo), .background)
+        }
         // A row that is neither the bar nor the status line belongs to the picture.
-        XCTAssertEqual(chrome.hitTest(row: 5, col: 2, geometry: geo), .outside)
+        XCTAssertEqual(chrome.route(row: 5, col: 2, geometry: geo), .picture)
     }
 
     func testTheDevStatusLineIsNotDrawnWhenOnlyTheBarIsOn() {
@@ -1119,7 +1129,7 @@ final class ChromeBarTests: XCTestCase {
         let (text, chrome) = drawn(geo)
         XCTAssertTrue(text.contains("[ - ]"))
         XCTAssertFalse(text.contains("12:34:56"))
-        XCTAssertEqual(chrome.hitTest(row: 1, col: 22, geometry: geo), .statusSegment("shrink"))
+        XCTAssertEqual(chrome.route(row: 1, col: 22, geometry: geo), .widget("shrink"))
     }
 }
 
@@ -1200,10 +1210,10 @@ final class ChromeMenuTests: XCTestCase {
         var panelCells = 0
         for row in (geo.panelTop + 1)...(geo.panelTop + geo.panelHeight) {
             for col in 1...geo.cols {
-                switch chrome.hitTest(row: row, col: col, geometry: geo) {
-                case .statusSegment(let id): ids.insert(id)
-                case .insidePanel: panelCells += 1
-                case .outside: XCTFail("row \(row) col \(col) is inside the box")
+                switch chrome.route(row: row, col: col, geometry: geo) {
+                case .widget(let id): ids.insert(id)
+                case .panel: panelCells += 1
+                case .background, .picture: XCTFail("row \(row) col \(col) is inside the box")
                 }
             }
         }
@@ -1225,7 +1235,7 @@ final class ChromeMenuTests: XCTestCase {
         _ = chrome.draw(geometry: geo, metrics: menuMetrics(), state: ChromeState())
         var found: Set<String> = []
         for col in 1...geo.cols {
-            if case .statusSegment(let id) = chrome.hitTest(row: 1, col: col, geometry: geo) {
+            if case .widget(let id) = chrome.route(row: 1, col: col, geometry: geo) {
                 found.insert(id)
             }
         }
@@ -1248,18 +1258,6 @@ final class ChromeMenuTests: XCTestCase {
         XCTAssertEqual(QualityBudget(80, eager: true).eager, true)
         XCTAssertEqual(QualityBudget(80, eager: true).label, "5-6-5", "eager is not a bit depth")
         XCTAssertEqual(QualityBudget(70).eager, true, "the rung's own default is unchanged")
-    }
-
-    /// The ids round-trip, and anything that is not one of ours is not a rung.
-    func testARungIdParsesBackToTheAxisAndStep() {
-        XCTAssertEqual(ChromeAxis.parse("rung:fps:11")?.axis, .fps)
-        XCTAssertEqual(ChromeAxis.parse("rung:fps:11")?.step, 11)
-        XCTAssertEqual(ChromeAxis.parse("rung:colour:4")?.axis, .colour)
-        XCTAssertNil(ChromeAxis.parse("rung:fps:20"), "past the last step")
-        XCTAssertNil(ChromeAxis.parse("rung:fps:-1"))
-        XCTAssertNil(ChromeAxis.parse("rung:scale:1"), "no such axis")
-        XCTAssertNil(ChromeAxis.parse("shrink"), "a bar button is not a rung")
-        XCTAssertNil(ChromeAxis.parse("rung:colour"))
     }
 
     /// A squeezed pane keeps the tracks it can draw and drops ticks, never draws text past the box.
@@ -1312,21 +1310,26 @@ final class ChromeMenuTests: XCTestCase {
     }
 
     /// The menu is invisible on exactly the page it was built for: a handed-over mirror has the bar
-    /// and **no `--dev`**, and `draw` used to gate the panel on `devStatus` while `panelRect` did
-    /// not -- so `[ ≡ ]` opened a panel nothing painted, and a strip of the picture answered
-    /// `.panel` to clicks and the wheel. One predicate decides both now, and this is the test that
-    /// keeps them from drifting apart again.
-    func testThePanelIsDrawnWhereverItsRectangleIs() {
+    /// and **no `--dev`**, and `draw` used to gate the panel on `devStatus` while a rectangle computed
+    /// from the geometry did not -- so `[ ≡ ]` opened a panel nothing painted, and a strip of the
+    /// picture answered `.panel` to clicks and the wheel. One table decides both now: the box a click
+    /// reads is the box the drawer wrote, and this is the test that keeps them from drifting apart.
+    func testThePanelIsDrawnWhereverItsTableClaimsIt() {
         // (bar, dev) -- the first row is the mirror the issue is about.
         for (bar, dev) in [(true, false), (true, true), (false, true)] {
             let geo = Chrome.layout(paneCols: 100, paneRows: 30, imageCols: 100, imageRows: 22,
                                     bar: bar, dev: dev, panel: .menu)
-            let bytes = Chrome().draw(geometry: geo, metrics: menuMetrics(),
-                                      state: ChromeState(panel: .menu))
+            let chrome = Chrome()
+            let bytes = chrome.draw(geometry: geo, metrics: menuMetrics(),
+                                    state: ChromeState(panel: .menu))
             let drawn = runs(bytes)
             let label = "bar=\(bar) dev=\(dev)"
             XCTAssertEqual(geo.panelsDrawable, bar || dev, label)
             XCTAssertGreaterThan(geo.panelHeight, 0, "\(label): the box has rows")
+            // The box is in the table the click path asks...
+            guard let box = chrome.widgets.first(where: { $0.role == .panel }) else {
+                return XCTFail("\(label): the menu was drawn without a box in the table")
+            }
             // The tracks are painted...
             // Panel rows only: the drawer emits whole rows, so the axis label is inside the run,
             // and `fps` alone would also match the bar and the status line above the box.
@@ -1336,16 +1339,19 @@ final class ChromeMenuTests: XCTestCase {
                         || $0.text.contains("fps") || $0.text.contains("a click sets it"))
             }
             XCTAssertFalse(ink.isEmpty, "\(label): the menu was not drawn at all")
-            // ...inside the rectangle a click believes in: every row of ink is a panel row.
+            // ...inside the rows a click believes are a panel's: every row of ink answers `.panel`
+            // where it is not a tick, so the wheel reaches the box at the rows it was painted in.
             for (row, text) in ink {
-                XCTAssertTrue(Chrome.panelRect(geo, row: row, col: 2),
-                              "\(label): row \(row) is drawn but not claimed by panelRect: \(text)")
+                XCTAssertEqual(chrome.route(row: row, col: 2, geometry: geo), .panel,
+                               "\(label): row \(row) is drawn but the table does not answer it as "
+                               + "the panel's: \(text)")
             }
-            // ...and the other direction: every row the rectangle claims has a border on it, so a
-            // click can never be swallowed by a strip of the picture.
+            // ...and the other direction: every row the table's box covers has something drawn on
+            // it, so a click can never be swallowed by a strip of the picture.
             let inkedRows = Set(drawn.map(\.row))
-            for row in 1...geo.rows where Chrome.panelRect(geo, row: row, col: geo.cols) {
-                XCTAssertTrue(inkedRows.contains(row), "\(label): panelRect claims row \(row) with nothing drawn")
+            for row in box.rect.row..<(box.rect.row + box.rect.height) {
+                XCTAssertTrue(inkedRows.contains(row + 1),
+                              "\(label): the table claims row \(row + 1) with nothing drawn")
             }
             // And the ticks on those rows are the controls the click path expects.
             let tickRow = ink.first { $0.text.contains("colour") }?.row ?? 0
@@ -1353,20 +1359,27 @@ final class ChromeMenuTests: XCTestCase {
         }
     }
 
-    /// No bar and no `--dev`: no panel can be drawn, so nothing may claim a panel rectangle either
-    /// -- the other end of the same agreement.
-    func testNoPanelRectangleWithoutAFurnitureRowToDrawItIn() {
+    /// No bar and no `--dev`: no panel can be drawn, so nothing may claim a panel either -- the other
+    /// end of the same agreement.
+    func testNoPanelClaimWithoutAFurnitureRowToDrawItIn() {
         let geo = Chrome.layout(paneCols: 100, paneRows: 30, imageCols: 100, imageRows: 22,
                                 bar: false, dev: false, panel: .menu)
         XCTAssertFalse(geo.panelsDrawable)
         XCTAssertEqual(geo.panelHeight, 0, "no panel is drawn, so none may reserve rows")
-        let text = String(decoding: Chrome().draw(geometry: geo, metrics: menuMetrics(),
-                                                  state: ChromeState(panel: .menu)),
+        let chrome = Chrome()
+        let text = String(decoding: chrome.draw(geometry: geo, metrics: menuMetrics(),
+                                                state: ChromeState(panel: .menu)),
                           as: UTF8.self)
         XCTAssertFalse(text.contains("colour"), "nothing draws the menu without furniture")
+        XCTAssertFalse(chrome.widgets.contains { $0.role == .panel },
+                       "nothing draws the menu, so no box may be in the table")
+        var claimed: [(row: Int, col: Int)] = []
         for row in 1...geo.rows {
-            XCTAssertFalse(Chrome.panelRect(geo, row: row, col: 2), "row \(row) claimed a panel")
+            for col in 1...geo.cols where chrome.route(row: row, col: col, geometry: geo) == .panel {
+                claimed.append((row, col))
+            }
         }
+        XCTAssertEqual(claimed.count, 0, "cells claimed by a panel nothing paints: \(claimed.prefix(4))")
     }
 
     /// A pinned axis says so **at its value**, which is where the reader looked when the number
@@ -1387,16 +1400,28 @@ final class ChromeMenuTests: XCTestCase {
     }
 
     /// The wheel must reach the box's last row even when the pointer is over a tick -- the menu's
-    /// tracks are the first panel cells with ids, and `guard wheel == 0` in the `.status` arm ate
+    /// tracks are panel rows with a control on them, and `guard wheel == 0` in the click path ate
     /// exactly those notches (issue #87, and #118's "the wheel reaches the rest").
     func testAWheelNotchOverATickStillScrollsThePanel() {
-        XCTAssertTrue(Chrome.scrollsPanel(.panel, wheel: 1))
-        XCTAssertTrue(Chrome.scrollsPanel(.status("rung:fps:6"), wheel: -1))
-        XCTAssertTrue(Chrome.scrollsPanel(.status("rung:colour:2"), wheel: 1))
-        XCTAssertFalse(Chrome.scrollsPanel(.status("shrink"), wheel: 1), "the way out is not a scroller")
-        XCTAssertFalse(Chrome.scrollsPanel(.status("menu"), wheel: 1))
-        XCTAssertFalse(Chrome.scrollsPanel(.status("rung:fps:6"), wheel: 0), "a click is not a notch")
-        XCTAssertFalse(Chrome.scrollsPanel(.picture, wheel: 1))
+        func control(_ id: String, _ action: ChromeAction) -> ChromeWidget {
+            ChromeWidget(id: id, rect: ChromeRect(row: 0, col: 0, width: 1), role: .control(action))
+        }
+        let box = ChromeWidget(id: "menu", rect: ChromeRect(row: 0, col: 0, width: 10, height: 6),
+                               role: .panel)
+        XCTAssertTrue(Chrome.scrollsPanel(box, wheel: 1))
+        XCTAssertTrue(Chrome.scrollsPanel(control("rung:fps:6", .rung(.fps, 6)), wheel: -1))
+        XCTAssertTrue(Chrome.scrollsPanel(control("rung:colour:2", .rung(.colour, 2)), wheel: 1))
+        XCTAssertFalse(Chrome.scrollsPanel(control("shrink", .shrink), wheel: 1),
+                       "the way out is not a scroller")
+        XCTAssertFalse(Chrome.scrollsPanel(control("menu", .togglePanel(.menu)), wheel: 1))
+        XCTAssertFalse(Chrome.scrollsPanel(control("rung:fps:6", .rung(.fps, 6)), wheel: 0),
+                       "a click is not a notch")
+        // A disabled control is inert for the wheel too, and a cell no widget claims is the
+        // picture's: neither of them scrolls anything.
+        let readout = ChromeWidget(id: "scale", rect: ChromeRect(row: 0, col: 0, width: 1),
+                                   role: .control(.openPanel(.stats)), disabled: true)
+        XCTAssertFalse(Chrome.scrollsPanel(readout, wheel: 1), "a disabled control does not scroll")
+        XCTAssertFalse(Chrome.scrollsPanel(nil, wheel: 1), "the picture keeps its scroll")
     }
 
     /// The row a bar-only mirror gives up for a panel it is not showing: nothing. The panel

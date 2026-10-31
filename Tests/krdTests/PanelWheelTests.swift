@@ -10,11 +10,21 @@ import XCTest
 /// These tests drive the three functions the product drives — `InputReader.chromeCell` (is this
 /// report offered to the chrome at all, and as what cell), `Chrome.route` (who owns that cell) and
 /// `Chrome.panelScroll` (where the window lands) — with the *numbers* krd gets at 40x15, and they
-/// pin the badge the drawer writes out of the same arithmetic. They deliberately do not compare
-/// cells inside `Chrome` (the routing must not depend on the cell grid: the wheel runs on the reader
-/// thread while the main queue repaints), so a `Chrome()` that has never drawn anything is the
-/// fixture.
+/// pin the badge the drawer writes out of the same arithmetic. `route` answers from the table the
+/// drawer built, so the fixtures that ask it paint the frame first (`painted`): the frame a report is
+/// made over is the frame that answers it, and a pane nothing has painted yet has claimed no control
+/// (issue #200).
 final class PanelWheelTests: XCTestCase {
+    /// The frame a report is made over, as the drawer paints it: a `Chrome` answers `route` out of the
+    /// widgets its last `draw` registered, so a fixture that never drew has an empty table to ask —
+    /// which is the honest state of a pane nothing has painted, not a stand-in for this one.
+    private func painted(_ geometry: ChromeGeometry, _ m: ChromeMetrics,
+                         panel: ChromePanel = .log) -> Chrome {
+        let chrome = Chrome()
+        _ = chrome.draw(geometry: geometry, metrics: m, state: ChromeState(panel: panel))
+        return chrome
+    }
+
     /// A log with more lines than the box at 40x15 can hold — the shape in the report (`2-11/11`).
     private func elevenLineLog() -> ChromeMetrics {
         var m = ChromeMetrics()
@@ -62,7 +72,7 @@ final class PanelWheelTests: XCTestCase {
     func testAPixelReportOverThePanelIsThePanelsAndTheWindowMoves() {
         let geometry = logBoxAt40x15()
         let m = elevenLineLog()
-        let chrome = Chrome()          // never drawn: the routing may not need the cell grid
+        let chrome = painted(geometry, m)      // the frame the report is made over
 
         // Where `?1016h` puts a wheel over the box: px(160, 112), the middle of the open panel in
         // the 40x15 pty, mapped to cells by the terminal's own cell size — the same division
@@ -108,7 +118,7 @@ final class PanelWheelTests: XCTestCase {
     /// copy of the arithmetic living only in the tests.
     func testThePreGuardOffersThePanelCellAndNotThePicture() {
         let geometry = logBoxAt40x15()
-        let chrome = Chrome()
+        let chrome = painted(geometry, elevenLineLog())
         func owns(_ row: Int, _ col: Int) -> Bool {
             chrome.route(row: row, col: col, geometry: geometry) != .picture
         }
@@ -140,7 +150,7 @@ final class PanelWheelTests: XCTestCase {
     func testACellReportOverThePanelDoesTheSame() {
         let geometry = logBoxAt40x15()
         let m = elevenLineLog()
-        let chrome = Chrome()
+        let chrome = painted(geometry, m)
         // A terminal that ignored `?1016h` sends the cell itself: row 6, col 21.
         XCTAssertEqual(chrome.route(row: 6, col: 21, geometry: geometry), .panel)
         XCTAssertEqual(chrome.route(row: 8, col: 21, geometry: geometry), .panel)
@@ -154,19 +164,21 @@ final class PanelWheelTests: XCTestCase {
 
     func testACellOverThePictureIsStillTheRemoteDesktop() {
         let geometry = logBoxAt40x15()
-        let chrome = Chrome()
+        let chrome = painted(geometry, elevenLineLog())
         // Row 1 is the one row of picture: not the chrome's, so the report keeps the viewport path
         // and the wheel still scrolls the mirrored desktop.
         XCTAssertEqual(chrome.route(row: 1, col: 21, geometry: geometry), .picture)
-        // The status line is a chrome row, but only a cell that carries a `hit` id is a control:
-        // an undrawn chrome has no ids, so this is "nobody's" and must not swallow the report.
-        XCTAssertEqual(chrome.route(row: 2, col: 21, geometry: geometry), .picture)
-        // The panel's reserved rect reaches the pane's last row (`panelHeight` is what the layout
-        // gave up for it), even though the drawer stops one row short of it: a wheel there still
-        // belongs to the panel, and the clamp is what keeps it from scrolling into a blank window.
-        XCTAssertEqual(chrome.route(row: 15, col: 21, geometry: geometry), .panel)
-        // And the rectangle is not "everything below the picture": left and right of nothing, but a
-        // column outside the pane is not a panel cell either.
+        // The status line next to it is a chrome row with no control on it, so the route says
+        // `.background` — nothing to click, and since #200 the cell is nobody's rather than dead (it
+        // used to be `.picture`, which no arm of the click path acted on).
+        XCTAssertEqual(chrome.route(row: 2, col: 21, geometry: geometry), .background)
+        // The box the drawer painted stops one row short of the pane's last row (writing that cell
+        // arms the terminal's pending-wrap), so the last row is the chrome's background and not the
+        // panel: a wheel there is swallowed rather than scrolling a box that was never drawn. The
+        // rows the box does cover are the panel's — that is the wheel tests' assertion, above.
+        XCTAssertEqual(chrome.route(row: 14, col: 21, geometry: geometry), .panel)
+        XCTAssertEqual(chrome.route(row: 15, col: 21, geometry: geometry), .background)
+        // And the route is not "everything below the picture": a column outside the pane is nobody's.
         XCTAssertEqual(chrome.route(row: 6, col: 41, geometry: geometry), .picture)
     }
 
@@ -185,6 +197,7 @@ final class PanelWheelTests: XCTestCase {
         XCTAssertNil(Chrome.panelScroll(.log, m, inside: geometry.panelInsideRows, requested: nil, by: -1))
         XCTAssertNil(Chrome.panelScroll(.log, m, inside: geometry.panelInsideRows, requested: nil, by: 1))
         // And the route still says panel: the box is the box, whether or not it can scroll.
-        XCTAssertEqual(Chrome().route(row: geometry.panelTop + 1, col: 40, geometry: geometry), .panel)
+        XCTAssertEqual(painted(geometry, m).route(row: geometry.panelTop + 1, col: 40, geometry: geometry),
+                       .panel)
     }
 }
