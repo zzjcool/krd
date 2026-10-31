@@ -1879,7 +1879,11 @@ final class Desk {
     /// Paint from the cached model. The click path uses this and never `refreshWall(force: true)`:
     /// a click has to be drawn against the list it was made on, and re-enumerating every window
     /// dictionary inside a click handler is not a thing to do.
-    private func drawWall() {
+    /// The slot states of the last frame that carried pictures, so a pointer-only repaint can draw
+    /// the same wall without recomputing (or re-sending) anything about the pictures.
+    private var wallLastPaints = WallSlotPaints()
+
+    private func drawWall(pointerOnly: Bool = false) {
         guard let state = wallState, let pane = wallPane else {
             // Silence here was the worst kind: the wall would sit on an alternate screen with nothing
             // in it and no line anywhere saying why. Every other early return in the paint path says
@@ -1903,7 +1907,8 @@ final class Desk {
         guard !panels.isEmpty else {
             // Nothing to photograph (a mock, a display whose id nobody filled in): the phase-1
             // wall, placeholders and all.
-            paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:])
+            paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:],
+                      resendPictures: !pointerOnly)
             return
         }
         // The first paint does not wait for pixels. ScreenCaptureKit's first call in a session can
@@ -1913,11 +1918,22 @@ final class Desk {
         // The placeholders are the phase-1 wall, they cost a few KB of text, and the picture frame
         // overwrites them a moment later. Later paints skip this: a repaint is cheap only because it
         // is one frame, and by then the previous picture is already on screen.
+        // A pointer-only paint never re-sends a picture: the frame is the same frame, one item of it
+        // is drawn differently. `wallPaintedOnce` is not touched by it, because the flag tracks "a
+        // frame with its pictures went out" and this one deliberately carries none.
         if !wallPaintedOnce {
             // The flag tracks a frame that actually went out, not an attempt: set before the paint it
             // would make one failed write permanent (`paintWall` reports whether it wrote).
             wallPaintedOnce = paintWall(layout: layout, model: model, panels: [],
                                         pictures: [], failures: [:])
+        }
+        // A pointer-only repaint is text and nothing else: the pictures on screen are the ones this
+        // frame was drawn with (`wallLastPaints`), no capture is started, and nothing about the model
+        // moved. It is the one paint in the wall that must not cost a frame's worth of pixels.
+        if pointerOnly {
+            _ = paintWall(layout: layout, model: model, panels: panels, pictures: [],
+                          failures: [:], resendPictures: false, reusing: wallLastPaints)
+            return
         }
         // One repaint at a time: a second capture while the first is in flight would put pictures
         // from two different models on one screen.
@@ -2024,14 +2040,25 @@ final class Desk {
 
     /// Paint the text, then the pictures on the cells the text was told to leave alone.
     @discardableResult
+    /// `resendPictures` is what keeps a pointer affordable. The pictures are kitty images, and the
+    /// wall re-sends them on every paint that reaches this function — 18 KB for four cards at
+    /// `--wall-quality 70`. A repaint caused by the *pointer* moves no picture at all: the model, the
+    /// geometry and every payload are what they were, and the placeholder cells that name them are in
+    /// the text layer, whose diff the canvas already sends. Without this, crossing four cards sends
+    /// 72 KB, and a hover that costs 30x the plan's budget is a hover nobody can afford to draw.
     private func paintWall(layout: WallLayout, model: WallModel, panels: [WallPanel],
-                           pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError]) -> Bool {
+                           pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError],
+                           resendPictures: Bool = true,
+                           reusing: WallSlotPaints? = nil) -> Bool {
         guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else {
             Log.write("krd: wall frame not written (canvas, pane or state missing)\n")
             return false
         }
-        var paints = WallSlotPaints()
-        for panel in panels {
+        // A pointer-only paint reuses the slot states of the frame already on screen: recomputing
+        // them from `panels`+`failures` would clear pictures this paint is not re-sending, and a
+        // slot that failed would lose its mask box.
+        var paints = reusing ?? WallSlotPaints()
+        for panel in panels where reusing == nil {
             if let failure = failures[panel.slot] {
                 paints.mark(slot: panel.slot, .mask)
                 paints.maskReasons[panel.slot] = failure.maskLabel
@@ -2071,13 +2098,16 @@ final class Desk {
         }
         let text = canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
                                layout: layout, focus: state.focus,
-                               cellW: pane.cellW, cellH: pane.cellH, paints: paints)
+                               cellW: pane.cellW, cellH: pane.cellH, paints: paints,
+                               pointer: state.pointer)
         // The canvas answers with no bytes when the frame it was asked for is the frame already on
         // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
         // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
+        if reusing == nil { wallLastPaints = paints }
         let wrote = !text.isEmpty
         writer.writeChrome(text)
-        guard !pictures.isEmpty else { return wrote }
+        // Nothing about the pictures changed, so nothing about them goes out (see `resendPictures`).
+        guard resendPictures, !pictures.isEmpty else { return wrote }
         // The same frame contract the tile path uses: `emitPanel` only appends, `endFrame`
         // flushes. Without the pair the pictures would sit in the writer's buffer forever - which
         // is exactly what the first live run looked like: blank panels and no bytes on the wire.
@@ -4257,6 +4287,15 @@ final class Desk {
         reader.onChromeClick = { [weak self] row, col, wheel in
             self?.chromeClick(row: row, col: col, wheel: wheel)
         }
+        // The pointer, for the wall's hover: same thread and same hop as a click, because it ends in
+        // a repaint. `nil` outside wall mode -- a mirrored desktop has a real pointer of its own, and
+        // lighting up a status-line button would be krd inventing feedback the target never sent.
+        reader.onChromeHover = { [weak self] row, col, down in
+            guard let self, self.wallMode else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.wallHover(row: row, col: col, down: down)
+            }
+        }
         // The reader asks this before the viewport guards: a chrome region is not "the cells the
         // picture does not cover" (#118). Wall mode has no chrome at all (`chromeAvailable` is
         // false there), so every wall click keeps taking the outside-the-picture path, which is
@@ -4367,6 +4406,47 @@ final class Desk {
         chromeState.panel = panel
         chromeState.panelOffset = nil
         applyPanel()
+    }
+
+    /// The pointer moved on the wall (or a button changed state): light up what a click here would
+    /// enter, and nothing else.
+    ///
+    /// Asked on the main queue, from the reader's hop. The hit test is `WallState.focus(atRow:col:)`
+    /// -- the click table itself -- so the highlight can never sit on something a click would not act
+    /// on. A repaint happens only when the answer *changes*: the pointer crosses a card border a few
+    /// times a second, and repainting the wall per motion report would turn a mouse into a frame
+    /// generator (measured: one card's highlight is 496 B, the whole wall is 9351 B).
+    ///
+    /// Nothing here touches the model, the offsets or the focus: a hover is a question about the
+    /// pointer, and the only thing it may change is how one item is drawn.
+    func wallHover(row: Int, col: Int, down: Bool) {
+        guard var state = wallState, let pane = wallPane, !mirroring else { return }
+        let layout = state.layout(cols: pane.cols, rows: pane.rows,
+                                  displays: wallModel.displays.count,
+                                  windows: wallModel.windows.count,
+                                  stageAspect: stageAspect(wallModel, state),
+                                  cellAspect: pane.cellAspect)
+        let over = state.focus(atRow: row, col: col, in: layout)
+        // A press outside an item is not a press *on* one: `down && over != nil` keeps a drag that
+        // started on the header from lighting the card it wanders over.
+        let next = WallPointer(over: over, down: down && over != nil)
+        guard next != state.pointer else { return }
+        state.pointer = next
+        wallState = state
+        if options.debug {
+            // The one thing a reader cannot see in a screenshot of a *hover*: whether the pointer
+            // report arrived at all, and what the click table made of the cell.
+            func name(_ f: WallState.Focus?) -> String {
+                switch f {
+                case let .display(i): return "display \(i)"
+                case let .window(i): return "window \(i)"
+                case nil: return "nothing"
+                }
+            }
+            Log.write("krd: wall pointer (\(row),\(col)) over \(name(next.over))"
+                      + (next.down ? " down" : "") + "\n")
+        }
+        drawWall(pointerOnly: true)
     }
 
     /// The wall consumes every click on the pane: the whole pane is text, so "outside the picture"

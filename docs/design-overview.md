@@ -99,6 +99,22 @@ English | [简体中文](design-overview.zh-CN.md)
 
 An end with nothing further is dimmed and inert - no dead cells that swallow clicks.
 
+**The pointer is answered before it is pressed.** A mouse *move* used to be thrown away (`InputReader`
+only routed a press), so the wall could not tell a reader what they were aiming at: a card, the
+stage, or a gap. Now every report — move, press, release — asks the same click table
+(`WallLayout.action` → `WallState.focus(atRow:col:)`), and the item under the pointer is drawn in
+reverse video on its caption row, with its box in the accent colour where a box exists (a card whose
+picture arrived has no box left to colour, and a masked slot has only the box, so the caption is the
+one signal both of them can show). A press deepens it: the box stays accent and the app name
+reverses, which is the only feedback there is before the mirror takes the pane.
+
+Two numbers decided the shape. A hover repaint is **39-97 B** measured on a 120x34 wall
+(`WallHoverTests` pins the 600 B budget from `docs/design-ui-v2.zh-CN.md` §5), and it must not
+re-send pictures: the first implementation did, and crossing four cards cost 18 KB per move because
+`paintWall` re-emitted every kitty image. A pointer-only paint therefore reuses the slot states of
+the frame already on screen (`wallLastPaints`) and sends text alone. Moving within the same item
+costs 0 B — no report, no paint.
+
 ## 6. The bar on the right
 
 There is exactly one shape of scroll control that works in a terminal: **big, on the edge, always in the same
