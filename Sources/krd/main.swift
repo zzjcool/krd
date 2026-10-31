@@ -2911,7 +2911,7 @@ final class Desk {
         // piled up in its userspace buffer. The round trip sees the same congestion earlier, because
         // its own answer queues behind those bytes (issue #52) -- but only once it has seen it
         // *twice*: a single 258 ms DSR answer is a real round trip on ssh (OpenSSH 10's
-        // `ObscureKeystrokeTiming` re-bases an 18-22 ms grid, docs/design-ui-v2.zh-CN.md §2.2, §7.1),
+        // `ObscureKeystrokeTiming` re-bases an 18-22 ms grid -- the UI-v2 design note in #184, §2.2, §7.1),
         // it is not congestion, and it used to hold the newest-sample slot for 2 s -- 31 of 61 frames
         // at 20 fps, a majority of the 3 s window, one rung down. So the rule lives on the probe
         // (`isLate`), it is decided on the diagnostics tick, and this thread only reads the published

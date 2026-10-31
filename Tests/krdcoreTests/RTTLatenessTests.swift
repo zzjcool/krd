@@ -13,7 +13,7 @@ import XCTest
 ///
 /// These tests are the specification of the rule: one outlier answer is not congestion, two
 /// consecutive over-budget answers are, and a probe that is stale or switched off is never late —
-/// `rtt —` in the panel is not a measurement of 400 ms.
+/// the `rtt —` case is not a measurement of 400 ms.
 final class RTTLatenessTests: XCTestCase {
     /// One slow answer among good ones must not make a single frame late, and must not take a rung.
     func testOneOutlierAnswerAmongGoodOnesNeverMakesFramesLate() throws {
@@ -83,6 +83,27 @@ final class RTTLatenessTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(reset.reply(at: sentAt + ms / 1000)), ms, accuracy: 0.001)
         }
         XCTAssertFalse(reset.isLate(budgetMs: 250), "a good answer in between resets the pair")
+    }
+
+    /// *Both* answers have to be over budget, not their mean: 300 then 230 is an outlier next to a
+    /// good answer, which is exactly the shape the 258 ms answer makes. And the boundary is `>`, so
+    /// an answer of exactly the budget is not late.
+    func testBothAnswersMustBeOverBudgetNotJustTheirMean() throws {
+        var probe = RTTProbe(interval: 2, timeout: 2)
+        probe.sent(at: 0)
+        _ = try XCTUnwrap(probe.reply(at: 0.3))
+        probe.sent(at: 2)
+        _ = try XCTUnwrap(probe.reply(at: 2.23))
+        XCTAssertFalse(probe.isLate(budgetMs: 250),
+                       "300 then 230 is one outlier and one fine answer, not a congested link")
+
+        var edge = RTTProbe(interval: 2, timeout: 2)
+        edge.sent(at: 0)
+        _ = try XCTUnwrap(edge.reply(at: 0.25))
+        edge.sent(at: 2)
+        _ = try XCTUnwrap(edge.reply(at: 2.25))
+        XCTAssertFalse(edge.isLate(budgetMs: 250), "exactly the budget is within it")
+        XCTAssertTrue(edge.isLate(budgetMs: 249.9), "and the rule is `>`, not `>=`")
     }
 
     /// A probe that stopped answering must not keep the link late forever: `expire()` leaves

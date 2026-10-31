@@ -56,9 +56,10 @@ public struct RTTProbe: Equatable {
     /// a *sustained* condition; one outlier is a batching artefact, not a pipe that is behind.
     ///
     /// Not late while the probe is measuring nothing, either: no answer yet, switched off
-    /// (`unavailable`), or the newest probe expired unanswered — the freshest sample is then stale,
-    /// and the panel shows `rtt —`, which is not a measurement of the last number that happened to
-    /// land.
+    /// (`unavailable`), or the newest probe expired unanswered — the freshest sample is then stale.
+    /// `expire()` leaves `series` alone on purpose (the report still wants the history), so the last
+    /// number that happened to land can sit in `lastMs` for good; that is the `rtt —` case in the
+    /// panel once the probe switches itself off, and it is not a measurement of anything.
     ///
     /// This is the second opinion `QualityGovernor.frameSample(writeMs:targetFps:rttLate:)` takes;
     /// `writeMs` stays the immediate signal, and #93's span weighting decides how much a late frame
