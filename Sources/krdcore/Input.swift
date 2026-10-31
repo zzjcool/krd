@@ -27,8 +27,79 @@ public enum Event: Equatable {
     /// The terminal's answer to `CSI 5n`: the device status report the round-trip probe measures
     /// (issue #52). Not input — nothing is injected for it.
     case statusReport
+    /// A string-terminated sequence that is **not** input: an `APC G … ST` (the channel kitty's
+    /// graphics protocol answers on), or a `DCS`/`SOS`/`PM` body such as a `tmux` passthrough
+    /// (issue #109). `krd` counts it and says why a tile was refused; nothing is injected for it.
+    case graphicReply(GraphicsReply)
     /// A parse-level diagnostic for `--debug` (e.g. an OSC that grew past the cap).
     case notice(String)
+}
+
+/// One reply from a string-terminated sequence: `APC G i=31;OK ST`, `APC G i=31;EINVAL: … ST`, or
+/// whatever body a `DCS`/`SOS`/`PM` carried.
+///
+/// Numbers and the terminal's own words only. The parser never guesses that a body it does not
+/// recognise was a keystroke — `status` is then `unparsed` and `krd` says so instead of typing it.
+public struct GraphicsReply: Equatable {
+    /// The body between the introducer and `ST`, untouched (`Gi=31;OK` for the example above).
+    public var body: String
+    /// `i=<id>`: the image the reply is about.
+    public var image: Int?
+    /// `I=<number>`: an image *number*, the other way kitty names an image.
+    public var imageNumber: Int?
+    /// `p=<id>`: the placement, on a reply to `a=p`.
+    public var placement: Int?
+    /// `OK`, the terminal's own error text (`EINVAL: decompression failed`), or `unparsed`.
+    public var status: String
+
+    /// Every kitty error code starts with `E` (`EINVAL`, `ENOENT`, `ENOSPC`, …); `OK` does not.
+    public var isError: Bool { status.first == "E" }
+    public var isOK: Bool { status == "OK" }
+    /// The body's selector: `G` for graphics, otherwise whatever the sequence started with.
+    public var selector: String { body.first.map(String.init) ?? "" }
+
+    /// Classify `G i=<id>[,p=<id>][,I=<n>];<OK | E…>` and nothing else.
+    ///
+    /// Both the transmit (`a=t`) and the placement (`a=p`) replies carry the status the same way,
+    /// and kitty sends the error text without a leading identifier: `ESC _ G EINVAL: … ST` is a
+    /// legal reply about no particular image, so the `;` is optional in this grammar.
+    public init(body: String) {
+        self.body = body
+        var rest = Substring(body)
+        guard rest.first == "G" else {
+            status = "unparsed"
+            return
+        }
+        rest = rest.dropFirst()
+        let meta: Substring
+        let result: Substring
+        // A `;` separates metadata from the status only when there *is* metadata (`i=`/`I=`/`p=`).
+        // An error text may carry its own `;` (`EINVAL: bad; param`), and splitting on it used to
+        // turn a refusal into `unparsed` — i.e. lose the reason the issue is about.
+        if let semicolon = rest.firstIndex(of: ";"), rest[..<semicolon].contains("=") {
+            meta = rest[..<semicolon]
+            result = rest[rest.index(after: semicolon)...]
+        } else {
+            meta = ""
+            result = rest
+        }
+        for field in meta.split(separator: ",") {
+            let pair = field.split(separator: "=", maxSplits: 1)
+            guard pair.count == 2, let value = Int(pair[1]) else { continue }
+            switch pair[0] {
+            case "i": image = value
+            case "I": imageNumber = value
+            case "p": placement = value
+            default: break
+            }
+        }
+        // `OK` or an error code; the wildcard case is `unparsed`, never a guess.
+        guard let first = result.first, first == "O" || first == "E" else {
+            status = "unparsed"
+            return
+        }
+        status = String(result)
+    }
 }
 
 /// An SGR mouse report: `CSI < b ; x ; y M|m`. Numbers only — `x`/`y` are whatever the terminal
@@ -74,23 +145,77 @@ public final class InputParser {
     public var onEvent: ((Event) -> Void)?
 
     /// An over-cap OSC is being swallowed up to its terminator: its bytes are a reply's payload,
-    /// never input. Kept across `feed`s because a reply arrives in reads, not in one piece. Only a
-    /// terminator (or `reset()`) ends it: a reply that never terminates leaves the parser
-    /// discarding, which is deliberate — the alternative is typing its payload.
+    /// never input. Kept across `feed`s because a reply arrives in reads, not in one piece. A
+    /// terminator, the byte cap or the fixed deadline ends it (`startDiscard`), so a reply that
+    /// never terminates loses its payload rather than the keyboard.
     private var discardingOSC = false
+    /// The same for an over-cap `APC`/`DCS`/`SOS`/`PM` body (issue #109). A separate field because
+    /// the terminator rule differs: a string sequence ends on `ST` only, so a `BEL` inside one is
+    /// payload and must not end the discard.
+    private var discardingString = false
     /// The last read ended in `ESC`, the first half of an `ST` (`ESC \`) terminator. Held outside
     /// `buffer` on purpose: a lone `ESC` there is the Esc key to the read loop, and its `reset()`
     /// would drop the discard state in the middle of the sequence.
     private var discardSawESC = false
+    /// Bytes swallowed since the current discard began. Every discard is *bounded* (issue #109,
+    /// round 3): an input path that can swallow without a limit can swallow the keyboard, and a
+    /// reply is at most a few hundred bytes.
+    private var discarded = 0
+    /// The byte budget this discard may spend (`maxStringSequence`, or `maxEncodedOSC` for a
+    /// clipboard reply, whose payload is legitimately megabytes).
+    private var discardByteCap = maxStringSequence
+    /// When this discard *began* (`benchNowMs`). The deadline is counted from here and **no byte
+    /// moves it** (issue #109, round 4): a keystroke is a byte, so an idle window that each `feed`
+    /// refreshed made the typist the one input that could keep a discard alive forever.
+    private var discardStartedAt: Double = 0
+    /// When the current buffer first failed to complete, so a half-arrived *keystroke* can be given
+    /// a deadline. Reset by `feed`: that window runs from the last byte, and it only ever decides a
+    /// buffer that is neither a reply nor a legal key (`keySequenceGraceMs`).
+    private var stalledSince: Double = 0
+    /// Which introducer opened the discard that is open now (`nil` = none). Reported with the end
+    /// condition, so a discard a *person* started is never logged as a terminal bug (issue #109).
+    public private(set) var discardIntroducer: DiscardIntroducer?
+    /// `discardStartedAt` expressed in the wall clock, so a bound check driven by a *read* and one
+    /// driven by an *idle tick* never compare two different clocks: `now` from a caller uses the
+    /// caller's anchor, and a read that brings no clock of its own uses this one.
+    private var discardStartedAtWall: Double = 0
+    /// A discard ended at one of its bounds while the sequence was still unterminated, so its tail
+    /// may still be arriving. Armed there, and spent by **the next read**: if that read completes
+    /// the sequence (a terminator inside the cap) it is the reply's own ending and is swallowed
+    /// however late it arrived; if it does not, it is input — the keyboard is back, which is what
+    /// the bound promised, and every read after it is input too.
+    private var tailAttempt = false
+    private var tailIntroducer: DiscardIntroducer = .apc
+    private var tailByteCap = maxStringSequence
+    /// Set by the parser every time a discard ends. The read loop logs the *end* (introducer,
+    /// bytes, which condition fired) and never the latch alone.
+    public private(set) var lastDiscard: DiscardReport?
+    public private(set) var discardEndSerial = 0
+
+    /// True while an unfinished sequence's payload is being swallowed. The read loop logs the idle
+    /// ticks it drives; the parser owns the decision.
+    public var isDiscarding: Bool { discardingOSC || discardingString }
+
+    /// True while the ending of an already-abandoned sequence may still be swallowed (one read).
+    public var isAwaitingTail: Bool { tailAttempt }
 
     public init() {}
 
-    public func feed(_ bytes: [UInt8]) {
-        buffer.append(contentsOf: bytes)
+    /// Bytes in. The **deadline is checked here as well as on the idle tick** (issue #109, round
+    /// 6): a keystroke is a byte, so a check that only ran on a 100 ms `poll` timeout could be
+    /// starved by anything arriving faster than that — a latched discard measured 3440 ms and ate
+    /// 60 keystrokes at 50 ms. What this does *not* do: the clock stays anchored at
+    /// `discardStartedAt`, and no byte moves it.
+    public func feed(_ bytes: [UInt8], now: Double? = nil) {
+        stalledSince = 0                            // the keystroke grace runs from the last byte
+        checkDiscardDeadline(now: now)
+        buffer.append(contentsOf: bytes)             // a discard's deadline does *not* move
         drain()
     }
 
-    public func feed(_ bytes: ArraySlice<UInt8>) {
+    public func feed(_ bytes: ArraySlice<UInt8>, now: Double? = nil) {
+        stalledSince = 0
+        checkDiscardDeadline(now: now)
         buffer.append(contentsOf: bytes)
         drain()
     }
@@ -99,7 +224,188 @@ public final class InputParser {
     public func reset() {
         buffer.removeAll(keepingCapacity: true)
         discardingOSC = false
+        discardingString = false
         discardSawESC = false
+        discarded = 0
+        discardByteCap = Self.maxStringSequence
+        discardStartedAt = 0
+        discardStartedAtWall = 0
+        stalledSince = 0
+        discardIntroducer = nil
+        tailAttempt = false
+    }
+
+    /// The introducer a discard came from. Logged with the end condition: the two read very
+    /// differently to a person, because `ESC ]` plus a body is exactly what Alt-`]` followed by
+    /// typing looks like, while `ESC _ G` is a sequence only a graphics reply produces.
+    public enum DiscardIntroducer: String, Equatable {
+        case osc = "OSC `ESC ]` with a body (a clipboard answer, or Alt+] plus typing — the two are byte-identical)"
+        case apc = "APC `ESC _ G` (a kitty graphics reply)"
+    }
+
+    /// Which of the three conditions ended a discard.
+    public enum DiscardEnd: String, Equatable {
+        case terminator = "its terminator"
+        case byteCap = "the byte cap"
+        case deadline = "the 1500 ms deadline"
+    }
+
+    /// One finished discard, as the read loop reports it.
+    public struct DiscardReport: Equatable {
+        public var introducer: DiscardIntroducer
+        public var dropped: Int
+        public var end: DiscardEnd
+        public var livedMs: Double
+    }
+
+    /// What a scan for the late ending of an abandoned sequence found (`scanTail`).
+    private enum TailScan {
+        /// The read completes the sequence: this many bytes, through its terminator.
+        case completes(Int)
+        /// Half an `ST` ended the read; wait for the rest.
+        case hold
+        /// Not the ending: input, all of it.
+        case input
+    }
+
+    /// What a buffer that stopped growing turned out to be.
+    public enum StalledBytes: Equatable {
+        /// Nothing was held.
+        case none
+        /// One lone `ESC` — the Esc key, exactly as before issue #109.
+        case escape
+        /// Still undecided: nothing typed and nothing dropped. A discard that has not reached its
+        /// deadline, or a buffer a *byte* still has to decide (`ESC _`), or half a keystroke inside
+        /// `keySequenceGraceMs`.
+        case pending
+        /// The head of a sequence that was a reply (or half a keystroke). It is gone, and when the
+        /// prefix could only have been a reply (`ESC _ G`, `OSC`) every byte up to its terminator is
+        /// now swallowed, so the rest of that sequence cannot become input either.
+        case sequence
+        /// A bare `ESC ]` — the OSC introducer with no body yet — was released as the Alt-`]`
+        /// keystroke it is, so the introducer can never swallow the typing that follows it.
+        case released
+        /// A discard ran out of budget (bytes or silence) and was given up: the keyboard is back and
+        /// the parser has already emitted the `.notice` that says so. The sequence it belonged to
+        /// may still be arriving, so one tail attempt stays armed (`isAwaitingTail`).
+        case abandoned
+    }
+
+    /// True for the two prefixes whose tail can only be payload: `OSC` (`ESC ]`, a clipboard
+    /// reply) and the graphics `APC` (`ESC _`). Being this prefix is *necessary* for a reply, never
+    /// sufficient — see `isReplyCandidate` and `resolveStall`.
+    public static func isReplyPrefix(_ bytes: [UInt8]) -> Bool {
+        bytes.count >= 2 && bytes[0] == 0x1B && (bytes[1] == 0x5D || bytes[1] == 0x5F)
+    }
+
+    /// `ESC _ G`: the only three bytes that begin a reply (issue #109). A bare `ESC _` is **not** a
+    /// candidate — it is undecided, and only the *next byte* decides it.
+    public static func isReplyCandidate(_ bytes: [UInt8]) -> Bool {
+        bytes.count >= 3 && bytes[0] == 0x1B && bytes[1] == 0x5F && bytes[2] == 0x47
+    }
+
+    /// A strict prefix of `ESC _ G`: exactly the two bytes `ESC _`, the only undecided state on this
+    /// path. Three bytes always decide, and a bare `ESC` is the Esc key.
+    public static func isReplyHead(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 2 && bytes[0] == 0x1B && bytes[1] == 0x5F
+    }
+
+    /// How long half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is held before it is dropped. This is
+    /// the 500 ms `docs/PROTOCOL.md` §8 quotes. It never applies to `ESC _`: a reply head is decided
+    /// by the next byte, not by a clock.
+    public static let keySequenceGraceMs: Double = 500
+
+    /// The **total** life of one discard, counted from the byte that started it and never refreshed.
+    /// Past it the discard ends and the keyboard comes back, with one exception that is not a
+    /// clock: a single later read that *completes* the sequence is still swallowed, because a
+    /// sequence that began as a reply head may not type its own terminator however late it arrives
+    /// (`abandonDiscard`, `scanTail`).
+    public static let replyDiscardBudgetMs: Double = 1500
+
+    /// Resolve a sequence that stopped arriving: `krd`'s read loop calls this on every read that
+    /// returned no data (its 100 ms `poll` timeout) and asks the same question each time. This is
+    /// the only place that decides a held buffer, so it can be tested against a fake clock.
+    ///
+    /// The policy, in full (issue #109, round 4 — the round that removed the timers):
+    ///
+    /// 1. **Only an unambiguous reply may ever be treated as one.** `ESC _ G` is a reply; `ESC _`
+    ///    plus anything else is the Alt-`_` keystroke plus what followed it (`parseEscape`). The
+    ///    undecided `ESC _` is decided by **the next byte and nothing else**: no clock releases it,
+    ///    so a reply whose head and body are written far apart is still heard as a reply instead of
+    ///    being typed, and nothing on this path is typed before that byte arrives.
+    /// 2. **What that costs is named, not hidden:** a lone `ESC _` with no byte after it is delivered
+    ///    when the next byte arrives (on `main` it was typed at once). The alternative — releasing it
+    ///    from this idle tick — is a clock, and it types the reply: a read returns no data ~100 ms
+    ///    after `ESC _`, so any release here would fire before a body written 1200 ms later.
+    /// 3. **`ESC ]` latches nothing new.** A bare `ESC ]` is Alt-`]`, released from this idle tick
+    ///    (~100 ms, which is what a human's Alt-`]` looks like); with a body it is a clipboard answer
+    ///    and latches the `discardingOSC` state `main` already had, whose only end conditions are the
+    ///    ones `startDiscard` gives it.
+    /// 4. **Every discard is bounded three ways**: its terminator, a byte budget
+    ///    (`maxStringSequence`, or `maxEncodedOSC` for an OSC), and a **fixed total deadline**
+    ///    (`replyDiscardBudgetMs`) anchored at the byte that started it. No incoming byte moves that
+    ///    deadline — keystrokes are bytes, and a refreshed window made the typist the one input that
+    ///    could keep a discard alive forever. Past the terminator and the cap nothing is typed; past
+    ///    the **deadline** the keyboard comes back at that moment, and the only thing still
+    ///    protected is the sequence's own ending: the next read is swallowed if it completes the
+    ///    sequence, and is input if it does not (issue #109, round 6 — the round that stopped a
+    ///    reply's late tail from being typed).
+    /// 5. **A reply that never terminates still never types its payload** (#127, #109): the bytes up
+    ///    to the abandon are dropped, never handed to the byte loop.
+    public func resolveStall(now: Double = benchNowMs()) -> StalledBytes {
+        // A discard is resolved by its own deadline, not by content: its buffer is empty by
+        // construction, and `discardStartedAt` is the anchor `feed` cannot move.
+        if isDiscarding {
+            let lived = now - discardStartedAt
+            guard lived >= Self.replyDiscardBudgetMs else { return .pending }
+            checkDiscardDeadline(now: now)
+            return .abandoned
+        }
+
+        let held = buffer
+        guard let first = held.first else {
+            stalledSince = 0
+            return .none
+        }
+        if held.count == 1, first == 0x1B {
+            buffer.removeAll(keepingCapacity: true)
+            stalledSince = 0
+            tailAttempt = false
+            return .escape
+        }
+
+        // `ESC _`: a strict prefix of the only reply krd provokes, and the one buffer here that no
+        // clock may decide (policy 1/2). It waits for the byte that decides it.
+        if Self.isReplyHead(held) { return .pending }
+
+        // A bare `ESC ]` — the introducer with no body yet — is the Alt-`]` keystroke. `main` left
+        // these two bytes buffered until more arrived, so this is the one state that has to be
+        // released for typing to continue; it swallows nothing, and a body is handled below.
+        if held.count == 2, first == 0x1B, held[1] == 0x5D {
+            buffer.removeAll(keepingCapacity: true)
+            stalledSince = 0
+            tailAttempt = false
+            emit(.text("]", [.maskAlternate]))
+            return .released
+        }
+
+        // A reply, and only a reply, may latch a discard: `ESC ] …` (a clipboard answer with a
+        // body) or `ESC _ G …` (the graphics reply). Both carry a payload that must never be typed.
+        if held.count >= 2, first == 0x1B, held[1] == 0x5D || Self.isReplyCandidate(held) {
+            buffer.removeAll(keepingCapacity: true)
+            stalledSince = 0
+            startDiscard(osc: held[1] == 0x5D, now: now)
+            return .sequence
+        }
+
+        // Half a keystroke: neither a reply nor a key, so it gets the grace and is then dropped.
+        // It latches no discard, so the next key is unaffected.
+        if stalledSince == 0 { stalledSince = now }
+        guard now - stalledSince >= Self.keySequenceGraceMs else { return .pending }
+        buffer.removeAll(keepingCapacity: true)
+        stalledSince = 0
+        tailAttempt = false
+        return .sequence
     }
 
     /// Upper bound for an OSC body, shared with `OSC52` so the parser and the clipboard code
@@ -111,14 +417,48 @@ public final class InputParser {
     /// legal reply, not a second payload budget.
     private static let maxOSCSequence = maxEncodedOSC + 32
 
+    /// Upper bound for an `APC`/`DCS`/`SOS`/`PM` body. A kitty graphics reply is ~40 bytes and a
+    /// `tmux` passthrough carries the payload it relays, so this is generous headroom rather than a
+    /// budget; past it the sequence is swallowed whole, never typed (see `discardingString`).
+    public static let maxStringSequence = 64 << 10
+
     private func emit(_ event: Event) { onEvent?(event) }
 
     private func drain() {
         while true {
-            if discardingOSC {
-                guard let used = discardOSC() else { return }
-                buffer.removeFirst(used)
-                discardingOSC = false
+            if tailAttempt {
+                switch scanTail() {
+                case let .completes(used):
+                    // The sequence's own ending, arriving after its discard was given up. It is
+                    // payload, not input, and never becomes a keystroke (issue #109, round 6).
+                    buffer.removeFirst(min(used, buffer.count))
+                    tailAttempt = false
+                    emit(.notice("reply tail after the discard bound: \(used) B swallowed, 0 keys"))
+                    continue
+                case .hold:
+                    // The read ended on the first half of `ST`: wait for the second half. Typing
+                    // it now would type half a sequence.
+                    return
+                case .input:
+                    // Not the ending: this is the input the returned keyboard promised.
+                    tailAttempt = false
+                    emit(.notice("reply sequence released after the discard bound: \(buffer.count) B are input"))
+                    continue
+                }
+            }
+            if isDiscarding {
+                let before = buffer.count
+                guard let used = discardingOSC ? discardOSC() : discardString() else {
+                    // No terminator in this read: the discard functions have already emptied the
+                    // buffer, so every one of those bytes was payload. Spend it against the budget
+                    // (which may abandon the discard and hand the keyboard back), then wait — there
+                    // is nothing left here to parse.
+                    chargeDiscard(before)
+                    return
+                }
+                // A terminator ended the discard: it is over, whatever it cost.
+                buffer.removeFirst(min(used, buffer.count))
+                finishDiscard(.terminator, livedMs: max(0, benchNowMs() - discardStartedAtWall))
                 continue
             }
             guard let first = buffer.first else { return }
@@ -208,20 +548,196 @@ public final class InputParser {
             if buffer.count > Self.maxOSCSequence {
                 emit(.notice("osc dropped: over cap"))
                 if let used = discardOSC() { return used }
-                discardingOSC = true
+                startDiscard(osc: true, now: benchNowMs())
                 return nil
             }
             return nil
+        case 0x5F:                                  // APC: `ESC _ … ST`, of which only `ESC _ G` is ours
+            // `ESC _ G` is the *only* sequence krd ever asks a terminal to send (issue #109). A
+            // `G` on the third byte enters the reply scan; anything else is the Alt-`_` keystroke
+            // this parser has always produced for it, released on the spot. A *bare* `ESC _` (no
+            // third byte yet) is the one undecided case: it stays buffered — **no clock, no
+            // discard** — and the next byte decides it, which is what keeps a reply whose pieces
+            // are written far apart from being typed (`resolveStall`, policy 1).
+            guard buffer.count >= 3 else { return nil }
+            guard buffer[2] == 0x47 else { return altText() }
+            return parseStringSequence()
         default:
-            if buffer[1] < 0x20 {
-                emit(.press(Keys.esc, [], .press))
-                return 1
-            }
-            if let ch = String(bytes: [buffer[1]], encoding: .utf8)?.first {
-                emit(.text(ch, [.maskAlternate]))
-            }
-            return 2
+            return altText()
         }
+    }
+
+    /// `ESC` + one printable byte: how a legacy terminal encodes Alt, and this parser's fallback for
+    /// every escape it does not recognise. One keystroke, unchanged by any of the above.
+    private func altText() -> Int? {
+        if buffer[1] < 0x20 {
+            emit(.press(Keys.esc, [], .press))
+            return 1
+        }
+        if let ch = String(bytes: [buffer[1]], encoding: .utf8)?.first {
+            emit(.text(ch, [.maskAlternate]))
+        }
+        return 2
+    }
+
+    /// The graphics `APC` (`ESC _ G … ST`). The body is a reply's payload, never input, so it
+    /// becomes exactly one `.graphicReply` — an unrecognised body included, as `unparsed`.
+    ///
+    /// `DCS` (`ESC P`), `SOS` (`ESC X`) and `PM` (`ESC ^`) deliberately do **not** arrive here: the
+    /// same prefix is how a legacy terminal encodes Alt+P, Alt+X and Alt+^, so scanning for their
+    /// `ST` ate a legal keystroke and every key typed while it waited. Only the reply prefix krd
+    /// itself provokes (`ESC _ G`) is worth that trade (issue #109: no legal input may be eaten).
+    ///
+    /// `ST` is the only terminator here (`BEL` ends an `OSC` and nothing else), and the scan stops at
+    /// the cap: past it the sequence is dropped whole rather than buffered or typed.
+    private func parseStringSequence() -> Int? {
+        let scanTo = min(buffer.count, Self.maxStringSequence)
+        var i = 2
+        while i < scanTo {
+            if buffer[i] == 0x1B, i + 1 < buffer.count, buffer[i + 1] == 0x5C {
+                handleStringSequence(String(bytes: buffer[2..<i], encoding: .utf8) ?? "")
+                return i + 2
+            }
+            i += 1
+        }
+        if buffer.count > Self.maxStringSequence {
+            emit(.notice("string sequence dropped: over cap"))
+            if let used = discardString() { return used }
+            startDiscard(osc: false, now: benchNowMs())
+            return nil
+        }
+        // Still arriving: the body stays in `buffer` and nothing is emitted, so a reply split
+        // across reads cannot be typed while it is incomplete.
+        return nil
+    }
+
+    /// One string-sequence body, classified. The distinction from a keystroke is made *here*, by the
+    /// fact that the sequence arrived: `krd` must never guess these bytes were input.
+    private func handleStringSequence(_ body: String) {
+        emit(.graphicReply(GraphicsReply(body: body)))
+    }
+
+    /// Open a discard: the payload from here to the terminator is swallowed, within a budget the
+    /// caller cannot forget to set. `OSC` carries a clipboard answer, which is legitimately
+    /// megabytes, so its byte budget is the reply cap rather than a few hundred bytes.
+    private func startDiscard(osc: Bool, now: Double) {
+        discardingOSC = osc
+        discardingString = !osc
+        discardIntroducer = osc ? .osc : .apc
+        tailAttempt = false
+        // `discardSawESC` is deliberately untouched: when this is called from the over-cap path the
+        // discard functions have just scanned the same read and may have parked half an `ST` there.
+        discarded = 0
+        discardByteCap = osc ? Self.maxEncodedOSC : Self.maxStringSequence
+        // The clock is anchored here and never re-anchored: `feed` does not touch it (policy 4).
+        discardStartedAt = now
+        discardStartedAtWall = benchNowMs()
+        stalledSince = 0
+    }
+
+    /// Close a discard and record what actually happened: which introducer, how many bytes it ate,
+    /// and which of the three end conditions fired. The read loop logs this, and not the latch
+    /// alone, so a user's own Alt-`]` is never reported as a terminal bug (issue #109, round 6).
+    private func finishDiscard(_ end: DiscardEnd, livedMs: Double) {
+        if let introducer = discardIntroducer {
+            lastDiscard = DiscardReport(introducer: introducer, dropped: discarded,
+                                        end: end, livedMs: livedMs)
+            discardEndSerial += 1
+        }
+        discardingOSC = false
+        discardingString = false
+        discardSawESC = false
+        discarded = 0
+        discardByteCap = Self.maxStringSequence
+        discardStartedAt = 0
+        discardStartedAtWall = 0
+        discardIntroducer = nil
+    }
+
+    /// The **fixed total deadline**, checked on every `feed` and on the read loop's idle tick. Past
+    /// it the discard ends — the keyboard comes back — but the sequence it belonged to has not
+    /// finished, so one tail attempt is armed: a read that *completes* it is still swallowed.
+    private func checkDiscardDeadline(now: Double?) {
+        guard isDiscarding else { return }
+        let lived = now.map { $0 - discardStartedAt } ?? (benchNowMs() - discardStartedAtWall)
+        guard lived >= Self.replyDiscardBudgetMs else { return }
+        emit(.notice("reply discard abandoned: \(Int(lived)) ms"
+                     + (discarded > 0 ? ", \(discarded) B dropped" : "")))
+        abandonDiscard(end: .deadline, livedMs: lived)
+    }
+
+    /// Scan for the terminator of a sequence whose discard is already over. `completes` = the reply's
+    /// late ending (swallow it), `input` = not that (the keyboard is back for real), `hold` = the
+    /// read stopped on half an `ST`, so nothing may be decided yet.
+    private func scanTail() -> TailScan {
+        let scanTo = min(buffer.count, tailByteCap)
+        var i = 0
+        while i < scanTo {
+            let b = buffer[i]
+            if b == 0x07, tailIntroducer == .osc { return .completes(i + 1) }
+            if b == 0x1B {
+                guard i + 1 < buffer.count else { return .hold }
+                if buffer[i + 1] == 0x5C { return .completes(i + 2) }
+            }
+            i += 1
+        }
+        return .input
+    }
+
+    /// Spend `n` payload bytes against the current discard's budget. `false` means the budget is
+    /// gone: the discard is abandoned, the keyboard is back, and one `.notice` is the only trace of
+    /// the bytes that were thrown away (policy 2 of `resolveStall` — no input path may wedge).
+    @discardableResult
+    private func chargeDiscard(_ n: Int) -> Bool {
+        discarded += n
+        guard discarded > discardByteCap else { return true }
+        emit(.notice("reply discard abandoned: over \(discardByteCap) B dropped"))
+        abandonDiscard(end: .byteCap, livedMs: max(0, benchNowMs() - discardStartedAtWall))
+        return false
+    }
+
+    /// Give up a discard without a terminator: everything buffered is payload and goes too, and the
+    /// next byte is input again — except for the one read that *completes* the sequence, which is
+    /// its own ending arriving late and is swallowed (`scanTail`). The caller has already said why
+    /// in a `.notice`.
+    private func abandonDiscard(end: DiscardEnd, livedMs: Double) {
+        buffer.removeAll(keepingCapacity: true)
+        tailAttempt = discardIntroducer != nil
+        tailIntroducer = discardIntroducer ?? .apc
+        tailByteCap = discardByteCap
+        finishDiscard(end, livedMs: livedMs)
+        stalledSince = 0
+    }
+
+    /// Swallow the body of an `APC` up to its `ST`, for the reason `discardOSC` documents — an
+    /// over-cap one, or one the read loop found stalled (`resolveStall`). The OSC discard's byte
+    /// budget is `maxEncodedOSC` (**2,796,218 B** — the base64 of a 2 MB clipboard plus headroom),
+    /// because a legal clipboard answer really is megabytes; this one's is `maxStringSequence`
+    /// (65,536 B). Both are also on the fixed total deadline, which is what stops a typist's bytes
+    /// from extending a discard (policy 4 of `resolveStall`). Same contract, one difference: `BEL`
+    /// is payload in a string sequence, so it does not end the discard — ending there would type the
+    /// rest of the reply.
+    private func discardString() -> Int? {
+        if discardSawESC {
+            guard let first = buffer.first else { return nil }
+            discardSawESC = false
+            if first == 0x5C { return 1 }         // `ESC \` split across two reads
+        }
+        var i = 0
+        while i < buffer.count {
+            if buffer[i] == 0x1B {
+                guard i + 1 < buffer.count else {
+                    // The read ended on the first half of `ST`: hold it for the next read.
+                    discardSawESC = true
+                    buffer.removeAll(keepingCapacity: true)
+                    return nil
+                }
+                if buffer[i + 1] == 0x5C { return i + 2 }
+            }
+            i += 1
+        }
+        buffer.removeAll(keepingCapacity: true)
+        return nil
     }
 
     /// Swallow the body of an over-cap OSC. Returns how many buffered bytes to drop (through the
@@ -454,6 +970,12 @@ extension Event {
             return "keyboardFlags \(flags.map(String.init) ?? "?")"
         case .statusReport:
             return "statusReport"
+        case let .graphicReply(r):
+            // The status text is the terminal's words about a payload, so the trace reports the
+            // selector, the ids and the length — never the body (the `osc` rule).
+            return "graphicReply \(r.selector) i=\(r.image.map(String.init) ?? "-")"
+                + " p=\(r.placement.map(String.init) ?? "-")"
+                + " \(r.isOK ? "ok" : r.isError ? "error" : "unparsed") \(r.body.utf8.count) B"
         case let .notice(text):
             return "notice \(text)"
         }

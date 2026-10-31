@@ -23,6 +23,15 @@ final class InputReader {
     /// have been. Read by the diagnostics tick, which owns the probe's send time.
     private(set) var lastStatusReplyAt = Double(0)
     private(set) var statusReplies = 0
+    /// Graphics replies the terminal sent (`APC G i=…;OK|E… ST`, issue #109), and how many of them
+    /// were refusals. Data about the picture, never input: nothing here reaches `postKey`.
+    private(set) var graphicReplies = 0
+    private(set) var imageErrors = 0
+    /// The last refusal, sanitized for a log line — `EINVAL: decompression failed`.
+    private(set) var lastImageError: String?
+    /// `(image, status)` pairs already reported. A refused tile is redrawn every frame and the
+    /// terminal answers every time; the human needs the sentence once, not 20 times a second.
+    private var reportedImageErrors: Set<String> = []
     var inputP99Ms: Double { inputSeries.percentile(0.99) }
     /// A copy of the recent samples, for the `SIGUSR2` report bundle.
     var inputSamples: Series { inputSeries }
@@ -64,6 +73,8 @@ final class InputReader {
     /// With --debug every recognised event is logged, so "nothing happens" can be split
     /// into "the terminal never sent it" vs "the click went to the wrong place".
     var trace = false
+    /// The last discard the trace has already reported (`InputParser.discardEndSerial`).
+    private var loggedDiscardSerial = 0
     /// Prefix-mode byte handling for the TUI layer (`--dev`). Returns true when the byte belongs
     /// to the chrome, i.e. must not reach the remote desktop.
     var onChromeKey: ((UInt8) -> Bool)?
@@ -112,6 +123,18 @@ final class InputReader {
 
     private func log(_ text: String) {
         Log.write("input: " + text + "\n")
+    }
+
+    /// The one line that says what a discard did: which introducer, how many bytes, and which of the
+    /// three conditions ended it. It replaces a line that guessed "a reply that stopped arriving"
+    /// for **every** latch — including the user's own Alt-`]` — and sent the reader after a terminal
+    /// bug that does not exist (issue #109, round 6).
+    private func logDiscardEnd() {
+        guard trace, parser.discardEndSerial != loggedDiscardSerial,
+              let report = parser.lastDiscard else { return }
+        loggedDiscardSerial = parser.discardEndSerial
+        log("discard ended at \(report.end.rawValue): \(report.dropped) B dropped, "
+            + "\(Int(report.livedMs)) ms, from \(report.introducer.rawValue)")
     }
     /// The CSI/SS3 state machine, in krdcore (issue #45). It owns the byte buffer; this class owns
     /// the tty, the `CGEvent`s and every decision about what a parsed event means.
@@ -203,7 +226,9 @@ final class InputReader {
     private let stopLock = NSLock()
     private var stopFlag = false
     private let stoppedSignal = DispatchSemaphore(value: 0)
-
+    /// 100 ms ticks with no bytes: the only clock the idle decisions run on. The *policy* — what a
+    /// bare `ESC ]` releases, and when a discard is past its fixed deadline — lives in
+    /// `InputParser.resolveStall`, so the parser can be tested against a fake clock.
     private func loop() {
         defer {
             // Whatever made the loop return, the terminal goes back to the shell in a state that
@@ -219,11 +244,42 @@ final class InputReader {
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {
-                // A lone ESC with nothing following it is the Esc key.
-                if parser.buffer == [0x1B] {
+                // A read that returned no data: an escape sequence that stopped arriving. This is
+                // the only clock the parser's idle decisions ever see, and it decides only two
+                // things — a bare `ESC ]` is the Alt-`]` key, and a discard past its fixed
+                // deadline is abandoned. `ESC _` is **not** decided here: it waits for the byte
+                // that decides it, so a reply written in pieces far apart is still a reply
+                // (`InputParser.resolveStall`, issue #109 round 4).
+                //
+                // Nothing here resets the parser and keeps parsing the remainder: `reset()` drops
+                // the buffered head and the *rest* of the sequence then arrives as input, which is
+                // how `SECRET` got typed into the mirrored desktop.
+                let held = parser.buffer
+                if held.count == 1, held[0] == 0x1B {
                     parser.reset()
                     postKey(Keys.esc, [])
+                    continue
                 }
+                let outcome = parser.resolveStall()
+                if trace {
+                    switch outcome {
+                    case .none, .escape, .pending, .abandoned:
+                        break                       // `abandoned` emitted its own `.notice`
+                    case .released:
+                        log("released a stalled `ESC ]` as the Alt+] keystroke")
+                    case .sequence:
+                        // A reply latched a discard; half a keystroke simply went away. What is
+                        // logged here is the *start*; `logDiscardEnd` reports how it ended, and
+                        // that is the line to read when a discard ate something unexpected.
+                        if let introducer = parser.discardIntroducer {
+                            log("discard opened by \(introducer.rawValue), \(held.count) B held; "
+                                + "it swallows to its terminator")
+                        } else {
+                            log("dropped an unterminated escape sequence (\(held.count) B)")
+                        }
+                    }
+                }
+                logDiscardEnd()
                 continue
             }
             let n = Darwin.read(STDIN_FILENO, &chunk, chunk.count)
@@ -234,6 +290,7 @@ final class InputReader {
             }
             readAt = benchNowMs()
             parser.feed(chunk[0..<n])
+            logDiscardEnd()
         }
     }
 
@@ -263,9 +320,44 @@ final class InputReader {
         case let .keyboardFlags(flags):
             keyboardFlags = flags
             if trace { log("keyboard protocol flags=\(flags.map(String.init) ?? "unparsed")") }
+        case let .graphicReply(reply):
+            handleGraphicReply(reply)
         case let .notice(text):
             if trace { log(text) }
         }
+    }
+
+    /// A graphics reply is a statement about the wire, not a keystroke (issue #109). It used to be
+    /// typed into the mirrored desktop as Alt-`G`-and-friends when `KRD_Q` asked the terminal to
+    /// answer; now it is counted, and the *first* refusal per `(image, status)` becomes one line in
+    /// the log, which is where a human already looks for a black tile.
+    private func handleGraphicReply(_ reply: GraphicsReply) {
+        graphicReplies += 1
+        let status = Self.logSafe(reply.status)
+        guard reply.isError else {
+            if trace {
+                log("graphic reply \(reply.isOK ? "ok" : "unparsed")"
+                    + " image=\(reply.image.map(String.init) ?? "-")"
+                    + " placement=\(reply.placement.map(String.init) ?? "-")"
+                    + " status=\(status)")
+            }
+            return
+        }
+        imageErrors += 1
+        lastImageError = status
+        guard reportedImageErrors.insert("\(reply.image.map(String.init) ?? "-")/\(status)").inserted
+        else { return }
+        let image = reply.image.map(String.init) ?? (reply.imageNumber.map { "number \($0)" } ?? "?")
+        Log.write("krd: image \(image) refused: \(status)\n")
+    }
+
+    /// The terminal's own words, made safe for a one-line log: no control bytes (a reply is
+    /// attacker-influenceable text on a tty), no newline, and a length a human can read.
+    private static func logSafe(_ text: String) -> String {
+        // The reply is terminal-supplied text on a tty, so only printable ASCII gets through: a
+        // stray U+009B or a bidi override in an error message would otherwise edit the log itself.
+        let cleaned = String(text.unicodeScalars.filter { (0x20...0x7E).contains($0.value) })
+        return String(cleaned.prefix(200))
     }
 
     /// Same bits on both sides of the boundary (issue #45): `CGEventFlags` and `Modifiers` agree on
