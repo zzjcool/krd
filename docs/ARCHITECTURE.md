@@ -436,7 +436,7 @@ which is why §7.6 exists.
 | `KRD_PASSTHROUGH` | `auto` (default) / `on` / `off` — wrap every kitty APC in tmux's DCS passthrough (`ESC P tmux;` … `ESC \`, every interior `ESC` doubled; `--passthrough` sets the same switch, PROTOCOL §6.6). `auto` = on when `TERM` starts with `tmux` or `screen` (issue #107) |
 | `KRD_REAP` | repaint everything after n frames (0 = off, the default) |
 | `KRD_BENCH_BUDGET_SCALE` | `bench/bench.py` only (not read by krd): multiplies `ms.*` / `write_ms.*` budgets by the machine's speed factor, never bytes ([BENCHMARK](BENCHMARK.md) §6) |
-| `--mock` | `MockDesktop` instead of `Capturer`: synthetic frames through the real `handleFrame`, no permission |
+| `--mock` | `MockDesktop` instead of `Capturer`: synthetic frames through the real `handleFrame`, no permission. With `--wall`: `WallSource.mockModel` (a fake window list) + `WallPictures.demo` (pictures in process) instead |
 | `--mock-size` | size of the generated desktop, default `1920x1200` |
 | `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand |
 | `--dev-panel` | `ChromeState.panel` set before the first layout, for screenshots and pty tests |

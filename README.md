@@ -77,6 +77,9 @@ krd --cursor                 # draw the target's pointer into the picture (defau
                              # a drawn pointer dirties tiles every time the mouse moves)
 krd --dev                    # TUI layer: a status line and panels under the picture
 krd --mock --dev             # the same, with the screen mocked: no permission needed
+krd --wall --mock            # the landing screen against a fake window list (12 cards,
+                             # CJK/emoji titles, a withheld title, a mask, two displays):
+                             # no grant, pictures drawn in process
 wall                         # the same landing screen under its own name (a symlink the
                              # installer adds: today `wall` and `krd` are the same command)
 krd --symbols ascii          # one-cell-everywhere glyphs (terminals that draw ▲ two wide)
@@ -104,6 +107,10 @@ silently mislabelled 15 (issue #140).
 `--mock` swaps ScreenCaptureKit for a desktop drawn in process (`--mock-size WxH`, default
 1920x1200). Tiles, dirty rects, the encoder, the placements and the chrome are all the real
 code — only the pixels are synthetic, so it needs no permission and never stops. `make dev-mock`.
+With `--wall` it supplies the *landing screen's window list* instead (`WallSource.mockModel`),
+with the pictures drawn in process: that is how the wall's text layer is looked at — pages,
+CJK and emoji titles, a withheld title, a mask, two displays — on a machine with no Screen
+Recording grant.
 
 On the landing screen a click is the whole vocabulary: the right bar scrolls the stage and the shelf
 (one click = one page, the wheel = one item), and **clicking a picture opens that window's mirror** —

@@ -438,8 +438,10 @@ ObscureKeystrokeTiming no`）。在墙里它是只读的，而且是故意的：
   （没地方放）——范围会把屏幕上没有的卡片算进去——也不画 `⤢`。
 - **pane 太小** → 一排几张随面板变窄从 3 降到 2（最窄时降到 1）；只兑现得了一种宽度时 `⤢` 也不画
   （没有下一个宽度可去），一排要两位数的宽度永远不画字形，滚动只剩竖条自己的箭头。
-- **`--mock`** → 固定假窗口列表，`MockCanvas` 出静帧（`Mock.swift:157`），不需要屏幕和权限，
-  `KRD_DUMP` 取字节快照。
+- **`--wall --mock`** → 固定假窗口列表（`WallSource.mockModel`：十二张卡、中日文与 emoji 标题、
+  一个被隐去的标题、一个没有像素的窗口（它的面板就是遮罩）、两块屏），图在进程内画
+  （`WallPictures.demo`），不需要屏幕也不需要权限，`KRD_DUMP` 取字节快照。
+  单独的 `--mock`（不带 `--wall`）是模拟镜像：生成的桌面走真实的瓦片与编码器（`Mock.swift:157`）。
 
 ## 11. 测试
 
@@ -450,7 +452,8 @@ ObscureKeystrokeTiming no`）。在墙里它是只读的，而且是故意的：
 5. `--window` / `--display` 启动的 `KRD_DUMP` 与今天逐字节一致。仓库已有两个 golden fixture
    （`Fixtures/selftest-80x24-17x33-l6.dump`、`Fixtures/input-trace.dump`），墙面文本层应当成为第三个
    ——重建时用 `KRD_UPDATE_FIXTURE`，而且**不能带 `--filter`**（Swift 5.10 会静默跑 0 个用例）。
-6. `--mock` 在 137×44 / 60×24 的快照 + 一次真实 `ssh -t`。
+6. `--wall --mock` 在 137×44 / 60×24 的快照（假窗口列表，所以文本层的翻页和那些别扭的标题
+   在没有授权时也能到达）+ 一次真实 `ssh -t`。
 
 ## 12. 分期
 

@@ -306,6 +306,47 @@ enum WallSource {
         )
     }
 
+    /// A model that does not come from the window server and is *not* the demo: the wall against a
+    /// fake window list (`--wall --mock`, issue #114).
+    ///
+    /// Why this is not `demoModel()`: the demo exists to exercise the *fit* with four aspects, and it
+    /// cannot reach the parts of the text layer that only a longer list and awkward titles reach —
+    /// page arithmetic with twelve cards, CJK and emoji titles (one cell wide each, two for the
+    /// emoji), a title the window server withheld (no Screen Recording grant: the wall prints
+    /// `window N`) and a window that cannot be captured at all, which is what draws a mask. Those
+    /// are exactly the §11.6 cases a grant-free machine otherwise cannot produce, so the flag that
+    /// runs without a grant carries them.
+    ///
+    /// Deterministic on purpose: two machines, one pane size, the same bytes. Every bound is ≥ 1
+    /// except the last window's, whose 0×0 is the mask (see `Desk.wallPanels`: a window smaller than
+    /// one point is a panel that cannot be captured).
+    static func mockModel() -> WallModel {
+        func window(_ id: UInt32, _ app: String, _ title: String?, _ w: Double, _ h: Double)
+            -> OrderedWindow {
+            OrderedWindow(windowID: id, pid: Int32(900 + Int(id)), app: app, title: title,
+                          bounds: CGRectCompat(x: 0, y: 0, width: w, height: h))
+        }
+        return WallModel(
+            displays: [WallDisplay(name: "Mock Display", width: 2560, height: 1600, id: 1, main: true),
+                       WallDisplay(name: "Mock Display 2", width: 1920, height: 1080, id: 2,
+                                   main: false)],
+            windows: [
+                window(1, "Terminal", "krd --wall --mock", 1440, 900),
+                window(2, "Safari", nil, 1600, 1200),   // the window server withheld it
+                window(3, "Notes", "日本語のタイトル — 会議メモ", 1200, 900),
+                window(4, "Figma", "🎨  landing  ·  export", 1280, 800),
+                window(5, "Xcode", "krd — Package.swift", 1728, 1117),
+                window(6, "Numbers", "Q4 予算.numbers", 1000, 1000),
+                window(7, "Slack", "#krd — the wall, twelve cards", 720, 1260),
+                window(8, "Preview", "design-overview.pdf", 2520, 1080),
+                window(9, "Mail", "Re: 114 — mock cannot reach the wall", 1100, 700),
+                window(10, "Simulator", "iPhone 15 — krd", 393, 852),
+                window(11, "Photoshop", "export — 4×5", 2000, 2500),
+                window(12, "Agent", "a window with no pixels to capture", 0, 0)
+            ]
+        )
+    }
+
     /// The display order: the menu-bar display first, then left to right by `frame.minX`.
     ///
     /// The index tie break is explicit rather than relying on `sorted` being stable: two screens

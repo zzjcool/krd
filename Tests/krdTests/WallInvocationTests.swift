@@ -425,3 +425,59 @@ final class ScaleTransportTests: XCTestCase {
         XCTAssertFalse(Desk.placeholderNeedsCellBox(placeholders: false, deviceCell: false))
     }
 }
+
+/// `--mock` used to be dropped in silence on the wall (issue #114). The parse is where the mode is
+/// decided, so the parse is where the truth is pinned — a pane cannot be asserted in a unit test,
+/// and "the flag says one thing, the branch does another" is how this bug survived.
+final class MockAndDevModeTests: XCTestCase {
+    func testTheMockMirrorDoesNotPretendToBeAWall() throws {
+        let options = try parseArguments(["krd", "--mock"])
+        XCTAssertTrue(options.mock)
+        XCTAssertFalse(options.wall,
+                       "the mock branch is the mirror; the stale `wall` is what switched --dev off")
+        XCTAssertFalse(try parseArguments(["krd", "--mirror", "--mock"]).wall)
+        XCTAssertFalse(try parseArguments(["krd", "--mock", "--dev"]).wall, "make dev-mock")
+    }
+
+    func testTheWallCanBeAskedForAndTheMockSuppliesItsWindowList() throws {
+        for argv in [["krd", "--wall", "--mock"], ["krd", "--mock", "--wall"], ["wall", "--mock"],
+                     ["krd", "--wall", "--mock", "--pane", "137x44"]] {
+            let options = try parseArguments(argv)
+            XCTAssertTrue(options.wall, "\(argv) is the wall")
+            XCTAssertTrue(options.mock, "\(argv) paints it from the fake list, not the screen")
+        }
+        // ...and the mirror stays one flag away, as it always was.
+        XCTAssertFalse(try parseArguments(["krd", "--wall", "--mock", "--mirror"]).wall)
+    }
+}
+
+/// The fake window list `--wall --mock` paints (`WallSource.mockModel`, issue #114). Its point is
+/// the §11.6 fixture work: the text layer's risky cases — page arithmetic over a long list, CJK and
+/// emoji titles, a title the window server withheld, a panel that cannot be captured — on a machine
+/// with no Screen Recording grant.
+final class WallMockModelTests: XCTestCase {
+    func testTheListReachesWhatAGrantFreeMachineCannot() {
+        let model = WallSource.mockModel()
+        XCTAssertEqual(model.displays.count, 2, "the stage pages too")
+        XCTAssertEqual(model.windows.count, 12, "a three-card-visible shelf: several pages of arithmetic")
+        XCTAssertEqual(model.displays.filter(\.main).count, 1)
+        XCTAssertTrue(model.windows.contains { ($0.title ?? "").isEmpty },
+                      "a withheld title draws `window N`")
+        XCTAssertTrue(model.windows.contains { ($0.title ?? "").contains("日本語") })
+        XCTAssertTrue(model.windows.contains { ($0.title ?? "").contains("🎨") },
+                      "a two-cell emoji in a truncated line")
+        XCTAssertTrue(model.windows.contains { $0.bounds.width < 1 || $0.bounds.height < 1 },
+                      "a window with no pixels is the mask")
+    }
+
+    func testTheStageCanBeCapturedAndTheIdsAreUnambiguous() {
+        let model = WallSource.mockModel()
+        XCTAssertNotEqual(model.displays[0].id, 0,
+                          "a display with id 0 has no picture: the stage would be a mask")
+        XCTAssertGreaterThan(model.displays[0].width, 0)
+        XCTAssertGreaterThan(model.displays[0].height, 0)
+        let ids = model.windows.map(\.windowID)
+        XCTAssertEqual(ids.count, Set(ids).count,
+                       "the fingerprint sums the ids: two equal ones would make it ambiguous")
+    }
+}

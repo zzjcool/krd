@@ -44,7 +44,8 @@ dev-stats: build
 	$(KRD) --selftest --dev --dev-panel stats $(CONFIG)
 
 # ScreenCaptureKit replaced by a desktop drawn in process: same tiles, same encoder, same
-# placements, same chrome -- no screen-recording permission and no end.
+# placements, same chrome -- no screen-recording permission and no end. (`--mock` alone is the
+# mock *mirror*; with `--wall` the same flag supplies the landing screen's window list.)
 dev-mock: build
 	$(KRD) --mock --dev $(MOCK_ARGS)
 

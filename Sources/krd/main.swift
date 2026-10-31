@@ -298,7 +298,9 @@ func usage() -> String {
                           the wall handed over, off for a mirror you started yourself
       --symbols <m>       the wall's glyphs: emoji (default) or ascii, for terminals that draw
                           ▲ ▣ ⤢ two cells wide
-      --mock              draw the desktop in process: no screen, no permission, runs forever
+      --mock              draw the desktop in process: no screen, no permission, runs forever.
+                          With --wall: a fake window list (12 cards, CJK/emoji titles, a withheld
+                          title, a mask, two displays) and pictures drawn in process
       --mock-size WxH     size of the generated desktop (default 1920x1200)
       --list              list displays and windows, then exit (--list --json: one object)
       -v, --version       print the version and exit
@@ -473,7 +475,11 @@ func doubleValue(_ flag: String, _ args: [String], _ i: inout Int, wants: String
 /// plus two overrides, i.e. exactly the shape that rots silently.
 func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options {
     var options = Options()
-    if invokedAsWall(argv.first ?? "") { options.wall = true }
+    // `--wall`/`--mirror`/`wall` are remembered *as typed* rather than as a final value: `--mock`
+    // decides the mode itself when nobody asked for the wall (issue #114), instead of leaving a
+    // stale `wall` that the branch below then disagrees with.
+    var wallPinned = false
+    if invokedAsWall(argv.first ?? "") { options.wall = true; wallPinned = true }
     let args = Array(argv.dropFirst())
     var i = 0
     while i < args.count {
@@ -496,6 +502,7 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             // Naming one window to mirror is a request for the mirror, never for the wall.
             options.windowQuery = try value("--window", args, &i)
             options.wall = false
+            wallPinned = false
         case "--zoom":
             // As with `--fps`: a parseable value keeps its old meaning (`zoomScale` treats anything
             // below 1 as 1), so only "not a number" is refused.
@@ -656,8 +663,8 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             options.mockSize = (parts[0], parts[1])
         case "--no-chrome": options.noChrome = true
         // The default since phase 4; kept because scripts and muscle memory spell it.
-        case "--wall": options.wall = true
-        case "--mirror": options.wall = false
+        case "--wall": options.wall = true; wallPinned = true
+        case "--mirror": options.wall = false; wallPinned = false
         case "--bar": options.bar = true
         case "--no-bar": options.bar = false
         case "--wall-at":
@@ -700,6 +707,14 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
     if let eager = options.eagerOverride {
         options.quality = QualityBudget(options.quality.value, eager: eager)
     }
+    // The mode, decided once, after every flag has been read — so no flag's *position* can change
+    // what the flag means.
+    //
+    // `--mock` is the mock *mirror* unless the wall was asked for, in which case it supplies the
+    // wall's window list (`WallSource.mockModel`, issue #114). The flag has to agree with the branch
+    // `Desk.run()` will take: while it did not, `krd --mock` ran the mock mirror with `wall` still
+    // true, i.e. a session that believed it was a wall.
+    if options.mock && !wallPinned { options.wall = false }
     return options
 }
 
@@ -949,6 +964,11 @@ final class Desk {
     /// `--demo`'s window list is four constants (`WallSource.demoModel`): it cannot move, so its
     /// fingerprint is a constant and the poll costs a comparison instead of a window-server call.
     private static let demoFingerprint = WallFingerprint(windows: WallSource.demoModel().windows.count,
+                                                          ids: 0, frontmost: 0, displays: [])
+    /// `--mock`'s list is a constant for the same reason (`WallSource.mockModel`, issue #114): a
+    /// fake window list that the poll had to enumerate would be a wall that reads the real world
+    /// to discover its own fixtures did not move.
+    private static let mockFingerprint = WallFingerprint(windows: WallSource.mockModel().windows.count,
                                                           ids: 0, frontmost: 0, displays: [])
     /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
     /// answer to "would the wall look different?".
@@ -1259,7 +1279,10 @@ final class Desk {
             return
         }
 
-        if options.mock {
+        // `!options.wall`: with the wall *asked for*, `--mock` is not the mock mirror — it supplies
+        // the landing screen's window list instead (`WallSource.mockModel`, issue #114), and the
+        // branch below is the one that runs. `parseArguments` settles which of the two it is.
+        if options.mock, !options.wall {
             if let cell = options.cell { TermGeometry.fallbackCell = cell }
             let queried = TermGeometry.query()
             var geometry = queried ?? TermGeometry.read()
@@ -1605,7 +1628,11 @@ final class Desk {
         let pane = PaneGeometry.measure(cell: options.cell, grid: options.pane,
                                         dpr: options.dpr, askTerminal: false) { Log.write($0) }
         wallPane = pane
-        WallPictures.demo = options.demo
+        // `--mock` draws its pictures in process for the same reason `--demo` does: there is no
+        // screen behind a fake window list, so the panel's pixels come from the pattern at the
+        // panel's own size (issue #114). Everything downstream — quantisation, placement, zlib,
+        // the text layer — is the real path.
+        WallPictures.demo = options.demo || options.mock
         WallPictures.square = options.square
         WallPictures.quality = options.wallQuality
         // One line, because this knob moves a byte count nobody can see: `--wall-quality 100` is how a
@@ -1858,14 +1885,14 @@ final class Desk {
         // where it can only be a way for the wall to show nothing. So a gated trigger pays it first,
         // and an enumerating trigger reads its baseline *after* the paint it caused.
         let gated = trigger.gatesOnFingerprint
-        let fingerprint = gated ? (options.demo ? Self.demoFingerprint : timedFingerprint()) : nil
+        let fingerprint = gated ? (fakeFingerprint ?? timedFingerprint()) : nil
         if let fingerprint, !force,
            !WallRefresh.shouldEnumerate(trigger, now: fingerprint, drawn: wallFingerprint) {
             return
         }
         if let fingerprint { wallFingerprint = fingerprint }
         // The one enumeration in the wall, and it is counted: an idle wall's count must not move.
-        let model = options.demo ? WallSource.demoModel() : WallSource.model()
+        let model = fakeModel ?? WallSource.model()
         wallEnumerations += 1
         if options.debug {
             Log.write("krd: wall enumeration \(wallEnumerations) (trigger "
@@ -1873,7 +1900,7 @@ final class Desk {
         }
         guard WallRefresh.needsRepaint(current: model, drawn: wallModel, pane: pane,
                                        drawnPane: wallPane, force: force) else {
-            if !gated { wallFingerprint = options.demo ? Self.demoFingerprint : timedFingerprint() }
+            if !gated { wallFingerprint = fakeFingerprint ?? timedFingerprint() }
             return
         }
         wallModel = model
@@ -1882,7 +1909,24 @@ final class Desk {
         // The poll's baseline, taken *after* the paint was started: a fingerprint in front of a paint
         // is an extra window-server round trip on the wall's slowest path, and the first paint is the
         // one place it could mean "no wall at all".
-        if !gated { wallFingerprint = options.demo ? Self.demoFingerprint : timedFingerprint() }
+        if !gated { wallFingerprint = fakeFingerprint ?? timedFingerprint() }
+    }
+
+    /// The world this wall paints, when a flag supplies it instead of the window server. `--mock`
+    /// is the fake *window list* (`WallSource.mockModel`, issue #114), `--demo` the four demo
+    /// windows; both are constants, need no grant and read no window server, which is what makes
+    /// their fingerprint a constant too. `--mock` wins if both are typed: the list is the fixture
+    /// (twelve cards, CJK, a withheld title, a mask), the pattern is the picture.
+    private var fakeModel: WallModel? {
+        if options.mock { return WallSource.mockModel() }
+        if options.demo { return WallSource.demoModel() }
+        return nil
+    }
+
+    private var fakeFingerprint: WallFingerprint? {
+        if options.mock { return Self.mockFingerprint }
+        if options.demo { return Self.demoFingerprint }
+        return nil
     }
 
     /// `WallSource.fingerprint()` with its own cost on the debug log. "Well under the old 1.24 ms per
