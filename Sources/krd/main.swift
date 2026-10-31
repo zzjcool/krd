@@ -1407,6 +1407,7 @@ final class Desk {
         applyLayout(geometry: geometry)
         guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
 
+        prepareGraphemeMode()
         let writer = self.writer
         // A stream that stops by itself is not fatal and must not be silent: restart it, at most
         // 5 times with backoff, and say so in the log each time.
@@ -1591,6 +1592,7 @@ final class Desk {
         stateLock.lock()
         viewport = Viewport(pixelWidth: 0, pixelHeight: 0, cols: 0, rows: 0, sourceRect: .zero)
         stateLock.unlock()
+        prepareGraphemeMode()
         writer.beginSession()
         // Drop every image the terminal still holds, not just the text: the pane this wall lands on
         // may be one a mirror was just exec'ed out of (the `[ - ]` button, `Ctrl-\`), and a kitty
@@ -2333,6 +2335,32 @@ final class Desk {
         return arguments
     }
 
+    /// One question per process, before the first cell: which grapheme-clustering mode (`DECRQM`
+    /// 2027) did this terminal start in, and does the session have to turn it on?
+    ///
+    /// The two terminals this is tested against disagree here, which is the whole point: Ghostty
+    /// 1.4.0 answers `1` (**set**, permanently) and Rex answers `2` (recognized, reset). With it set
+    /// the *terminal* decides where a grapheme cluster ends, so `☰` and a flag occupy the cells their
+    /// glyph does; with it reset every code point is laid out alone and a flag is two letters. A
+    /// terminal that says `2` gets it turned on for this session and turned off again on the way out
+    /// (`ScreenWriter.restoreGraphemeMode`); one that says `1` is left alone in both directions,
+    /// because the mode is the pane's and outlives us.
+    ///
+    /// Silent where there is no terminal to ask: `--bench`, `--selftest` and the listing modes own
+    /// stdout and read nothing from stdin, and a probe that reads stdin there would eat their input.
+    private func prepareGraphemeMode() {
+        guard isatty(STDIN_FILENO) != 0,
+              !(options.bench || options.selftest || Self.listsOnly(options)) else { return }
+        let start = TermGeometry.query2027()
+        writer.graphemeClustering = start == 2 ? .enableAndReset : .leave
+        let answer = start.map { String($0) } ?? "no answer"
+        let action = writer.graphemeClustering == .enableAndReset
+            ? "on for this session, off on the way out"
+            : "left as the terminal had it"
+        // One line, because the mode moves where every glyph lands and nothing else would say so.
+        Log.write("krd: grapheme clustering (2027) was \(answer) — \(action)\n")
+    }
+
     /// Hand the pane over: stop owning it, then replace this process with the mirror.
     ///
     /// `writer.clear()` is not cleanup, it is the picture: the wall's kitty placements belong to this
@@ -2353,6 +2381,12 @@ final class Desk {
         // In the log and never on the pane: a report of "clicking that card does nothing" is
         // answerable with what was asked for plus what the mirror said on its way back.
         Log.write("krd: handing the pane to krd \(arguments.joined(separator: " "))\n")
+        // Before the `exec`, not in a teardown: `endSession` is never called here (the mirror wants
+        // the alternate screen we are already on), so this is the last chance to give back a mode the
+        // terminal had off. The next process probes 2027 itself and would otherwise read *our*
+        // `?2027h` back as the terminal's own state, and turn it off on the way out of a pane that
+        // never had it off.
+        writer.restoreGraphemeMode()
         Self.execSelf(arguments)
         // Only on failure to exec (no image, no permission): the wall is the thing that can still be
         // shown, so it comes back with the reason in its footer.
