@@ -769,8 +769,10 @@ final class WallLayoutTests: XCTestCase {
     }
 
     /// The bar is a scrollbar, not a slider: clicking the shaft puts the thumb where the click was.
+    /// A one-cell shaft is the degenerate end of that: its thumb can only put the segment back
+    /// where it already is (issue #135).
     func testThumbAndJumpAreInverse() {
-        // 137x44, per 3: a 13-row card segment is an 11-cell shaft, and 9 windows are 7 positions,
+        // 137x44, per 3: a 10-row card segment is an 8-cell shaft, and 9 windows are 7 positions,
         // so every start is representable. (The shaft used to be one cell longer; the gap between
         // the cards took that row, which is why this case asks for 9 windows and not 14.)
         for start in 0...6 {
@@ -783,7 +785,7 @@ final class WallLayoutTests: XCTestCase {
             XCTAssertEqual(seg.jumpTarget(shaftOffset: thumb - seg.rect.row - 1), start,
                            "start \(start): thumb -> jump -> start")
         }
-        // Stage: 22 shaft cells for 3 displays.
+        // Stage: 25 shaft cells for 3 displays.
         for start in 0...2 {
             let seg = layout(137, 44, stageStart: start).bar.stage
             XCTAssertEqual(seg.start, start)
@@ -803,12 +805,34 @@ final class WallLayoutTests: XCTestCase {
         // Nothing to show: no thumb at all.
         XCTAssertNil(layout(137, 44, windows: 3, per: 3, displays: 1).bar.stage.thumbRow())
         XCTAssertNil(layout(137, 44, windows: 3, per: 3).bar.cards.thumbRow())
-        // A shaft of exactly one cell can only show the top of the track; two rows have none.
-        // A 8-row pane leaves a budget of 3 rows, which is the smallest stage the layout draws.
-        let oneCell = layout(137, 8, windows: 14, per: 3).bar.stage
-        XCTAssertEqual(oneCell.rect.rows, 3)
-        XCTAssertEqual(oneCell.thumbRow(), oneCell.rect.row + 1)
-        XCTAssertEqual(oneCell.jumpTarget(shaftOffset: 0), 0)
+        // A shaft of exactly one cell cannot tell two positions apart — the thumb is drawn in that
+        // one cell for *every* `start` — so the click on it keeps the position the thumb shows
+        // instead of going anywhere. Pinned as `== 0` before issue #135, which was the defect
+        // written down as intent: on both segments the thumb was a "go to the first page" button.
+        // Both segments, on the smallest bands the layout draws and *not* on their first page, so a
+        // `0` cannot pass by being the start: a 3-row stage (137x8 leaves a budget of 3 rows) with
+        // the last display up, and a 3-row card band (24x17 with 7 windows, one to a page) on the
+        // last page.
+        let oneCellStage = layout(137, 8, windows: 14, per: 3, stageStart: 2)
+        XCTAssertEqual(oneCellStage.stageStart, 2)
+        let stageShaft = oneCellStage.bar.stage
+        XCTAssertEqual(stageShaft.rect.rows, 3)
+        XCTAssertEqual(stageShaft.thumbRow(), stageShaft.rect.row + 1)
+        XCTAssertEqual(stageShaft.jumpTarget(shaftOffset: 0), stageShaft.start,
+                       "a one-cell shaft keeps the display it is showing")
+        XCTAssertEqual(oneCellStage.action(row: stageShaft.rect.row + 1, col: oneCellStage.barCol),
+                       .stageJump(2), "…and the click route answers what the thumb shows")
+
+        let oneCellCards = layout(24, 17, windows: 7, per: 1, cardStart: 6)
+        XCTAssertEqual(oneCellCards.cardStart, 6)
+        let cardShaft = oneCellCards.bar.cards
+        XCTAssertEqual(cardShaft.rect.rows, 3)
+        XCTAssertEqual(cardShaft.thumbRow(), cardShaft.rect.row + 1)
+        XCTAssertEqual(cardShaft.jumpTarget(shaftOffset: 0), cardShaft.start,
+                       "a one-cell shaft keeps the page it is showing")
+        XCTAssertEqual(oneCellCards.action(row: cardShaft.rect.row + 1, col: oneCellCards.barCol),
+                       .cardJump(6), "…and the click route answers what the thumb shows")
+
         XCTAssertNil(layout(137, 7, windows: 14, per: 3).bar.stage.thumbRow(), "two rows are arrows only")
     }
 

@@ -111,6 +111,9 @@ place**.
 - **Inside a segment**: `▲` on the first cell, `▼` on the last, `│` between with one `█` thumb whose position is
   current / total.
 - Clicking a `│` jumps proportionally; `▲`/`▼` moves one step (one screenful when `scroll = page`).
+- **A segment only three rows tall has one cell between its arrows**, and one cell cannot hold a position:
+  the `█` is drawn there whatever page you are on, so a click on it keeps that page. The bar answers for the
+  cell it is drawn on - a cell that says "you are here" must not jump to the start.
 - With a single display, or fewer windows than fit, the segment becomes one continuous dim `│` and **draws no grey
   arrows** - an arrow that cannot do anything is a lie about where the live cells are. Nothing to scroll should
   not look clickable (that is what `WallCanvas.drawSegment` does).

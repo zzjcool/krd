@@ -444,6 +444,63 @@ final class WallCanvasTests: XCTestCase {
         }
     }
 
+    // MARK: a segment with one shaft cell (issue #135)
+
+    /// A 3-row segment is `▲`, one `█`, `▼`: the thumb really is drawn in the segment's only shaft
+    /// cell, so the bar says "you are here" — and a click on that cell has to keep the position it
+    /// shows, not answer page 0 (on every pane whose card band or stage band is exactly 3 rows that
+    /// is what it did before #135). Pinned at the glyph, at the hit table and through `WallState`,
+    /// because the layout payload alone would still pass if the painter stopped drawing the thumb
+    /// the click is agreeing with.
+    func testAOneCellShaftDrawsTheThumbTheClickKeeps() {
+        let model = model()                                  // 7 windows, 3 displays
+
+        // The card band: 24x17 with one card to a row is 3 rows, and the shelf is on its last page
+        // (6 = maxStart), so "the page the thumb shows" and "the first page" differ.
+        var cards = fixtureState()
+        cards.per = 1
+        cards.cardStart = 6
+        let cardsLayout = makeLayout(cards, cols: 24, rows: 17, model)
+        let cardSegment = cardsLayout.bar.cards
+        XCTAssertEqual(cardSegment.rect.rows, 3, "24x17, one card to a row: a 3-row card band")
+        XCTAssertEqual(cardSegment.maxStart, 6, "…and the shelf is on its last page")
+        for symbols in WallSymbols.allCases {
+            let lines = WallCanvas(symbols: symbols).lines(cols: 24, rows: 17, model: model,
+                                                           layout: cardsLayout, focus: nil)
+            XCTAssertEqual(lines[cardSegment.rect.row - 1].last, symbols.up.first,
+                           "\(symbols.rawValue): the segment's top cell is the arrow")
+            XCTAssertEqual(lines[cardSegment.rect.row].last, symbols.thumb.first,
+                           "\(symbols.rawValue): the thumb is drawn in the only shaft cell")
+            XCTAssertEqual(lines[cardSegment.rect.maxRow - 1].last, symbols.down.first,
+                           "\(symbols.rawValue): the segment's bottom cell is the arrow")
+        }
+        let cardClick = cardsLayout.action(row: cardSegment.rect.row + 1, col: cardsLayout.barCol)
+        XCTAssertEqual(cardClick, .cardJump(6), "the thumb's cell answers with the page it shows")
+        cards.apply(cardClick!, displays: model.displays.count, windows: model.windows.count,
+                    capacity: cardsLayout.capacity)
+        XCTAssertEqual(cards.cardStart, 6, "…and the click does not move the shelf")
+
+        // The stage: a pane too short for a card band (24x8) hands the whole budget to the stage,
+        // so the upper segment has one shaft cell too.
+        var stage = fixtureState()
+        stage.stageStart = 2
+        let stageLayout = makeLayout(stage, cols: 24, rows: 8, model)
+        let stageSegment = stageLayout.bar.stage
+        XCTAssertEqual(stageSegment.rect.rows, 3, "24x8: the stage is the whole 3-row budget")
+        XCTAssertEqual(stageSegment.maxStart, 2, "…and the last display is up")
+        for symbols in WallSymbols.allCases {
+            let lines = WallCanvas(symbols: symbols).lines(cols: 24, rows: 8, model: model,
+                                                           layout: stageLayout, focus: nil)
+            XCTAssertEqual(lines[stageSegment.rect.row].last, symbols.thumb.first,
+                           "\(symbols.rawValue): the stage's thumb is in its only shaft cell")
+        }
+        let stageClick = stageLayout.action(row: stageSegment.rect.row + 1, col: stageLayout.barCol)
+        XCTAssertEqual(stageClick, .stageJump(2), "the stage's thumb answers with the display it shows")
+        stage.apply(stageClick!, displays: model.displays.count, windows: model.windows.count,
+                    capacity: stageLayout.capacity)
+        XCTAssertEqual(stage.stageStart, 2, "…and the click does not move the stage")
+    }
+
     // MARK: a band that holds more than one row of cards (issue #83)
 
     /// The reporter's pane: 118x73, a 17x33 cell, a 16:10 display. The band holds two rows of three
