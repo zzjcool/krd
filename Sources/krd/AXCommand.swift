@@ -4,10 +4,20 @@
 // and prints text. It runs as its own process, so an agent drives it the same way it
 // drives any other CLI: one command, one result, exit code.
 //
-// The preflight is deliberately first and loud. Two different failures look identical
-// from the outside (an empty tree and "you never granted anything"), and the difference
-// costs users an hour, so the check runs before any command does anything.
-// See docs/research-ax-text-channel.md §2.2 for the measurements behind it.
+// The diagnosis is deliberately loud. Two different failures look identical from the outside
+// (an empty tree and "you never granted anything"), and the difference costs users an hour, so
+// either report is preceded by the check -- but the check is made when a verb has something to
+// report, not before every verb does anything: the grant, the window list and the systemwide
+// round trip cost ~50 ms of setting up two connections, and a successful `tree` pays none of it
+// (issue #103). See docs/research-ax-text-channel.md §2.2 for the measurements.
+//
+// Where the guarantee went: every verb still exits 3 on an ungranted Mac and 4 on a Mac whose
+// window server does not answer, because a verb that failed, or that read nothing, asks for the
+// diagnosis and the answer it gets is the same sentence (and the same code) the preflight used to
+// throw up front. `dispatch(_:_:diagnose:_:)` is the only path that decides it, and it **asks at
+// most once per process**: the verb's own question and the decision that follows its failure are
+// the same question about the same Mac, and asking it twice is what made the deferred preflight
+// slower than the eager one it replaced (issue #103 review).
 
 import AppKit
 import ApplicationServices
@@ -41,6 +51,28 @@ enum AXFailure: Error {
         case .environment: return .environment
         case .notFound: return .notFound
         case .notActionable: return .notActionable
+        }
+    }
+
+    /// Whether a missing Accessibility grant (or a window server that stopped answering) could
+    /// have produced this failure. Only failures that answer "yes" are worth the ~50 ms
+    /// diagnosis: `usage` was decided before any accessibility call was made, so it is the one
+    /// code that cannot be a grant.
+    ///
+    /// `notFound` and `notActionable` are both in, and both for the same reason: a dead element
+    /// does not say "I am dead", it answers **nothing**.
+    ///
+    /// - "Nothing matched" is exactly what an ungranted Mac says about every query, every app and
+    ///   every ref, so a 5 that was really a 3 is the one mis-diagnosis that costs a user an hour.
+    /// - A revoked grant plus a ref from a persisted snapshot gets to `press`/`set` as an element
+    ///   whose chain is empty and which answers no actions, which reads as "this node refuses"
+    ///   (`notActionable`, 6) when the truth is "this Mac refuses" (3). It cannot be told apart
+    ///   from a real refusal without asking, so it is asked; a genuine refusal on a granted Mac
+    ///   still exits 6, it just pays the measurement to prove it.
+    var mayBeTheGrant: Bool {
+        switch self {
+        case .permission, .environment, .notFound, .notActionable: return true
+        case .usage: return false
         }
     }
 }
@@ -152,12 +184,30 @@ struct AXOptions {
     var text: String?
 }
 
-/// What the preflight learned. Also the body of `krd ax doctor`.
-struct AXProbe {
-    var trusted: Bool
-    var onScreenWindows: Int
-    var answers: Bool
-    var error: AXError
+/// What the three preflight answers can mean, as a value.
+///
+/// The preflight used to ask its three questions before every verb and turn "no" into an exit
+/// code inline (issue #103). The questions still get asked -- of a verb that failed, or read
+/// nothing -- and this is where their answers become a decision, so the mapping is a unit test
+/// (`AXPreflightVerdictTests`) instead of something a grant-less machine cannot exercise.
+///
+/// The cases are the two codes `krd ax doctor` exits on a red diagnosis (3, 4) plus the green
+/// one: there is no fourth answer, and adding one here without a code in `usage()` would be a
+/// contract change, not a refinement.
+enum AXReadiness: Equatable {
+    /// Granted, and the accessibility API answers: nothing to say about this Mac.
+    case ready
+    /// No grant for this binary → exit 3, `permissionText`.
+    case untrusted
+    /// Granted, but the window server does not answer → exit 4, `environmentText`.
+    case notAnswering
+
+    /// The whole decision, in one place. `answers` is what the systemwide round trip said
+    /// (`success`, `noValue` and `attributeUnsupported` all mean "the API is alive").
+    static func of(trusted: Bool, answers: Bool) -> AXReadiness {
+        if answers { return .ready }
+        return trusted ? .notAnswering : .untrusted
+    }
 }
 
 /// What `krd ax doctor` measured, split from the accessibility calls that measured it, so the
@@ -172,21 +222,33 @@ struct AXDiagnosis {
     var retried: Bool
     var sample: String
 
+    /// The verdict the preflight used to throw on, read off the measurement.
+    var readiness: AXReadiness { AXReadiness.of(trusted: trusted, answers: answers) }
+
     /// A red diagnosis is not a successful run, and `--json` does not change that: 3 when the
     /// grant is missing, 4 when the accessibility API does not answer.
-    var exit: AXExit { answers ? .ok : (trusted ? .environment : .permission) }
+    var exit: AXExit {
+        switch readiness {
+        case .ready: return .ok
+        case .untrusted: return .permission
+        case .notAnswering: return .environment
+        }
+    }
 
     /// The failure a red diagnosis reports -- the same sentences text mode prints, so the two
     /// surfaces cannot drift apart, and nil on a green Mac.
     var failure: AXFailure? {
-        if answers { return nil }
         // The AXError that measured red rides along in `ax` in both branches, so a caller loses
         // nothing by reading `.error.ax` instead of the string the old `error` field held.
-        if !trusted {
+        switch readiness {
+        case .ready:
+            return nil
+        case .untrusted:
             return .permission(AXCommand.permissionText, ax: AXCommand.axErrorName(final))
+        case .notAnswering:
+            return .environment(AXCommand.environmentText(error: final),
+                                ax: AXCommand.axErrorName(final))
         }
-        return .environment(AXCommand.environmentText(error: final),
-                            ax: AXCommand.axErrorName(final))
     }
 }
 
@@ -220,17 +282,14 @@ enum AXCommand {
         do {
             let options = try parse(args)
             requestedJSON = options.json
-            switch options.verb {
-            case "windows": exit(try windows(options))
-            case "tree": exit(try tree(options))
-            case "screen": exit(try screen(options))
-            case "doctor": exit(try doctor(options))
-            case "find": exit(try find(options))
-            case "press": exit(try press(options))
-            case "set": exit(try set(options))
-            default:
+            // One funnel, no literals: whether a verb is staged, and whether it may be retried,
+            // is `plan(for:)` -- a value the tests read. Every verb but `doctor` is staged,
+            // because `dispatch` is the one place that decides, after the fact, whether a failure
+            // was the Mac's fault (exit 3 / 4) or the verb's.
+            guard let plan = plan(for: options.verb), let body = body(for: options.verb) else {
                 throw AXFailure.usage("unknown command \"\(options.verb)\" (try `krd ax --help`)")
             }
+            exit(try dispatch(plan, options, body))
         } catch let failure as AXFailure {
             exit(fail(failure, json: requestedJSON))
         } catch {
@@ -449,51 +508,152 @@ enum AXCommand {
         """
     }
 
-    // MARK: - preflight
+    // MARK: - the diagnosis, on demand
 
-    /// Run the checks and translate a failure into something the user can act on.
+    /// The process-wide messaging timeout, and nothing else.
     ///
-    /// The warm-up is load-bearing: a process in an ssh (Background) session gets
-    /// `cannotComplete` on its first accessibility call and succeeds on a retry made
-    /// after it has touched the window server. Retrying here means "cannotComplete"
-    /// that reaches the user is a real problem, not startup noise.
-    static func preflight(_ options: AXOptions) throws -> AXProbe {
-        if options.prompt {
-            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-            _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        }
+    /// The preflight set this up because it was already holding a systemwide element; skipping
+    /// the preflight must not skip *this*, because the default ~6 s per IPC turns one hung app
+    /// into a hung CLI and every element the walk creates inherits the setting. It costs no round
+    /// trip: `AXUIElementCreateSystemWide` hands back a local proxy and the timeout is stored on
+    /// the process, not read from the window server (Apple's own contract: setting it on the
+    /// system-wide element is the only way to bound every element, and is why it is here).
+    static func configure() {
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.5)
+    }
+
+    /// Every question the preflight asked, measured once, in the order it asked them.
+    ///
+    /// This is the ~50 ms the issue measured (8 ms trust + 22–28 ms window list + 17.5–20.5 ms
+    /// first round trip) and the reason it is no longer on the success path: two of the three
+    /// results exist only to spell a failure message. `doctor` reports the measurement; a failed
+    /// or empty verb reads `.readiness` off it and throws if the Mac is the reason.
+    ///
+    /// The warm-up stays: a process in an ssh (Background) session gets `cannotComplete` on its
+    /// first accessibility call and succeeds on a retry made after it has touched the window
+    /// server, so the window list is read first and the round trip is retried once after 120 ms.
+    /// A diagnosis that survives the retry is a real problem, not startup noise.
+    static func measure() -> AXDiagnosis {
         let trusted = AXIsProcessTrusted()
         let onScreen = (CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]])?.count ?? -1
 
-        // One process-wide timeout, set on the system-wide element: per Apple's contract
-        // that is the only way to bound every element the walk creates. The default is
-        // ~6 s, which turns one hung app into a hung CLI.
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 1.5)
 
         var answer: AnyObject?
-        var error = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &answer)
-        if error == .cannotComplete {
+        let first = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &answer)
+        var second: AXError?
+        if first == .cannotComplete {
             usleep(120_000)
-            answer = nil
-            error = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &answer)
+            second = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &answer)
         }
-        let answers = error == .success || error == .noValue || error == .attributeUnsupported
-        let probe = AXProbe(trusted: trusted, onScreenWindows: onScreen, answers: answers, error: error)
-        try require(probe)
-        return probe
+        let final = second ?? first
+        let answers = final == .success || final == .noValue || final == .attributeUnsupported
+
+        var sample = "-"
+        if answers, let app = asElement(answer) {
+            let title = AXText.sanitize(text(app, kAXTitleAttribute), limit: 60)
+            let windows = (value(app, kAXWindowsAttribute) as? [AXUIElement])?.count ?? 0
+            sample = "\(title.isEmpty ? "(untitled)" : title), \(windows) window(s)"
+        }
+
+        return AXDiagnosis(trusted: trusted, onScreenWindows: onScreen, answers: answers,
+                           first: first, final: final, retried: second != nil, sample: sample)
     }
 
-    static func require(_ probe: AXProbe) throws {
-        if probe.answers { return }
-        if !probe.trusted {
-            // The AXError rides along even here: on an untrusted Mac the call was made and it
-            // returned something (`cannotComplete`), and the old `doctor` JSON reported it.
-            throw AXFailure.permission(permissionText, ax: axErrorName(probe.error))
+    /// How one verb reaches its exit code, as a value.
+    ///
+    /// `main()` used to spell this out as six `staged(…, retrying: …)` literals, which is a table
+    /// only a human could check -- and one row of it (`windows` not retrying, `screen` retrying)
+    /// was wrong for a while because nobody could. The table is now `plan(for:)`, a pure function,
+    /// and `AXPreflightTests` reads it.
+    struct AXPlan: Equatable {
+        /// Whether the verb runs under `dispatch`, which is the only place a failure becomes 3 / 4.
+        /// Only `doctor` is out: it reports the diagnosis instead of failing on it.
+        var staged: Bool = true
+        /// Whether a green diagnosis plus an environment failure runs the body once more. Reads
+        /// only -- an `AXPress` that returned `cannotComplete` may have landed.
+        var retrying: Bool
+
+        static let read = AXPlan(staged: true, retrying: true)
+        static let write = AXPlan(staged: true, retrying: false)
+        static let direct = AXPlan(staged: false, retrying: false)
+    }
+
+    /// The one table: verb → how it is run. `nil` is not a verb (`usage`, exit 2).
+    static func plan(for verb: String) -> AXPlan? {
+        switch verb {
+        case "windows", "screen", "tree", "find": return .read
+        case "press", "set": return .write
+        case "doctor": return .direct
+        default: return nil
         }
-        throw AXFailure.environment(environmentText(error: probe.error),
-                                    ax: axErrorName(probe.error))
+    }
+
+    /// A verb's work, and the preflight's question handed to it for the rare case it cannot tell
+    /// "nothing to report" from "nothing was ever read".
+    typealias AXBody = (AXOptions, () throws -> Void) throws -> Int32
+
+    /// verb → its work. Separate from `plan(for:)` so the two can be checked against each other:
+    /// every planned verb has a body, every body has a plan.
+    static func body(for verb: String) -> AXBody? {
+        switch verb {
+        case "windows": return { try windows($0, ready: $1) }
+        case "screen": return { try screen($0, ready: $1) }
+        case "tree": return { options, _ in try tree(options) }
+        case "find": return { options, _ in try find(options) }
+        case "press": return { options, _ in try press(options) }
+        case "set": return { options, _ in try set(options) }
+        case "doctor": return { options, _ in try doctor(options) }
+        default: return nil
+        }
+    }
+
+    /// Run one verb with the guarantee the preflight gave, paying for it only when it buys
+    /// something.
+    ///
+    /// A successful answer is returned untouched and costs no diagnosis. A failure is diagnosed
+    /// only when a missing grant could have produced it (`usage` was decided before any
+    /// accessibility call), because the alternative is the hour-long confusion the loud preflight
+    /// existed to prevent: an ungranted Mac saying "nothing matched" about everything, at exit 5.
+    ///
+    /// **The measurement runs at most once per process.** `ready()` is the same question `dispatch`
+    /// asks about a caught failure, so the answer is kept and the second asker is free; without
+    /// that, a verb that asked and threw (`windows` with nothing to report on an ungranted Mac)
+    /// paid twice -- 286 ms of diagnosis became 451 ms, which is worse than the preflight this
+    /// replaced (issue #103 review). Nothing here can go stale: one process, one answer, exit.
+    ///
+    /// A *green* diagnosis plus an environment failure is startup noise, so the body is run a
+    /// second time -- `measure()` has just touched the window server, which is exactly the retry
+    /// the preflight used to make up front.
+    static func dispatch(_ plan: AXPlan, _ options: AXOptions,
+                         diagnose: @escaping () -> AXDiagnosis = measure,
+                         _ body: AXBody) throws -> Int32 {
+        if options.prompt {
+            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        }
+        configure()
+        // `doctor` reports a diagnosis; it is not run under the decision that produces one.
+        guard plan.staged else { return try body(options, {}) }
+
+        var asked: AXDiagnosis?
+        /// Throws the canonical 3 / 4 when the Mac is the reason, and returns when it is not, so
+        /// "nothing matched" keeps its own code. Asked at most once per process.
+        let ready: () throws -> Void = {
+            if asked == nil { asked = diagnose() }
+            if let reason = asked?.failure { throw reason }
+        }
+
+        do {
+            return try body(options, ready)
+        } catch let failure as AXFailure where failure.mayBeTheGrant {
+            try ready()
+            // Green: the Mac is fine, so the failure came from this process's own first call.
+            if plan.retrying, case .environment = failure { return try body(options, ready) }
+            throw failure
+        }
     }
 
     static var executablePath: String {
@@ -558,32 +718,10 @@ enum AXCommand {
 
     static func doctor(_ options: AXOptions) throws -> Int32 {
         // doctor reports instead of throwing, so it stays useful exactly when the other
-        // commands cannot run at all.
-        let trusted = AXIsProcessTrusted()
-        let onScreen = (CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]])?.count ?? -1
-        let system = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(system, 1.5)
-        var answer: AnyObject?
-        let first = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &answer)
-        var second: AXError?
-        if first == .cannotComplete {
-            usleep(120_000)
-            second = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &answer)
-        }
-        let final = second ?? first
-        let answers = final == .success || final == .noValue || final == .attributeUnsupported
-
-        var sample = "-"
-        if answers, let app = asElement(answer) {
-            let title = AXText.sanitize(text(app, kAXTitleAttribute), limit: 60)
-            let windows = (value(app, kAXWindowsAttribute) as? [AXUIElement])?.count ?? 0
-            sample = "\(title.isEmpty ? "(untitled)" : title), \(windows) window(s)"
-        }
-
-        let report = doctorOutput(AXDiagnosis(
-            trusted: trusted, onScreenWindows: onScreen, answers: answers,
-            first: first, final: final, retried: second != nil, sample: sample))
+        // commands cannot run at all. It is also the one verb that pays for the whole
+        // measurement on the success path -- `onScreenWindows` is a field it prints and
+        // nothing else ever read (issue #103).
+        let report = doctorOutput(measure())
         if options.json {
             // Same writer as `fail()`, and stdout first: when a caller merges the two streams
             // (`2>&1`) the object must still be the first thing on the line it starts.
@@ -633,9 +771,10 @@ enum AXCommand {
                               json: json, exit: diagnosis.exit)
     }
 
-    static func windows(_ options: AXOptions) throws -> Int32 {
-        _ = try preflight(options)
-        let list = onScreenApps()
+    static func windows(_ options: AXOptions, ready: () throws -> Void) throws -> Int32 {
+        // One window list, once: the preflight read one and threw it away, and `onScreenApps`
+        // read another (issue #103).
+        let list = onScreenApps(windows: windowList())
         var rows: [AXWindowJSON] = []
         for app in list {
             let element = AXUIElementCreateApplication(app.pid)
@@ -647,10 +786,15 @@ enum AXCommand {
             }
         }
         if options.json {
+            // An empty list is the answer only if the Mac is answering: `--json` must not report
+            // zero windows on a Mac that never granted the read (exit 3), nor one whose window
+            // server is gone (exit 4). Same question the preflight asked, asked only here.
+            if rows.isEmpty { try ready() }
             print(jsonString(success(["windows": rows.map { $0.dictionary }])))
             return AXExit.ok.rawValue
         }
         if rows.isEmpty {
+            try ready()
             print("# no on-screen windows with an accessibility tree")
             return AXExit.ok.rawValue
         }
@@ -666,9 +810,8 @@ enum AXCommand {
         return AXExit.ok.rawValue
     }
 
-    static func screen(_ options: AXOptions) throws -> Int32 {
-        _ = try preflight(options)
-        let apps = onScreenApps()
+    static func screen(_ options: AXOptions, ready: () throws -> Void) throws -> Int32 {
+        let apps = onScreenApps(windows: windowList())
         var out: [String] = []
         var jsonApps: [[String: Any]] = []
         for app in apps {
@@ -706,6 +849,10 @@ enum AXCommand {
             focus = ["app": appName, "window": window, "role": focusedRole, "title": focusedTitle]
         }
         out.insert("# \(jsonApps.count) app(s) with on-screen windows", at: 0)
+        // Zero apps with a readable window is either the truth (a Mac with nothing on screen) or
+        // a read that never happened -- the same two failures the preflight separated, separated
+        // here because this is where the two are indistinguishable.
+        if jsonApps.isEmpty { try ready() }
         if options.json {
             print(jsonString(success(["apps": jsonApps, "focus": focus])))
         } else {
@@ -715,7 +862,6 @@ enum AXCommand {
     }
 
     static func tree(_ options: AXOptions) throws -> Int32 {
-        _ = try preflight(options)
         let app = try resolveApp(options)
         let element = AXUIElementCreateApplication(app.pid)
         let windows = (value(element, kAXWindowsAttribute) as? [AXUIElement]) ?? []
@@ -802,7 +948,6 @@ enum AXCommand {
     // MARK: - find
 
     static func find(_ options: AXOptions) throws -> Int32 {
-        _ = try preflight(options)
         let app = try resolveApp(options)
         let element = AXUIElementCreateApplication(app.pid)
         let windows = (value(element, kAXWindowsAttribute) as? [AXUIElement]) ?? []
@@ -1082,7 +1227,6 @@ enum AXCommand {
     // MARK: - press
 
     static func press(_ options: AXOptions) throws -> Int32 {
-        _ = try preflight(options)
         let resolved = try resolveRef(options)
         let actions = actionNames(resolved.element)
         let state = nodeState(resolved.element)
@@ -1142,7 +1286,6 @@ enum AXCommand {
     // MARK: - set
 
     static func set(_ options: AXOptions) throws -> Int32 {
-        _ = try preflight(options)
         guard let text = options.text else { throw AXFailure.usage("set needs --text <value>") }
         let resolved = try resolveRef(options)
         let state = nodeState(resolved.element)
@@ -1241,9 +1384,7 @@ enum AXCommand {
         var active: Bool
     }
 
-    static func onScreenApps() -> [RunningApp] {
-        let windows = (CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+    static func onScreenApps(windows: [[String: Any]]) -> [RunningApp] {
         var pids: [pid_t] = []
         for window in windows {
             guard let pid = window[kCGWindowOwnerPID as String] as? pid_t,
@@ -1257,6 +1398,16 @@ enum AXCommand {
                               bundle: app.bundleIdentifier ?? "",
                               active: app.isActive)
         }
+    }
+
+    /// The one `CGWindowListCopyWindowInfo` a verb needs, in the shape `onScreenApps` reads.
+    ///
+    /// First call in a process is 22–28 ms and the second identical one is 0.7–1 ms (issue #103),
+    /// so it is measured work, not enumeration: `windows` and `screen` used to pay for two of
+    /// them (preflight + `onScreenApps`) and now pay for one.
+    static func windowList() -> [[String: Any]] {
+        (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                    kCGNullWindowID) as? [[String: Any]]) ?? []
     }
 
     static func resolveApp(_ options: AXOptions) throws -> RunningApp {
