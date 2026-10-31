@@ -44,6 +44,11 @@ public struct RTTProbe: Equatable {
     public var p99Ms: Double { series.percentile(0.99) }
     public var p50Ms: Double { series.percentile(0.5) }
 
+    /// The frame path's lateness question about the link: "is the round trip bad enough that the next
+    /// frame should count as late" (#52, #187). Extracted from `main.swift`'s `noteFrame` so the rule
+    /// is pure arithmetic a test can drive; behaviour is unchanged for now.
+    public func isLate(budgetMs: Double) -> Bool { series.last > budgetMs }
+
     /// Should a probe be written now? A query only: pair it with `sent(at:)` once the bytes are out,
     /// so a probe that could not be written (a frame batch was open) is retried next tick.
     public func due(at now: Double) -> Bool {
