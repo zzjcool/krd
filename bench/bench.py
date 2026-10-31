@@ -231,7 +231,9 @@ def render(encode, wire, checks, previous, config, scale=1.0):
 
     add("## Encoder (L1)")
     add("")
-    add("The real tile pipeline on synthetic frames: dedupe → dirty → extract → zlib → base64 → escapes.")
+    add("The real tile pipeline on synthetic frames: dedupe → dirty → extract → heuristic → quantise →")
+    add("zlib (deflate) → base64 → escapes. `heuristic`, `quantise` and `zlib` are the three stages inside")
+    add("`compress`; `extract` and `base64` sit outside it.")
     add("Warm-up rounds discarded, p50/p99 over %d rounds. `wire` includes base64 and escapes."
         % head["config"]["rounds"])
     add("")
@@ -246,19 +248,21 @@ def render(encode, wire, checks, previous, config, scale=1.0):
     add("")
     add("Per stage, single-threaded reference run (3 attempts, best) against the parallel encode:")
     add("")
-    add("| case | extract | zlib | base64 | assemble | serial | parallel | speedup |")
-    add("|---|---:|---:|---:|---:|---:|---:|---:|")
+    add("| case | extract | heuristic | quantise | zlib | compress | base64 | assemble | serial | parallel | speedup |")
+    add("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for case in encode["cases"]:
         serial = dig(case, "ms.serial.p50") or 0
         parallel = dig(case, "ms.parallel.p50") or 0
         speedup = "%.1f×" % (serial / parallel) if parallel > 0 else "-"
-        add("| %s | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %s |" % (
-            case["name"], dig(case, "ms.extract.p50"), dig(case, "ms.zlib.p50"),
+        add("| %s | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %s |" % (
+            case["name"], dig(case, "ms.extract.p50"), dig(case, "ms.heuristic.p50"),
+            dig(case, "ms.quantise.p50"), dig(case, "ms.zlib.p50"), dig(case, "ms.compress.p50"),
             dig(case, "ms.base64.p50"), dig(case, "ms.assemble.p50"),
             serial, parallel, speedup))
     add("")
-    add("All times in ms. `extract` and `zlib` come from the serial reference (a per-tile timer")
-    add("inside `concurrentPerform` would need a lock); `total` is the live path: dirty + parallel + emit.")
+    add("All times in ms. `extract`, `heuristic`, `quantise`, `zlib` and `compress` come from the serial")
+    add("reference (a per-tile timer inside `concurrentPerform` would need a lock), so within one frame")
+    add("`heuristic` + `quantise` + `zlib` = `compress`; `total` is the live path: dirty + parallel + emit.")
     add("")
 
     if wire:

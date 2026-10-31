@@ -14,6 +14,18 @@ public struct EmitTiming {
     public init() {}
 }
 
+/// Per-tile split of `ScreenWriter.compress`, filled only when a bench asks for it (`timing:`
+/// non-nil) — the same pattern and the same reason as `EmitTiming`. The three stages are the ones
+/// the column used to hide under the name "zlib": the compressibility heuristic and the quantise
+/// pass are pixel work, only `deflateMs` is the compressor. Their sum is the whole call minus the
+/// arithmetic around them (issue #96).
+public struct CompressTiming {
+    public var heuristicMs = 0.0
+    public var quantiseMs = 0.0
+    public var deflateMs = 0.0
+    public init() {}
+}
+
 /// Turns pixel frames into kitty graphics escapes on the pty.
 ///
 /// One rule learned the hard way: never let the screen hold "no image" between two frames,
@@ -410,18 +422,41 @@ public final class ScreenWriter {
 
     public static func compress(index: Int, rect: TileRect, pixels: [UInt8],
                                 plan: LevelPolicy.Plan) -> CompressedTile? {
+        // `timing:` has no default on purpose: with a default the two overloads would be
+        // ambiguous at every existing call site. This wrapper is what keeps them compiling.
+        compress(index: index, rect: rect, pixels: pixels, plan: plan, timing: nil)
+    }
+
+    /// The real body. `timing` is written only when a bench asks for the per-stage split (issue
+    /// #96); the live path pays one nil check per tile, nothing else.
+    public static func compress(index: Int, rect: TileRect, pixels: [UInt8],
+                                plan: LevelPolicy.Plan,
+                                timing: UnsafeMutablePointer<CompressTiming>?) -> CompressedTile? {
         guard !pixels.isEmpty else { return nil }
         var pixels = pixels
         var quantised = false
+        // One `now` per stage, and only when a benchmark asked for the split: the live path pays
+        // one nil check per tile, nothing else (same pattern as `emitImage`).
+        var mark = 0.0
+        if timing != nil { mark = benchNowMs() }
         // Two ways to deal with content zlib cannot help with: the content became compressible
         // again (lossless, issue #53), or it stays incompressible long enough to quantise (#59).
-        // The predictor is what tells them apart, and it costs ~10 µs.
+        // The predictor is what tells them apart, and it costs ~10 µs. `timedCompressible` is the
+        // plain `looksCompressible` plus a clock write: the conditions below keep the shape they
+        // had (the `||` short circuit, both call sites), because neither the decisions nor the
+        // bytes may move for a timing column (issue #96).
         if plan.quantise, let bits = plan.bits,
-           plan.eager || !looksCompressible(pixels, rect: rect) {
+           plan.eager || !timedCompressible(pixels, rect: rect, timing: timing, mark: &mark) {
             pixels = quantise(pixels, bits: bits,
                               bytesPerPixel: max(3, pixels.count / max(1, rect.w * rect.h)))
             quantised = true
-        } else if plan.level <= 0 && !looksCompressible(pixels, rect: rect) {
+            if let timing {
+                let now = benchNowMs()
+                timing.pointee.quantiseMs += now - mark
+                mark = now
+            }
+        } else if plan.level <= 0 &&
+                  !timedCompressible(pixels, rect: rect, timing: timing, mark: &mark) {
             return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1, isCompressed: false)
         }
         // else: content is compressible after all -> fall through and compress losslessly
@@ -432,8 +467,9 @@ public final class ScreenWriter {
         // (5-6-5: 31,270 B against 37,905 B, -17.5%) and faster (0.70 ms against 1.1 ms) than
         // huffman-only. Huffman-only also broke the ladder's ordering: with every symbol coded
         // independently, 6-6-6 could come out cheaper than 5-6-5.
-        guard let payload = zlibCompress(pixels, level: level, huffmanOnly: false),
-              !payload.isEmpty else { return nil }
+        let deflated = zlibCompress(pixels, level: level, huffmanOnly: false)
+        if let timing { timing.pointee.deflateMs += benchNowMs() - mark }
+        guard let payload = deflated, !payload.isEmpty else { return nil }
         let ratio = Double(payload.count) / Double(pixels.count)
         if payload.count >= pixels.count {
             return CompressedTile(index: index, rect: rect, payload: pixels, ratio: 1,
@@ -441,6 +477,26 @@ public final class ScreenWriter {
         }
         return CompressedTile(index: index, rect: rect, payload: payload, ratio: ratio,
                               isQuantised: quantised)
+    }
+
+    /// `looksCompressible`, plus a clock write when a bench asked for the per-stage split.
+    ///
+    /// A wrapper instead of an inline `mark = benchNowMs()` because the predictor sits inside a
+    /// compound condition (`plan.eager || !looksCompressible(...)`), and hoisting it into a local
+    /// to time it there would have dropped the `||` short circuit and the second call the old body
+    /// made for a quantise-armed, level-0, compressible tile. Encoder decisions and bytes stay put
+    /// (issue #96).
+    @inline(__always)
+    private static func timedCompressible(_ pixels: [UInt8], rect: TileRect,
+                                          timing: UnsafeMutablePointer<CompressTiming>?,
+                                          mark: inout Double) -> Bool {
+        let compressible = looksCompressible(pixels, rect: rect)
+        if let timing {
+            let now = benchNowMs()
+            timing.pointee.heuristicMs += now - mark
+            mark = now
+        }
+        return compressible
     }
 
     /// Would zlib find anything here? One pass, comparing every byte with the same channel of the
