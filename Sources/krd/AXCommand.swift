@@ -28,8 +28,9 @@ enum AXExit: Int32 {
 
 enum AXFailure: Error {
     case usage(String)
-    case permission(String)
-    case environment(String)
+    /// `ax` is the name of the accessibility call that failed, when one did (`cannotComplete`).
+    case permission(String, ax: String?)
+    case environment(String, ax: String?)
     case notFound(String)
     case notActionable(String)
 
@@ -42,6 +43,88 @@ enum AXFailure: Error {
         case .notActionable: return .notActionable
         }
     }
+}
+
+/// A failure as a machine reads it.
+///
+/// `--json` is a *format* switch, not a second contract: the exit code is the one text mode
+/// returns, and stdout carries exactly one object in every outcome. On failure it is this one,
+/// so a caller can `jq -e '.ok'` and branch on `.error.code` instead of scraping prose that was
+/// written for a human (issue #123). One token per exit code, which is why `code` names the
+/// class and the specific AXError the call returned rides along in `ax`.
+struct AXErrorReport {
+    /// `usage` | `permission` | `environment` | `notFound` | `notActionable` — one per exit code.
+    var code: String
+    var exit: AXExit
+    /// One sentence, no `krd ax: ` stream prefix: this is a log line, not a page.
+    var message: String
+    /// What to do about it. Deliberately never "run `krd ax doctor`": `doctor` is one of the
+    /// verbs that ends up here.
+    var next: String
+    /// The AXError name, when an accessibility call produced the failure.
+    var ax: String?
+
+    var dictionary: [String: Any] {
+        var out: [String: Any] = ["code": code, "exit": Int(exit.rawValue),
+                                  "message": message, "next": next]
+        if let ax { out["ax"] = ax }
+        return out
+    }
+
+    init(_ failure: AXFailure) {
+        let advice: (code: String, next: String)
+        let prose: String
+        var ax: String?
+        switch failure {
+        case .usage(let message):
+            advice = ("usage", "run `krd ax --help` for the commands, their arguments and the exit codes")
+            prose = message
+        case .permission(let message, let name):
+            advice = ("permission", "grant Accessibility to this binary in System Settings > "
+                + "Privacy & Security > Accessibility, then re-run")
+            prose = message
+            ax = name
+        case .environment(let message, let name):
+            advice = ("environment", "the Mac may be asleep or at the login window, or the app is "
+                + "hung: wait for it to wake, then retry")
+            prose = message
+            ax = name
+        case .notFound(let message):
+            advice = ("notFound", "re-read the surface (`krd ax tree` / `krd ax find`) and use "
+                + "what that dump printed")
+            prose = message
+        case .notActionable(let message):
+            advice = ("notActionable", "re-dump and confirm the node still answers; a write the "
+                + "app does not read back is not a success")
+            prose = message
+        }
+        self.code = advice.code
+        self.next = advice.next
+        self.exit = failure.code
+        self.ax = ax
+        self.message = AXErrorReport.sentence(prose)
+    }
+
+    /// The first non-empty line, minus the stream prefix: a multi-line paragraph of advice is
+    /// what stderr is for, `message` is the half a monitor logs.
+    static func sentence(_ prose: String) -> String {
+        let firstLine = prose.split(separator: "\n", omittingEmptySubsequences: false)
+            .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        var line = firstLine.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        let prefix = "krd ax: "
+        if line.hasPrefix(prefix) { line.removeFirst(prefix.count) }
+        return line
+    }
+}
+
+/// Where a failed command writes, and the code it exits with.
+///
+/// Pure on purpose: nothing here prints or exits, so `Tests/krdTests/AXJSONFailureShapeTests.swift` can
+/// pin both halves of #123 -- the shape and the exit code -- without one accessibility call.
+struct AXFailureOutput {
+    var stdout: String
+    var stderr: String
+    var code: Int32
 }
 
 struct AXOptions {
@@ -77,6 +160,46 @@ struct AXProbe {
     var error: AXError
 }
 
+/// What `krd ax doctor` measured, split from the accessibility calls that measured it, so the
+/// reporting and the exit code are pure and testable (issue #123).
+struct AXDiagnosis {
+    var trusted: Bool
+    var onScreenWindows: Int
+    var answers: Bool
+    var first: AXError
+    var final: AXError
+    /// Whether the 120 ms retry happened (`cannotComplete` on the first call is startup noise).
+    var retried: Bool
+    var sample: String
+
+    /// A red diagnosis is not a successful run, and `--json` does not change that: 3 when the
+    /// grant is missing, 4 when the accessibility API does not answer.
+    var exit: AXExit { answers ? .ok : (trusted ? .environment : .permission) }
+
+    /// The failure a red diagnosis reports -- the same sentences text mode prints, so the two
+    /// surfaces cannot drift apart, and nil on a green Mac.
+    var failure: AXFailure? {
+        if answers { return nil }
+        // The AXError that measured red rides along in `ax` in both branches, so a caller loses
+        // nothing by reading `.error.ax` instead of the string the old `error` field held.
+        if !trusted {
+            return .permission(AXCommand.permissionText, ax: AXCommand.axErrorName(final))
+        }
+        return .environment(AXCommand.environmentText(error: final),
+                            ax: AXCommand.axErrorName(final))
+    }
+}
+
+/// The two renderings of a diagnosis, plus the code it earns.
+struct AXDoctorOutput {
+    var text: String
+    /// The same advice `text` ends with, for `--json`: stdout carries one object, so the prose a
+    /// human needs (the grant walkthrough, or the "the Mac may be asleep" paragraph) goes here.
+    var stderr: String
+    var json: [String: Any]
+    var exit: AXExit
+}
+
 enum AXCommand {
     static func isInvocation(_ args: [String]) -> Bool {
         args.first == "ax"
@@ -85,12 +208,18 @@ enum AXCommand {
     /// Entry point. Never returns: every path ends in exit(), so the render loop and its
     /// NSApplication context are never started.
     static func run(_ args: [String]) -> Never {
+        // Read from the raw argv first: an unknown flag or a missing verb fails *while parsing*,
+        // before the parser could have seen `--json`, and it still has to answer in the format
+        // the caller asked for. Once the parser has run, its answer wins -- a `--json` that was
+        // really the value of `--app` is not the flag.
+        var requestedJSON = wantsJSON(args)
         if args.contains("-h") || args.contains("--help") || args.first == "help" {
             print(usage())
             exit(AXExit.ok.rawValue)
         }
         do {
             let options = try parse(args)
+            requestedJSON = options.json
             switch options.verb {
             case "windows": exit(try windows(options))
             case "tree": exit(try tree(options))
@@ -103,16 +232,47 @@ enum AXCommand {
                 throw AXFailure.usage("unknown command \"\(options.verb)\" (try `krd ax --help`)")
             }
         } catch let failure as AXFailure {
-            if case .usage(let message) = failure {
-                FileHandle.standardError.write(Data((message + "\n\n" + usage()).utf8))
-            } else {
-                FileHandle.standardError.write(Data((describe(failure) + "\n").utf8))
-            }
-            exit(failure.code.rawValue)
+            exit(fail(failure, json: requestedJSON))
         } catch {
-            FileHandle.standardError.write(Data("krd ax: \(error)\n".utf8))
-            exit(AXExit.environment.rawValue)
+            // Not an AXFailure (a failed allocation, a thrown string): still a failure the
+            // machine has to see, and still the environment's fault until proven otherwise.
+            exit(fail(.environment("krd ax: \(error)", ax: nil), json: requestedJSON))
         }
+    }
+
+    /// Whether the caller asked for machine output. Read from the raw argv, never from the
+    /// parsed options: a usage failure happens mid-parse, which is exactly the moment the parser
+    /// cannot yet tell you `--json` was asked for (#123).
+    static func wantsJSON(_ args: [String]) -> Bool { args.contains("--json") }
+
+    /// Every successful `--json` answer says so, in one place: a caller can `jq -e '.ok'` on any
+    /// verb instead of knowing which ones answer with `{"windows":…}` and which with `[…]`.
+    static func success(_ payload: [String: Any]) -> [String: Any] {
+        var out = payload
+        out["ok"] = true
+        return out
+    }
+
+    /// The one place a failed command becomes output: the prose a human reads (unchanged since
+    /// before #123) on stderr, and when `--json` was asked for, exactly one object on stdout.
+    static func failureOutput(_ failure: AXFailure, json: Bool) -> AXFailureOutput {
+        var out = AXFailureOutput(stdout: "", stderr: describe(failure) + "\n",
+                                  code: failure.code.rawValue)
+        // A usage failure adds the whole surface to stderr: the reader asked for the wrong thing
+        // and needs the list. (`--json` callers get the same in `next`.)
+        if case .usage(let message) = failure { out.stderr = message + "\n\n" + usage() }
+        if json {
+            out.stdout = jsonString(["ok": false, "error": AXErrorReport(failure).dictionary]) + "\n"
+        }
+        return out
+    }
+
+    /// Write `failureOutput(_:json:)` out and answer with the code to exit on.
+    static func fail(_ failure: AXFailure, json: Bool) -> Int32 {
+        let output = failureOutput(failure, json: json)
+        if !output.stdout.isEmpty { FileHandle.standardOutput.write(Data(output.stdout.utf8)) }
+        FileHandle.standardError.write(Data(output.stderr.utf8))
+        return output.code
     }
 
     // MARK: - arguments
@@ -248,6 +408,26 @@ enum AXCommand {
         exit: 0 ok · 2 usage · 3 no accessibility permission · 4 window server unreachable
               5 nothing matched · 6 node refused the action, or read back something else
 
+        --json is a format switch, not a second contract: the exit code above is the same one in
+        both formats, stdout carries exactly one JSON object for every command outcome (a
+        `--help` request still answers in text), and the prose stays on stderr. A failed command
+        prints
+
+          {"ok": false, "error": {"code": "environment", "exit": 4,
+                                   "message": "the accessibility API is not answering (cannotComplete)",
+                                   "next": "the Mac may be asleep or at the login window…",
+                                   "ax": "cannotComplete"}}
+
+        where code is usage|permission|environment|notFound|notActionable (one per exit code) and
+        ax is the AXError name for the permission and environment classes; the node-level codes
+        (5, 6) name theirs inside message, next to the node they were read from. A successful
+        command carries "ok": true and its usual fields; `press`/`set` answer
+        {"ok": true, "command": "press|set", "ref": "@e7", "before": …, "after": …} and
+        `--dry-run` answers the same with "dryRun": true and no "after": nothing was sent.
+        `doctor` exits 3 or 4 on a red diagnosis, exactly like text mode, and reports
+        {"ok": false, "error": {…}} alongside the report it measured; on a green Mac its `error`
+        is still the AXError name it has always been, and ok is true.
+
         Reads are the default and need no flags; press/set are explicit subcommands, and every
         write prints the state it read back afterwards. This command never captures a frame, so
         it needs Accessibility but not Screen Recording. See docs/research-ax-text-channel.md.
@@ -293,9 +473,12 @@ enum AXCommand {
     static func require(_ probe: AXProbe) throws {
         if probe.answers { return }
         if !probe.trusted {
-            throw AXFailure.permission(permissionText)
+            // The AXError rides along even here: on an untrusted Mac the call was made and it
+            // returned something (`cannotComplete`), and the old `doctor` JSON reported it.
+            throw AXFailure.permission(permissionText, ax: axErrorName(probe.error))
         }
-        throw AXFailure.environment(environmentText(error: probe.error))
+        throw AXFailure.environment(environmentText(error: probe.error),
+                                    ax: axErrorName(probe.error))
     }
 
     static var executablePath: String {
@@ -333,8 +516,8 @@ enum AXCommand {
     static func describe(_ failure: AXFailure) -> String {
         switch failure {
         case .usage(let message): return message
-        case .permission(let message): return message
-        case .environment(let message): return message
+        case .permission(let message, _): return message
+        case .environment(let message, _): return message
         case .notFound(let message): return "krd ax: \(message)"
         case .notActionable(let message): return "krd ax: \(message)"
         }
@@ -383,33 +566,56 @@ enum AXCommand {
             sample = "\(title.isEmpty ? "(untitled)" : title), \(windows) window(s)"
         }
 
+        let report = doctorOutput(AXDiagnosis(
+            trusted: trusted, onScreenWindows: onScreen, answers: answers,
+            first: first, final: final, retried: second != nil, sample: sample))
         if options.json {
-            let report = [
-                "trusted": trusted,
-                "answers": answers,
-                "onScreenWindows": onScreen,
-                "firstCall": axErrorName(first),
-                "error": axErrorName(final),
-                "sample": sample,
-            ] as [String: Any]
-            print(jsonString(report))
+            // Same writer as `fail()`, and stdout first: when a caller merges the two streams
+            // (`2>&1`) the object must still be the first thing on the line it starts.
+            FileHandle.standardOutput.write(Data((jsonString(report.json) + "\n").utf8))
+            if !report.stderr.isEmpty { FileHandle.standardError.write(Data(report.stderr.utf8)) }
         } else {
-            print("accessibility permission  \(trusted ? "granted" : "MISSING")")
-            print("accessibility answers     \(answers ? "yes" : "no (\(axErrorName(final)))")")
-            print("window server             \(onScreen >= 0 ? "\(onScreen) windows on screen" : "unreachable")")
-            print("first call in this process \(axErrorName(first))"
-                  + (second == nil ? "" : " → retry \(axErrorName(final))"))
-            print("frontmost app             \(sample)")
-            if !answers && !trusted {
-                print("")
-                print(permissionText)
-            } else if !answers {
-                print("")
-                print(environmentText(error: final))
-            }
+            print(report.text)
         }
-        if options.json { return AXExit.ok.rawValue }
-        return answers ? AXExit.ok.rawValue : (trusted ? AXExit.environment.rawValue : AXExit.permission.rawValue)
+        // The same code in both formats (#123): a health check that asks for parseable output
+        // must not be told the Mac is fine when it is not.
+        return report.exit.rawValue
+    }
+
+    /// Both renderings of a diagnosis, and the code it earns. Pure, so "a failing diagnosis must
+    /// not exit 0" is a unit test instead of a manual run on a broken Mac.
+    static func doctorOutput(_ diagnosis: AXDiagnosis) -> AXDoctorOutput {
+        var text = [
+            "accessibility permission  \(diagnosis.trusted ? "granted" : "MISSING")",
+            "accessibility answers     \(diagnosis.answers ? "yes" : "no (\(axErrorName(diagnosis.final)))")",
+            "window server             "
+                + (diagnosis.onScreenWindows >= 0
+                    ? "\(diagnosis.onScreenWindows) windows on screen" : "unreachable"),
+            "first call in this process \(axErrorName(diagnosis.first))"
+                + (diagnosis.retried ? " → retry \(axErrorName(diagnosis.final))" : ""),
+            "frontmost app             \(diagnosis.sample)",
+        ].joined(separator: "\n")
+        if let failure = diagnosis.failure { text += "\n\n" + describe(failure) }
+
+        var json: [String: Any] = [
+            "ok": diagnosis.answers,
+            "trusted": diagnosis.trusted,
+            "answers": diagnosis.answers,
+            "onScreenWindows": diagnosis.onScreenWindows,
+            "firstCall": axErrorName(diagnosis.first),
+            "sample": diagnosis.sample,
+        ]
+        // `error` holds the AXError name on a green Mac, exactly as it did before #123. On a red
+        // one it becomes the failure object every `--json` verb uses, and the AXError name it
+        // used to hold is at `error.ax` (and in `firstCall`), so nothing is lost.
+        if let failure = diagnosis.failure {
+            json["error"] = AXErrorReport(failure).dictionary
+        } else {
+            json["error"] = axErrorName(diagnosis.final)
+        }
+        return AXDoctorOutput(text: text,
+                              stderr: diagnosis.failure.map { describe($0) + "\n" } ?? "",
+                              json: json, exit: diagnosis.exit)
     }
 
     static func windows(_ options: AXOptions) throws -> Int32 {
@@ -426,7 +632,7 @@ enum AXCommand {
             }
         }
         if options.json {
-            print(jsonString(["windows": rows.map { $0.dictionary }]))
+            print(jsonString(success(["windows": rows.map { $0.dictionary }])))
             return AXExit.ok.rawValue
         }
         if rows.isEmpty {
@@ -486,7 +692,7 @@ enum AXCommand {
         }
         out.insert("# \(jsonApps.count) app(s) with on-screen windows", at: 0)
         if options.json {
-            print(jsonString(["apps": jsonApps, "focus": focus]))
+            print(jsonString(success(["apps": jsonApps, "focus": focus])))
         } else {
             print(out.joined(separator: "\n"))
         }
@@ -533,13 +739,12 @@ enum AXCommand {
         let generation = persist(app: app, window: title, index: options.windowIndex,
                                  count: windows.count, entries: reader.entries)
         if options.json {
-            let payload = AXTreeJSON(
+            print(jsonString(success(AXTreeJSON(
                 app: app.name, pid: app.pid, windowIndex: options.windowIndex,
                 windowCount: windows.count, windowTitle: title,
                 frame: frame(window), nodes: reader.nodes,
                 truncated: reader.truncated, visited: reader.visited,
-                generation: generation)
-            print(jsonString(payload.dictionary))
+                generation: generation).dictionary)))
             return AXExit.ok.rawValue
         }
         print(AXText.header(
@@ -652,7 +857,7 @@ enum AXCommand {
                 },
             ]
             if let generation { payload["generation"] = generation }
-            print(jsonString(payload))
+            print(jsonString(success(payload)))
             return AXExit.ok.rawValue
         }
         let asked = options.query.isEmpty
@@ -754,7 +959,8 @@ enum AXCommand {
         for step in node.chain.dropFirst() {
             if Date() > deadline {
                 throw AXFailure.environment("resolving \(ref) ran out of time (\(node.chain.count - 1) levels); "
-                    + "the app is not answering. Try again, or re-dump with -d to shorten the chain.")
+                    + "the app is not answering. Try again, or re-dump with -d to shorten the chain.",
+                    ax: nil)
             }
             element = try descend(element, step: step, ref: ref)
         }
@@ -842,7 +1048,7 @@ enum AXCommand {
         let name = axErrorName(error)
         switch error {
         case .apiDisabled:
-            return .permission("accessibility was disabled while \(what): \(name)")
+            return .permission("accessibility was disabled while \(what): \(name)", ax: name)
         case .actionUnsupported, .attributeUnsupported, .notImplemented:
             return .notActionable("\(what) is not supported by this node (\(name))")
         case .invalidUIElement, .invalidUIElementObserver:
@@ -850,9 +1056,9 @@ enum AXCommand {
                 + "looks like this.")
         case .cannotComplete:
             return .environment("\(what) failed: the app did not answer (\(name)). It may be busy or hung; "
-                + "`krd ax doctor` shows whether the window server is answering at all.")
+                + "`krd ax doctor` shows whether the window server is answering at all.", ax: name)
         default:
-            return .environment("\(what) failed: \(name) (\(error.rawValue))")
+            return .environment("\(what) failed: \(name) (\(error.rawValue))", ax: name)
         }
     }
 
@@ -877,8 +1083,14 @@ enum AXCommand {
                 + "what each node can do.")
         }
         if options.dryRun {
-            print("would press \(label) (AXPress) — nothing was sent")
-            print("  before: \(state?.text ?? "unknown")")
+            if options.json {
+                print(jsonString(pressResult(ref: options.ref ?? "", label: label, dryRun: true,
+                                            elapsedMs: 0, before: state?.text ?? "unknown",
+                                            after: nil, note: nil)))
+            } else {
+                print("would press \(label) (AXPress) — nothing was sent")
+                print("  before: \(state?.text ?? "unknown")")
+            }
             return AXExit.ok.rawValue
         }
         let started = Date()
@@ -886,6 +1098,17 @@ enum AXCommand {
         let elapsed = Int(Date().timeIntervalSince(started) * 1000)
         if error != .success { throw failure(error, doing: "AXPress on \(label)") }
         let after = nodeState(resolved.element)
+        if options.json {
+            // The write landed. Everything the text lines say is here as a field, and the
+            // caller gets `ok:true` instead of having to recognise the sentence.
+            print(jsonString(pressResult(
+                ref: options.ref ?? "", label: label, dryRun: false, elapsedMs: elapsed,
+                before: state?.text ?? "unknown", after: after?.text,
+                note: after == nil ? "element is gone (a dialog closed, or the view was rebuilt)"
+                    : (state.map { $0.text == after!.text } == true
+                        ? "no observable change — some buttons only act on their target window" : nil))))
+            return AXExit.ok.rawValue
+        }
         print("pressed \(label) (AXPress, \(elapsed) ms)")
         print("  before: \(state?.text ?? "unknown")")
         if let after {
@@ -918,8 +1141,14 @@ enum AXCommand {
                 + ". Text fields and sliders are settable; static text and buttons are not.")
         }
         if options.dryRun {
-            print("would set \(label) value \"\(AXText.sanitize(state?.value ?? "", limit: 60))\" → "
-                + "\"\(AXText.sanitize(text, limit: 60))\" — nothing was sent")
+            if options.json {
+                print(jsonString(setResult(ref: options.ref ?? "", label: label, value: text,
+                                           dryRun: true, elapsedMs: 0,
+                                           before: state?.text ?? "unknown", after: nil)))
+            } else {
+                print("would set \(label) value \"\(AXText.sanitize(state?.value ?? "", limit: 60))\" → "
+                    + "\"\(AXText.sanitize(text, limit: 60))\" — nothing was sent")
+            }
             return AXExit.ok.rawValue
         }
         let started = Date()
@@ -930,9 +1159,14 @@ enum AXCommand {
         // Read back: an app may accept the write and normalise, clamp or ignore it, and a write
         // path that reports "ok" without looking is how an agent ends up acting on a lie.
         let after = nodeState(resolved.element)
-        print("set \(label) (\(elapsed) ms)")
-        print("  before: \(state?.text ?? "unknown")")
-        print("  after : \(after?.text ?? "element is gone")")
+        // In text mode the before/after pair is printed before the read-back is judged, so a
+        // failed write still shows the reader what the field holds now. In JSON mode nothing but
+        // the answer may reach stdout, so that pair is built last, once the guards have passed.
+        if !options.json {
+            print("set \(label) (\(elapsed) ms)")
+            print("  before: \(state?.text ?? "unknown")")
+            print("  after : \(after?.text ?? "element is gone")")
+        }
         guard let after else {
             throw AXFailure.notActionable("the value was accepted but the element is gone; nothing to read back")
         }
@@ -941,7 +1175,44 @@ enum AXCommand {
                 + "\(AXText.sanitize(after.value, limit: 60))\", not \"\(AXText.sanitize(text, limit: 60))\". "
                 + "Nothing else was touched.")
         }
+        if options.json {
+            print(jsonString(setResult(ref: options.ref ?? "", label: label, value: text,
+                                       dryRun: false, elapsedMs: elapsed,
+                                       before: state?.text ?? "unknown", after: after.text)))
+        }
         return AXExit.ok.rawValue
+    }
+
+    // MARK: - the machine answer to a write
+
+    /// `press --json`. Pure, so the payload can be asserted without a grant or a running app, and
+    /// so `press` cannot drift from the shape `set` and the failure path use (#123).
+    static func pressResult(ref: String, label: String, dryRun: Bool, elapsedMs: Int,
+                            before: String, after: String?, note: String?) -> [String: Any] {
+        var out: [String: Any] = ["ok": true, "command": "press", "ref": ref, "label": label,
+                                  "before": before]
+        if dryRun {
+            out["dryRun"] = true
+        } else {
+            out["elapsedMs"] = elapsedMs
+            out["after"] = after ?? NSNull()
+        }
+        if let note { out["note"] = note }
+        return out
+    }
+
+    /// `set --json`: the value that was written, and the state read back on both sides of it.
+    static func setResult(ref: String, label: String, value: String, dryRun: Bool, elapsedMs: Int,
+                          before: String, after: String?) -> [String: Any] {
+        var out: [String: Any] = ["ok": true, "command": "set", "ref": ref, "label": label,
+                                  "value": value, "before": before]
+        if dryRun {
+            out["dryRun"] = true
+        } else {
+            out["elapsedMs"] = elapsedMs
+            out["after"] = after ?? NSNull()
+        }
+        return out
     }
 
     // MARK: - app resolution
