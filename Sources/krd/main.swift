@@ -802,6 +802,12 @@ final class Desk {
     private var chromeSampleDelivered = 0
 
     private var resizeSource: DispatchSourceSignal?
+    /// The `SIGWINCH` stream's trailing edge (issue #89). Main queue only.
+    private var resizeBurst = ResizeCoalescer()
+    /// The pane the mirror's current picture was laid out for, i.e. what `handleResize` last built
+    /// a grid from. `nil` until the first resize: a picture that was never re-fitted has no claim
+    /// to "the pane did not move".
+    private var mirrorPane: ResizePane?
     private var statsTimer: DispatchSourceTimer?
     // TUI layer (--dev). Everything below is written on the main queue at 1 Hz; the picture
     // never waits for it and the writer serializes the two.
@@ -3365,15 +3371,37 @@ final class Desk {
 
     private func installResizeHandler() {
         signal(SIGWINCH, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .global(qos: .userInitiated))
+        // The source itself runs on the *main* queue now, not on a global one that hops here: a
+        // `SIGWINCH` and the `asyncAfter` that used to carry it both ended up on the main queue
+        // anyway, and `resizeBurst` is a main-queue value that a second thread must not mutate.
+        let source = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
         source.setEventHandler { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self?.handleResize() }
+            guard let self else { return }
+            // A trailing edge, not one handler run per event (issue #89). The deadline restarts on
+            // every arrival and only the work item that still owns the newest token relayouts, so a
+            // drag of N `SIGWINCH`es is **one** re-layout, at the pane the drag ended on — the
+            // handler reads `TermGeometry` when it runs, never when the event arrived. What this
+            // replaces was worse than one run per event: each run deleted every placement (`clear`),
+            // re-laid out and restarted the stream -- 40 clears and 4,564 tile transmissions for a
+            // 1.4 s drag (`bench/loop-resize-storm.py`).
+            let now = ResizeCoalescer.now()
+            let arrival = self.resizeBurst.arrive(at: now)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, arrival.fireAt - now)) { [weak self] in
+                guard let self,
+                      let collapsed = self.resizeBurst.fire(token: arrival.token,
+                                                            at: ResizeCoalescer.now())
+                else { return }
+                self.handleResize(burst: collapsed)
+            }
         }
         source.resume()
         resizeSource = source
     }
 
-    private func handleResize() {
+    /// `burst` is how many `SIGWINCH`es the coalescer collapsed into this run (`1` for a single
+    /// resize, and for the callers that are not a signal at all, e.g. `applyPanel`). It decides
+    /// nothing — it is logged, so the number in the log is the number that was measured.
+    private func handleResize(burst: Int = 1) {
         // The wall has no picture to re-fit: the pane changed size, so the canvas forgets its
         // previous grid (the next draw is a full repaint at the new width) and the model is re-read.
         // The guard below would no-op here — a wall session has no filter and no mock.
@@ -3395,8 +3423,29 @@ final class Desk {
         }
         guard !cleanedUp, filter != nil || mock != nil else { return }
         let geometry = TermGeometry.read()
+        // Did the pane move at all? A `SIGWINCH` that answers with the grid the picture is already
+        // fitted to (a terminal's second report for one drag, a drag out and back) has nothing to
+        // do, and everything below is destructive: `clear` deletes every placement, the restart
+        // tears the stream down, and the repaint re-sends every tile -- to draw the picture that is
+        // already on screen. `drawn == nil` is the first resize of a session, which cannot claim
+        // "unchanged" and therefore relayouts.
+        let pane = ResizePane(cols: geometry.cols, rows: geometry.rows,
+                             cellW: geometry.cellSize.w, cellH: geometry.cellSize.h)
+        if ResizePlan.decide(drawn: mirrorPane, now: pane) == .skip {
+            if options.debug {
+                Log.write("resize: \(pane.cols)x\(pane.rows) unchanged, nothing to repaint\n")
+            }
+            return
+        }
         applyLayout(geometry: geometry)
         guard let layout = currentGrid(), layout.pixelW > 8, layout.pixelH > 8 else { return }
+        // Only once the layout exists: a pane that came out degenerate must be retried by the next
+        // report, not remembered as done.
+        mirrorPane = pane
+        if burst > 1, options.debug {
+            Log.write("resize: \(burst) SIGWINCHes coalesced into one relayout at "
+                      + "\(layout.pixelW)x\(layout.pixelH)\n")
+        }
         writer.clear()
         chrome.invalidate()
         chromeDirty = true
