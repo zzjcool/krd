@@ -83,7 +83,7 @@ Swift 留住 OS 那一半——ScreenCaptureKit、`NSApplication`、`CGEvent`/`p
 ### 3.3 必须重建的验证（这才是真成本）
 
 - `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump` —— Rust 编码器必须**逐字节**复现
-  （sha256 `f18475a2…`）：同一个 zlib、同一套 level、同样的逃逸顺序。
+  （sha256 `2e893d04…`）：同一个 zlib、同一套 level、同样的逃逸顺序。
 - `Tests/krdcoreTests/Fixtures/input-trace.dump` —— Rust 解析器必须复现七组喂入序列的规范 trace。
 - 两条 `--debug` 层的对等检查（渲染 dump、输入 trace）要对着 Rust 构建重跑。
 - CI：一条 Rust 工具链、一个 `cargo test` 作业、两份 fixture 各跑两遍（Swift、Rust）。

@@ -362,9 +362,11 @@ These are not style choices; each one fixed a specific failure. Byte-level detai
    while re-asserting the hidden cursor.
 6. **Heal on entry.** `beginSession()` starts with `ESC \` (closes a dangling APC left by a killed
    predecessor, which would otherwise swallow every later byte) + `?2026l` (closes a dangling
-   sync block) + `?1003l ?1002l ?1006l` + `ESC[0m` + `?25h`, then switches to the alternate screen.
+   sync block) + the four mouse resets `?1016l ?1006l ?1002l ?1003l` (`ScreenWriter.mouseReset`,
+   the enable list of PROTOCOL §7 reversed) + `ESC[0m` + `?25h`, then switches to the alternate
+   screen.
 7. **Explicit teardown.** `endSession()`: `ESC \` + `?2026l`, delete all placements
-   (`a=d,d=a`) + `2J`, then `?1003l ?1002l ?1006l ?25h ?1049l`.
+   (`a=d,d=a`) + `2J`, then the same `mouseReset` + `?25h ?1049l`.
 
 ## 8. Resize and shutdown
 

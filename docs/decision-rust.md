@@ -90,7 +90,7 @@ is POD and copied by value.)
 ### 3.3 Verification that would have to be rebuilt (this is the actual cost)
 
 - `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump` — the Rust encoder must reproduce it
-  **byte for byte** (sha256 `f18475a2…`). Same zlib, same levels, same escape order.
+  **byte for byte** (sha256 `2e893d04…`). Same zlib, same levels, same escape order.
 - `Tests/krdcoreTests/Fixtures/input-trace.dump` — the Rust parser must reproduce the canonical
   trace of the seven fed sequences.
 - The two `--debug`-level parity checks (render dump, input trace) re-run against the Rust build.

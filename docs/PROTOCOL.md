@@ -17,7 +17,7 @@ several APC commands.
                                      # start of session (ScreenWriter.beginSession)
 ESC \                                #   ST: close an APC a killed predecessor left open
 ESC [ ? 2026 l                       #   close a dangling synchronized-update block
-ESC [ ? 1003 l  ESC [ ? 1002 l  ESC [ ? 1006 l   #   mouse reporting off (in case it was left on)
+ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l   #   mouse reporting off (in case it was left on)
 ESC [ 0 m                            #   SGR reset
 ESC [ ? 25 h                         #   cursor visible during setup
 ESC [ ? 1049 h                       #   alternate screen (no scrollback, wheel events come to us)
@@ -31,9 +31,13 @@ ESC [ ? 1006 h                       #   SGR encoding (unbounded coordinates)
 ESC [ ? 1016 h                       #   SGR *pixels*: coordinates in device pixels, not cells
 ```
 
-The first six escapes are the *heal* sequence: a pane whose parser is waiting for an `ST` shows
-nothing at all (not even text) until it gets one, which is what a `kill -9` mid-`write()` leaves
-behind. Re-running krd fixes such a pane automatically; by hand it is
+The leading escapes are a *heal*: a pane whose parser is waiting for an `ST` shows nothing at all
+(not even text) until it gets one, which is what a `kill -9` mid-`write()` leaves behind, and
+`?2026l` closes the synchronized-update block a killed predecessor may have left open. The four
+mouse resets (`?1016l ?1006l ?1002l ?1003l`) are `ScreenWriter.mouseReset` — the §7 enable list
+reversed — and they are the same list `writeMouseReporting(false)` sends when input stops and the
+teardown sends at the end (§4), so no mode can be enabled without the same list turning it off in
+all three places. Re-running krd fixes such a pane automatically; by hand it is
 `printf '\033\\\033[?2026l\033[?25h'`.
 
 ## 2. One tile
@@ -108,10 +112,14 @@ end of session (ScreenWriter.endSession):
     ESC \                                        # terminate a half-written APC first
     ESC [ ? 2026 l
     ESC _ G a=d,d=a ESC \  ESC [ 2 J             # delete every placement, clear the screen
-    ESC [ ? 1003 l  ESC [ ? 1002 l  ESC [ ? 1006 l
+    ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l
     ESC [ ? 25 h
     ESC [ ? 1049 l                               # leave the alternate screen
 ```
+
+The four mouse resets are `ScreenWriter.mouseReset` — the §7 enable list reversed — the same list
+the heal sends on the way in (§1) and `writeMouseReporting(false)` sends when input stops: a mode can
+no longer be enabled without all three resetting it.
 
 `a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames.
 

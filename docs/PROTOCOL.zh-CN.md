@@ -15,7 +15,7 @@ DEC/xterm 模式；没有任何 krd 自创的东西。下文字节除标注 `…
                                      # 会话开始（ScreenWriter.beginSession）
 ESC \                                #   ST：补上被前一个进程留下的 APC
 ESC [ ? 2026 l                       #   补上没结束的同步更新块
-ESC [ ? 1003 l  ESC [ ? 1002 l  ESC [ ? 1006 l    #   先关掉鼠标上报（万一之前没关）
+ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l    #   先关掉鼠标上报（万一之前没关）
 ESC [ 0 m                            #   SGR 复位
 ESC [ ? 25 h                         #   初始化阶段先让光标可见
 ESC [ ? 1049 h                       #   备用屏（不污染 scrollback，滚轮事件交给我们）
@@ -29,9 +29,11 @@ ESC [ ? 1006 h                       #   SGR 编码（坐标不设上限）
 ESC [ ? 1016 h                       #   SGR *像素*：坐标单位是设备像素，不是单元格
 ```
 
-最前面几条就是*自愈*序列：一个卡在等 `ST` 的 pane 什么都不会显示（连文字都不显示），而 `kill -9`
-正好落在 `write()` 中间就是这种状态。再跑一次 krd 会自动修好；手工修是
-`printf '\033\\\033[?2026l\033[?25h'`。
+最前面几条是*自愈*：卡在等 `ST` 的 pane 什么都不会显示（连文字都不显示），而 `kill -9` 正好落在
+`write()` 中间就是这种状态；`?2026l` 补上被杀进程可能留下的同步更新块。四条鼠标复位
+（`?1016l ?1006l ?1002l ?1003l`）就是 `ScreenWriter.mouseReset` —— §7 启用列表反过来 —— 跟输入停下时
+`writeMouseReporting(false)` 发的、以及收尾时（§4）发的是同一份列表，所以任何一个模式都不可能只被打开、
+却没有被这三处一起关掉。再跑一次 krd 会自动修好；手工修是 `printf '\033\\\033[?2026l\033[?25h'`。
 
 ## 2. 一块瓦片
 
@@ -103,10 +105,13 @@ resize 或显式清理（ScreenWriter.clear）：  ESC _ G a=d,d=a ESC \   然�
     ESC \                                    # 先把可能写了一半的 APC 收尾
     ESC [ ? 2026 l
     ESC _ G a=d,d=a ESC \  ESC [ 2 J         # 删掉所有 placement，清屏
-    ESC [ ? 1003 l  ESC [ ? 1002 l  ESC [ ? 1006 l
+    ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l
     ESC [ ? 25 h
     ESC [ ? 1049 l                           # 离开备用屏
 ```
+
+四条鼠标复位就是 `ScreenWriter.mouseReset` —— §7 启用列表反过来 —— 与进来自愈时（§1）、以及输入停下时
+`writeMouseReporting(false)` 发的是同一份列表：一个模式再也不可能被打开、却没有被这三处一起关掉。
 
 `a=d,d=a`（删除所有 placement）**只**在这两个位置发，帧与帧之间绝不发。
 
