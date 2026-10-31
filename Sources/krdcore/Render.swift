@@ -142,8 +142,10 @@ public final class ScreenWriter {
     /// Heal a pane whose parser was left mid-sequence by a killed predecessor:
     /// ST closes a dangling APC (which would otherwise swallow every later byte),
     /// and 2026l closes a dangling synchronized-update block (which would freeze drawing).
+    /// The four mouse resets are the §7 enable list reversed, so a killed predecessor's pixel
+    /// mode is repaired here too.
     private var healSequence: String {
-        "\u{1B}\\\u{1B}[?2026l\u{1B}[?1003l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[0m\u{1B}[?25h"
+        "\u{1B}\\\u{1B}[?2026l" + Self.mouseReset + "\u{1B}[0m\u{1B}[?25h"
     }
 
     public func beginSession() {
@@ -153,11 +155,26 @@ public final class ScreenWriter {
         write(healSequence + "\u{1B}[?1049h\u{1B}[2J\u{1B}[H\u{1B}[?25l")
     }
 
+    /// Every DEC private **mouse** mode a session turns on, in the order it turns them on.
+    ///
+    /// One list, because three hand-written copies of it had already drifted: the enable path and
+    /// `writeMouseReporting(false)` knew `?1016` (SGR *pixel* coordinates), while `beginSession`'s
+    /// heal and `endSession` reset only three of the four -- so a `kill -9` (or any exit that skips
+    /// `InputReader`'s own reset) handed the pane on still reporting in device pixels where the next
+    /// program expects cells: every click lands somewhere else, silently (issue #134). The reset is
+    /// this list reversed, so a mode added here is reset by all three by construction.
+    ///
+    /// 1003 = report every motion, not only while a button is held: a remote pointer has to follow
+    /// the mouse even when nobody is clicking. 1002 = button events (press/drag/release). 1006 = SGR
+    /// encoding, 1016 = SGR *pixels*.
+    static let mouseModes = [1003, 1002, 1006, 1016]
+    /// `?<mode>h` in order, and `?<mode>l` in reverse: the enable set and the reset set are
+    /// complementary by construction, never by hand.
+    static let mouseEnable = mouseModes.map { "\u{1B}[?\($0)h" }.joined()
+    static let mouseReset = mouseModes.reversed().map { "\u{1B}[?\($0)l" }.joined()
+
     public static func writeMouseReporting(_ on: Bool) {
-        // 1003 = report every motion, not only while a button is held: a remote pointer has to
-        // follow the mouse even when nobody is clicking. 1006 = SGR encoding, 1016 = SGR *pixels*.
-        writeRaw(on ? "\u{1B}[?1003h\u{1B}[?1002h\u{1B}[?1006h\u{1B}[?1016h"
-                    : "\u{1B}[?1016l\u{1B}[?1006l\u{1B}[?1003l\u{1B}[?1002l")
+        writeRaw(on ? mouseEnable : mouseReset)
     }
 
     /// Push the kitty keyboard enhancements krd can use, and ask which ones took.
@@ -220,7 +237,7 @@ public final class ScreenWriter {
         batchOpen = false
         writeLock.unlock()
         clear()
-        write("\u{1B}[?1003l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
+        write(Self.mouseReset + "\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)
     }
 

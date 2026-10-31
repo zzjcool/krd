@@ -81,8 +81,8 @@ frame was committed by its own tile write.)
 **Cause.** The process died in the middle of an APC (`ESC _ G …`). The terminal's parser is waiting
 for the `ST` terminator, so every later byte is swallowed — the session looks broken, not the app.
 **Fix.** krd heals on start: `beginSession()` writes `ESC \` (closes the dangling APC) +
-`ESC[?2026l` (closes a dangling sync block) + `?1003l ?1002l ?1006l ESC[0m ?25h` before switching
-to the alternate screen. Manually: `printf '\033\\\033[?2026l\033[?25h'`. Avoid `kill -9`;
+`ESC[?2026l` (closes a dangling sync block) + `?1016l ?1006l ?1002l ?1003l ESC[0m ?25h` before
+switching to the alternate screen. Manually: `printf '\033\\\033[?2026l\033[?25h'`. Avoid `kill -9`;
 Ctrl-\\ or `kill` (SIGTERM) run the cleanup path.
 
 ### 7. Tiles land in the wrong place, or everything scrolls after a few frames

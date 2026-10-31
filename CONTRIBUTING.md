@@ -133,7 +133,7 @@ now so the first PR does not invent its own boundary.
   The OS half — ScreenCaptureKit, `NSApplication`, `CGEvent`/`postToPid`, termios, `NSPasteboard`,
   AX — stays Swift. It is the part that is fragile and the part a language change does not improve.
 - **What must not regress.** Both committed fixtures must reproduce byte for byte from the Rust build:
-  `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump` (sha256 `f18475a2…`) and
+  `Tests/krdcoreTests/Fixtures/selftest-80x24-17x33-l6.dump` (sha256 `2e893d04…`) and
   `Tests/krdcoreTests/Fixtures/input-trace.dump`. The `--debug` parity procedure in
   [docs/TESTING.md](docs/TESTING.md) runs against both implementations, and `bench/budget.json` stays
   the regression gate.
