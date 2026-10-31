@@ -185,4 +185,121 @@ final class AXRefsTests: XCTestCase {
         try Data("not json".utf8).write(to: directory.appendingPathComponent("index.json"))
         XCTAssertEqual(store.loadIndex().candidates(for: AXRef(index: 1)), [])
     }
+
+    // MARK: one index read and one index write per dump (#102)
+
+    func testARefWrittenByOneStoreResolvesThroughAFreshStore() throws {
+        // A ref has to outlive the process that printed it, so everything the next `krd ax`
+        // needs must already be on disk, and its numbering has to carry on from there.
+        let dump = snapshot("gen-a", refs: ["@e1", "@e2"])
+        let mine = store.beginDump(bundle: "com.apple.finder", window: 0)
+        XCTAssertEqual(mine.refStart, 1)
+        try mine.save(dump)
+
+        let other = AXRefStore(directory: directory)
+        XCTAssertEqual(other.beginDump(bundle: "com.apple.finder", window: 0).refStart, 3)
+        XCTAssertEqual(other.loadIndex().candidates(for: AXRef(index: 2)).map(\.generation), ["gen-a"])
+        XCTAssertEqual(other.load(generation: "gen-a"), dump)
+    }
+
+    func testADumpMergesAWriteAnotherStoreMadeBeforeItSaved() throws {
+        // The read `beginDump` did is reused only while `index.json` still carries its stamp. A
+        // write that lands in between has to be merged: overwriting it drops a ref someone may
+        // still be holding, which is the one thing this cache must never do.
+        let mine = store.beginDump(bundle: "com.apple.finder", window: 0)
+        let other = AXRefStore(directory: directory)
+        try other.save(snapshot("gen-other", refs: ["@e1", "@e9"], at: Date(timeIntervalSince1970: 10)))
+        try mine.save(snapshot("gen-mine", refs: ["@e1", "@e10"], at: Date(timeIntervalSince1970: 20)))
+
+        let index = store.loadIndex()
+        XCTAssertEqual(index.candidates(for: AXRef(index: 9)).map(\.generation), ["gen-other"])
+        XCTAssertEqual(index.candidates(for: AXRef(index: 10)).map(\.generation), ["gen-mine"])
+        // @e1 was reprinted by the newer dump, so it points at that one rather than at both.
+        XCTAssertEqual(index.candidates(for: AXRef(index: 1)).map(\.generation), ["gen-mine"])
+        XCTAssertEqual(store.nextRef(bundle: "com.apple.finder", window: 0), 11)
+    }
+
+    func testPruneNeverDecodesASnapshotSoACorruptFileIsAgedOut() throws {
+        // Ordering comes from the `at` the index already carries, so a snapshot that no longer
+        // decodes is pruned like any other. The old prune read every live file to learn a date
+        // it had, and pinned an unreadable one forever.
+        let keep = AXRefStore.keepPerWindow
+        for i in 1...keep {
+            try store.save(snapshot("gen-\(i)", refs: ["@e\(i)"], at: Date(timeIntervalSince1970: Double(i))))
+        }
+        for i in 1...keep {
+            try Data("not a snapshot".utf8).write(to: store.snapshotPath(generation: "gen-\(i)"))
+        }
+        // The 17th dump pushes gen-1 out; nothing had to be decoded to know it is the oldest.
+        try store.save(snapshot("gen-\(keep + 1)", refs: ["@e\(keep + 1)"],
+                                at: Date(timeIntervalSince1970: Double(keep + 1))))
+
+        XCTAssertNil(store.load(generation: "gen-1"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.snapshotPath(generation: "gen-1").path))
+        XCTAssertNil(store.loadIndex().candidates(for: AXRef(index: 1)).first)
+        // Kept because its file is there, corrupt or not: a present generation is never GC'd.
+        XCTAssertEqual(store.loadIndex().candidates(for: AXRef(index: 2)).map(\.generation), ["gen-2"])
+    }
+
+    func testOneDumpReadsAndWritesTheIndexOnceAndDecodesNoSnapshot() throws {
+        // The point of #102, as a counter rather than a wall clock: the write path used to read
+        // the index twice, write it twice and decode every live snapshot once.
+        let activity = AXStoreActivity()
+        let counting = AXRefStore(directory: directory, activity: activity)
+        for i in 1...AXRefStore.keepPerWindow {
+            try counting.save(snapshot("gen-\(i)", refs: ["@e\(i)"],
+                                      at: Date(timeIntervalSince1970: Double(i))))
+        }
+        activity.indexReads = 0
+        activity.indexWrites = 0
+        activity.snapshotReads = 0
+        let dump = counting.beginDump(bundle: "com.apple.finder", window: 0)
+        XCTAssertEqual(dump.refStart, AXRefStore.keepPerWindow + 1)
+        try dump.save(snapshot("gen-17", refs: ["@e\(AXRefStore.keepPerWindow + 1)"]))
+        XCTAssertEqual(activity.indexReads, 1)     // beginDump, reused by save
+        XCTAssertEqual(activity.indexWrites, 1)    // one saveIndex
+        XCTAssertEqual(activity.snapshotReads, 0)  // prune orders by the index's own `at`
+    }
+
+    func testADumpThatFindsTheIndexChangedReadsItAgainRatherThanOverwriteIt() throws {
+        // The one case where the read is repeated: another process saved while this dump was
+        // walking, so the cached index is stale and merging is what keeps its refs alive.
+        let activity = AXStoreActivity()
+        let counting = AXRefStore(directory: directory, activity: activity)
+        try counting.save(snapshot("gen-a", refs: ["@e1"]))
+        activity.indexReads = 0
+        activity.indexWrites = 0
+        let dump = counting.beginDump(bundle: "com.apple.finder", window: 0)
+        try AXRefStore(directory: directory).save(snapshot("gen-b", refs: ["@e9"]))
+        try dump.save(snapshot("gen-c", refs: ["@e10"]))
+        XCTAssertEqual(activity.indexReads, 2)   // the stale read plus the merge
+        XCTAssertEqual(activity.indexWrites, 1)
+        XCTAssertEqual(counting.loadIndex().candidates(for: AXRef(index: 9)).map(\.generation), ["gen-b"])
+    }
+
+    func testTheIndexKeepsItsShapeAndAnOlderIndexStillResolves() throws {
+        // The on-disk contract: a dump writes only `schema`/`refs`/`counters`, and an index left
+        // by a previous build -- an `at` per entry, one generation whose file is gone -- still
+        // resolves its ref and keeps the entry rather than collecting it.
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // A previous build's index: no `counters` key at all (the shape `AXIndex.init(from:)`
+        // tolerates), and one generation whose snapshot file is gone.
+        let legacy = """
+        {"schema":1,
+         "refs":{"@e3":[{"generation":"gen-old","app":"Finder","bundle":"com.apple.finder",
+                         "pid":42,"window":0,"title":"Desktop","at":700000000}]}}
+        """
+        try Data(legacy.utf8).write(to: directory.appendingPathComponent("index.json"))
+        XCTAssertEqual(store.loadIndex().candidates(for: AXRef(index: 3)).map(\.generation), ["gen-old"])
+
+        try store.save(snapshot("gen-new", refs: ["@e4"]))
+        let written = try Data(contentsOf: directory.appendingPathComponent("index.json"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: written) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["schema", "refs", "counters"])
+        // The literal, not the constant: the on-disk shape is a contract with the last build.
+        XCTAssertEqual(object["schema"] as? Int, 1)
+        XCTAssertEqual(store.loadIndex().candidates(for: AXRef(index: 3)).map(\.generation), ["gen-old"])
+        // And the new dump was numbered from the counter the older index left behind.
+        XCTAssertEqual(store.nextRef(bundle: "com.apple.finder", window: 0), 5)
+    }
 }

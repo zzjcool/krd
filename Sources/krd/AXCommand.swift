@@ -729,6 +729,7 @@ enum AXCommand {
         }
         let window = windows[options.windowIndex]
 
+        let dump = AXRefStore().beginDump(bundle: app.bundle, window: options.windowIndex)
         var reader = AXWalker(
             interactiveOnly: options.interactiveOnly && !options.all,
             emitEverything: options.all,
@@ -737,7 +738,7 @@ enum AXCommand {
             maxShown: options.maxNodes,
             maxVisited: max(options.maxNodes * 8, 2000),
             deadline: Date().addingTimeInterval(10),
-            refStart: AXRefStore().nextRef(bundle: app.bundle, window: options.windowIndex))
+            refStart: dump.refStart)
         if options.menuBar, let bar = asElement(value(element, kAXMenuBarAttribute)) {
             var menu = AXWalker(
                 interactiveOnly: reader.interactiveOnly, emitEverything: reader.emitEverything,
@@ -752,7 +753,7 @@ enum AXCommand {
 
         let title = text(window, kAXTitleAttribute)
         let generation = persist(app: app, window: title, index: options.windowIndex,
-                                 count: windows.count, entries: reader.entries)
+                                 count: windows.count, entries: reader.entries, dump: dump)
         if options.json {
             print(jsonString(success(AXTreeJSON(
                 app: app.name, pid: app.pid, windowIndex: options.windowIndex,
@@ -779,7 +780,7 @@ enum AXCommand {
     /// writable. Failing to persist must not fail the read: the tree is still the answer, it
     /// just cannot be acted on later, and the note on stderr says exactly that.
     static func persist(app: RunningApp, window: String, index: Int, count: Int,
-                        entries: [AXEntry]) -> String? {
+                        entries: [AXEntry], dump: AXRefStore.Dump) -> String? {
         guard !entries.isEmpty else { return nil }
         let snapshot = AXSnapshot(
             schema: AXSnapshot.schema,
@@ -789,7 +790,7 @@ enum AXCommand {
             windowIndex: index, windowTitle: window, windowCount: count,
             nodes: entries.map { AXSnapshotNode(ref: $0.node.ref, chain: $0.chain, root: $0.root) })
         do {
-            try AXRefStore().save(snapshot)
+            try dump.save(snapshot)
             return snapshot.generation
         } catch {
             FileHandle.standardError.write(Data(
@@ -818,6 +819,7 @@ enum AXCommand {
         // Same filter and the same walk as `tree`, so @e7 here is the @e7 a tree dump printed:
         // a ref that means one node in a dump and another in a find is how a write path clicks
         // the wrong button. `--all` searches unlabelled structure and does renumber.
+        let dump = AXRefStore().beginDump(bundle: app.bundle, window: options.windowIndex)
         var reader = AXWalker(
             interactiveOnly: false,
             emitEverything: options.all,
@@ -826,7 +828,7 @@ enum AXCommand {
             maxShown: options.maxNodes,
             maxVisited: max(options.maxNodes * 8, 2000),
             deadline: Date().addingTimeInterval(10),
-            refStart: AXRefStore().nextRef(bundle: app.bundle, window: options.windowIndex))
+            refStart: dump.refStart)
         if options.menuBar, let bar = asElement(value(element, kAXMenuBarAttribute)) {
             reader.walk(root: bar, rootDepth: 0, countAsRoot: false)
         }
@@ -854,7 +856,7 @@ enum AXCommand {
 
         let title = text(window, kAXTitleAttribute)
         let generation = persist(app: app, window: title, index: options.windowIndex,
-                                 count: windows.count, entries: reader.entries)
+                                 count: windows.count, entries: reader.entries, dump: dump)
         if options.json {
             var payload: [String: Any] = [
                 "app": app.name, "pid": Int(app.pid), "window": options.windowIndex,
