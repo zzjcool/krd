@@ -405,28 +405,43 @@ enum AXCommand {
           --json                 machine-readable output
           --prompt               ask macOS for the Accessibility grant (opens the dialog)
 
-        exit: 0 ok · 2 usage · 3 no accessibility permission · 4 window server unreachable
-              5 nothing matched · 6 node refused the action, or read back something else
+        exit  0  ok — and a green krd ax doctor
+              2  usage: unknown flag or verb, or a missing/malformed value
+              3  no Accessibility permission
+              4  the accessibility API is not answering: the Mac asleep or locked, the window
+                 server gone, every app that could answer hung
+              5  nothing matched: a query, app or ref found nothing (an empty krd ax windows list exits 0)
+              6  the node refused the action, or the app read back something else
+
+        krd ax doctor exits 3 or 4 on a red diagnosis instead of 0, in text and --json alike, so
+        krd ax doctor && krd ax windows is a health check that cannot pass on a broken Mac.
+        The same six are in README.md and docs/TROUBLESHOOTING.md §6, word for word.
 
         --json is a format switch, not a second contract: the exit code above is the same one in
         both formats, stdout carries exactly one JSON object for every command outcome (a
-        `--help` request still answers in text), and the prose stays on stderr. A failed command
-        prints
+        `--help` request still answers in text), and the prose stays on stderr. `next` never
+        says "run `krd ax doctor`": doctor is itself one of the verbs whose failure ends up
+        here. A failed command prints
 
           {"ok": false, "error": {"code": "environment", "exit": 4,
                                    "message": "the accessibility API is not answering (cannotComplete)",
                                    "next": "the Mac may be asleep or at the login window…",
                                    "ax": "cannotComplete"}}
 
-        where code is usage|permission|environment|notFound|notActionable (one per exit code) and
-        ax is the AXError name for the permission and environment classes; the node-level codes
-        (5, 6) name theirs inside message, next to the node they were read from. A successful
-        command carries "ok": true and its usual fields; `press`/`set` answer
-        {"ok": true, "command": "press|set", "ref": "@e7", "before": …, "after": …} and
-        `--dry-run` answers the same with "dryRun": true and no "after": nothing was sent.
-        `doctor` exits 3 or 4 on a red diagnosis, exactly like text mode, and reports
-        {"ok": false, "error": {…}} alongside the report it measured; on a green Mac its `error`
-        is still the AXError name it has always been, and ok is true.
+        where code is usage|permission|environment|notFound|notActionable (one per exit code),
+        exit is that same number, and ax is the AXError name for the permission and environment
+        classes; the node-level codes (5, 6) name theirs inside message, next to the node they
+        were read from. A consumer that used to match on the name alone (the "error" field of the
+        old doctor payload) reads error.ax now. A successful command carries "ok": true and its
+        usual fields; `press`/`set` answer
+        {"ok": true, "command": "press|set", "ref": "@e7", "label": "…", "before": "…",
+         "after": "…", "elapsedMs": 3} — `press` answers after: null and a "note" when the
+        element went away (a `set` in that state fails with 6, "nothing to read back"), `set`
+        also echoes the "value" it wrote, `press` adds the same "note" when the write landed but
+        read back unchanged, and `--dry-run` answers that same shape with "dryRun": true and no
+        after/elapsedMs, because nothing was sent. On a red diagnosis `doctor` reports its measured fields
+        alongside {"ok": false, "error": {…}}; on a green Mac its `error` is still the AXError
+        name it has always been, and ok is true.
 
         Reads are the default and need no flags; press/set are explicit subcommands, and every
         write prints the state it read back afterwards. This command never captures a frame, so

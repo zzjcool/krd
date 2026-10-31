@@ -89,9 +89,45 @@ krd ax screen                # 每个可见窗口一行，外加当前焦点
 ```
 
 每个节点一行 —— `@e3  button  "Save"  value="hi"  [120,80 64x24]  press`，ref 在本次 dump
-生命周期内稳定。退出码：`0` 成功、`2` 用法错、`3` 没有辅助功能授权、`4` 窗口服务器不可达、
-`5` 没有匹配到。文本一律消毒：窗口标题里的 ESC 序列会被替换掉，不会打到终端上。测量数据见
+生命周期内稳定。文本一律消毒：窗口标题里的 ESC 序列会被替换掉，不会打到终端上。测量数据见
 [docs/research-ax-text-channel.md](docs/research-ax-text-channel.md)。
+
+**退出码** —— 一共六个：这张表和 `krd ax --help` 里那张是同一张（这里是它的中文译文），
+[docs/TROUBLESHOOTING.zh-CN.md](docs/TROUBLESHOOTING.zh-CN.md) 的 §6 也一模一样：
+
+```text
+exit  0  ok —— krd ax doctor 的诊断也是绿的
+      2  用法错：不认识的 flag 或子命令，或者值缺失/格式不对
+      3  没有辅助功能（Accessibility）权限
+      4  辅助功能 API 不应答：Mac 睡了或锁屏、窗口服务器没了、能应答的应用全卡住
+      5  没有匹配到：查询、应用或 ref 什么都没找到（krd ax windows 列表为空照样退 0）
+      6  节点拒绝了这个动作，或者应用读回来的值不一样
+
+krd ax doctor 诊断不通过时退出 3 或 4（文本和 --json 都一样），而不是 0，所以
+krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检查。
+```
+
+`--json` 只是换格式，不是第二套契约：文本和 JSON 退出的码是同一个，stdout 在任何结局下
+都只有**一个** JSON 对象（`krd ax --json --help` 例外，它照旧回文本）—— 成功时是
+`"ok": true` 加原有字段，失败时是
+
+```json
+{"ok": false, "error": {"code": "environment", "exit": 4,
+                         "message": "the accessibility API is not answering (cannotComplete)",
+                         "next": "the Mac may be asleep or at the login window…",
+                         "ax": "cannotComplete"}}
+```
+
+（为了好看换了行、`next` 也截短了；真实输出是一行一个对象）
+
+其中 `code` 是 `usage|permission|environment|notFound|notActionable`（一个码对应一个词），
+`exit` 就是那个数字，`ax` 是 AXError 名字（`cannotComplete`），只出现在权限类和环境类；
+码 `5`、`6` 把自己的 AXError 名字写在 `message` 里。以前只认名字（`doctor` 旧载荷里的 `error`
+字段）的调用方，现在读 `error.ax`。散文一律走 stderr；`press`/`set` 成功时回
+`{"ok":true,"command":"press|set","ref":"@e7","label":"…","before":"…","after":"…","elapsedMs":3}`
+（`press` 在元素消失时 `after` 是 `null`、同时多一个 `note`，写进去了但回读没变时也是这个 `note`；
+`set` 遇到元素消失宁可退 `6` 也不报一个空回读，另外会回写进去的 `value`），其余形状见 `krd ax --help`。
+字段值就是二进制里的英文串（`message` / `next` / `ax` 不翻译）。
 
 ## 环境要求
 
