@@ -233,6 +233,8 @@ stats: 113 tiles/s  1 dirty  8 KB  3.88 MB/s  ms[zlib=1 write=0]  2329x1452 px 1
 | `probe/kclick.py` | 用一块已知的放置矩形做命中测试，把点击反映射回图像像素 |
 | `probe/kdrag.py` | `?1002h ?1006h` 下的按下/拖动/松开 + 滚轮，不重传 |
 | `probe/kbench.py`、`probe/kpace.py` | 固定帧率下的管道吞吐与背压 |
+| `probe/termcaps.py` | 一台终端上 UI 能假设的一切、以及问一次的代价：身份、`U=1`、`a=f`、键盘、尺寸、颜色、DECRQM、2033/2048 的即时报告、字形宽度（开/关 2027）、REP、DSR 往返、20 个查询逐个问 vs 一次写完。本地和 `ssh -t` 各跑一次对比（`--json`、`--report`） |
+| `probe/placeholder_overlay.py` | 在 `U=1` 占位符格子上写文字会不会把那里的图盖掉（mirror 上的浮层），把占位符写回去能不能不重发就让图回来，OSC 22 会不会改指针形状。文字层永远显示浮层，所以要看像素：截屏，看三个区块里还有没有品红的图 |
 | `probe/sck_probe.swift` | `CGPreflightScreenCaptureAccess()`、`CGPreflightPostEventAccess()`、显示器/窗口枚举（在目标 Mac 上跑，看 TCC 是不是问题所在） |
 | `probe/zoom_update_probe.swift` | 运行中的 `SCStream` 能否用 `updateConfiguration` 就地改裁剪：10 次平移的延迟、稳定帧数、像素证据，以及每次裁剪内的活性检查（issue #54 就是先过这道门） |
 | `probe/display_probe.swift` | 哪种显示器变化机制会触发：`now`、`list`、`set <i>`（真的改分辨率）、`watch [--appkit]` 十秒内打印 CoreGraphics 回调与 AppKit 通知 |
