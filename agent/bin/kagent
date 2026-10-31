@@ -912,33 +912,24 @@ def cmd_render(args, context):
         if native is not None:
             probe = native.w <= 1 and native.h <= 1
             entry["native_px"] = [native.w, native.h]
-            # Pixels are quality, cells are geometry (design §6.9). What that means depends on the
-            # transport, and the two are not interchangeable:
+            # Pixels are quality, cells are geometry (design §6.9) -- and that is true on *both*
+            # transports, which took a wrong bug report to learn. krd always sends `c=`/`r=` with a
+            # placement, and kitty scales the image into that rectangle of cells, so the picture
+            # lands in its box whatever size the image is. A 2x image is sharper; a 1x image on a 2x
+            # pane is a screenshot the terminal upscales, which reads as soft.
             #
-            #   with placeholders  the *terminal* fits the image into the rectangle of cells, so the
-            #                      image may be any size at least as big as its box. Smaller than the
-            #                      box is the bug this repo paid for ("the desktop at half size in the
-            #                      corner"): the terminal upscales and it looks soft, or the image
-            #                      sits in one corner and the rest is background.
-            #   pixel-sized        there is no fitting: the image is drawn one pixel per device
-            #                      pixel, so anything but an exact match leaves seams.
+            # So the only thing pixels can be wrong about is quality, and only one direction is a
+            # defect: asking for *fewer* pixels than the picture occupies means the terminal has to
+            # invent them ("the desktop at half size in the corner" was that bug, seen at 1x). More
+            # pixels than the box is the point of `--dpr`.
             k = native.w / box[0] if box[0] else 0
             upscaled = native.w < box[0] or native.h < box[1]
             multiple = (k >= 1 and float(k).is_integer()
                         and (native.w, native.h) == (box[0] * int(k), box[1] * int(k)))
-            if p_.unicode_placeholder:
-                # The terminal fits the image into the rectangle of cells, so *any* size fills the
-                # box: a smaller image is soft, not misplaced, and the "half size in the corner" bug
-                # this rule was written for is a property of the pixel path, which has no fitting.
-                # A placeholder run is judged on its geometry elsewhere (wall-fits-any-pane.sh, and
-                # the content aspect against the source in wall-cards-keep-their-aspect.sh).
-                entry["fit"] = ("exact" if (native.w, native.h) == box
-                                else "%dx" % k if multiple
-                                else "upscaled" if upscaled else "fitted")
-                broken = False
-            else:
-                entry["fit"] = "exact" if (native.w, native.h) == box else "scaled"
-                broken = (native.w, native.h) != box
+            entry["fit"] = ("exact" if (native.w, native.h) == box
+                            else "%dx" % k if multiple
+                            else "upscaled" if upscaled else "fitted")
+            broken = upscaled
             entry["probe"] = probe
             if not probe and broken:
                 misfits.append({"image": p_.image_id, "native": [native.w, native.h],

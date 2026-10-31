@@ -64,9 +64,17 @@ def place(iid, cols, rows, pid=0, hold_cursor=True, extra=""):
 # -- 0. the diacritic table is imported, not guessed ------------------------------------------
 # Render.swift's placeholderDiacritics is the authority for the row encoding; if someone edits
 # it, the copy in vt.py has to move with it or the placeholder path quietly paints row 0.
-line = open(RENDER, encoding="utf-8").read().split("\n")[455]        # Render.swift:456
-want = tuple(int(cp, 16) for cp in re.findall(r"\\u\{([0-9A-Fa-f]+)\}", line))
-check("0. DIACRITICS == Render.swift:456", want == vt.DIACRITICS and len(want) == 256,
+#
+# Found, not addressed by line number: the array used to sit on line 456, and a base that grew by
+# 150 lines above it turned this check into a comparison against an unrelated line of code. A test
+# that locates its subject survives the file moving around it.
+source = open(RENDER, encoding="utf-8").read()
+anchor = source.find("placeholderDiacritics")
+opening = source.find("= [", anchor)          # the array literal, not the `[Character]` type in front
+end = source.find("]", opening) if opening > 0 else len(source)
+block = source[opening:end if end > 0 else len(source)]
+want = tuple(int(cp, 16) for cp in re.findall(r"\\u\{([0-9A-Fa-f]+)\}", block))
+check("0. DIACRITICS == Render.swift", want == vt.DIACRITICS and len(want) == 256,
       "%d codepoints, first=U+%04X" % (len(vt.DIACRITICS), vt.DIACRITICS[0]))
 
 # -- 1. the committed fixture ----------------------------------------------------------------

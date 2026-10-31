@@ -48,16 +48,13 @@ for p in pictures:
         problems.append("picture %d covers the scroll-bar column %d" % (p["image"], cols))
     if r + h - 1 >= rows:
         problems.append("picture %d covers the footer row %d" % (p["image"], rows))
-    # Pixels are quality, cells are geometry: a terminal that reports its cell in points asks for
-    # two device pixels per cell (`--cell-mode points`, the Rex-like default), so the expected size
-    # is an integer multiple of the box -- and a fraction of it is the seam bug, not a small picture.
+    # Pixels are quality, cells are geometry. The terminal scales the image into the cell rectangle
+    # (krd always sends `c=`/`r=`), so the only pixel defect is asking for *fewer* pixels than the
+    # picture occupies -- the terminal would have to invent them. More is the point of `--dpr`.
     native = p.get("native_px")
-    if native:
-        k = native[0] / (w * cw) if w and cw else 0
-        if not (k >= 1 and float(k).is_integer()
-                and native[1] == round(h * ch * k)):
-            problems.append("picture %d is %s px for a %dx%d cell box (%.2f x)" % (
-                p["image"], native, w, h, k))
+    if native and (native[0] < w * cw or native[1] < h * ch):
+        problems.append("picture %d is %s px for a %dx%d cell box: it would be upscaled" % (
+            p["image"], native, w, h))
 for i in range(len(pictures)):
     for j in range(i + 1, len(pictures)):
         a, b = pictures[i]["cell_rect"], pictures[j]["cell_rect"]

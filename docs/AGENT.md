@@ -191,7 +191,8 @@ These are not style preferences; each one has already cost a run.
 | a terminal ignores `type` | characters never appear, no error | fixed: `type` posts a keycode as well as a unicode string — a terminal reads only the keycode |
 | `krd ax find` matcher | `element:` cannot see past a `value="…"` elision | use `text:<query>`, which searches the full value on the target |
 | the harness stops answering the terminal | krd measures an invented 8x16 cell; pictures are half size, every check still green | `kagent selftest` prints `the pty answers u1=… cellsize=…`; a zero there is the harness, not the product |
-| `--selftest` on a points terminal | tiles 64x64 inside a 136x132 box | the selftest is the pixel path and has no device cell to ask for; run it with `--cell-mode pixels`, or give krd `--cell` |
+| `--selftest` on a points terminal | tiles 64x64 inside a 136x132 box: soft, but in the right place | the selftest is a wire test and does not probe for geometry; run it with `--cell-mode pixels`, or give krd `--cell` |
+| "the picture is bigger than its box" | a 2x image for a 1x box looks like overflow | krd sends `c=`/`r=`, so the terminal scales the image into the cell rect: pixels are quality, cells are geometry. Measure the ink, not the transmit header |
 
 ## Two scenarios that are known to pass
 

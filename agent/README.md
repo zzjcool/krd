@@ -240,9 +240,15 @@ expected to fail, they spell out what is wrong and what "fixed" would mean, and 
 by moving into `checks/` once the baseline arm of `kagent prove` fails and the working tree passes:
 
 ```bash
-kagent prove --check agent/hunts/pixel-path-with-dpr-overflows-its-box.sh --baseline HEAD
+kagent prove --check agent/hunts/<finding>.sh --baseline HEAD
 # not-fixed  (both arms fail) -- a finding, not a regression
 ```
+
+It is empty today, and the first thing that went into it is the reason the rule exists: a claimed
+`--no-placeholders --dpr 2` overflow that turned out to be my own misreading. krd always sends
+`c=`/`r=` with a placement and kitty scales the image into that rectangle of cells, so a 2x capture
+is *sharper*, not too big -- measured, the picture's ink runs exactly from its box's first column to
+its last and not one pixel past it. A finding is worth filing when the numbers say so twice.
 
 ### 5½. A real terminal, driven
 
