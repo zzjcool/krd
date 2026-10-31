@@ -55,10 +55,10 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// not expose its own on this SDK, so this is the copy `updateSource` mutates.
     private var config: SCStreamConfiguration?
 
-    /// `sourceRect` crops on the server (macOS 14+), so a zoomed capture copies *fewer* pixels per
-    /// frame instead of being upscaled on the CPU. It is relative to the filter's content origin
-    /// (see `Desk.cropForFilter`).
-    func start(filter: SCContentFilter, sourceRect: CGRect?, width: Int, height: Int, fps: Int) async throws {
+    /// The stream's settings in one place, so the property that decides whether a source smaller
+    /// than the frame is *scaled into it* or drawn 1:1 in its corner is reachable from a test.
+    static func configuration(width: Int, height: Int, fps: Int, sourceRect: CGRect?,
+                              showsCursor: Bool) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         if let sourceRect, sourceRect.width >= 1, sourceRect.height >= 1 {
             config.sourceRect = sourceRect
@@ -71,6 +71,36 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
         config.showsCursor = showsCursor
         config.colorSpaceName = CGColorSpace.sRGB
         config.capturesAudio = false
+        // **Scale the source into the frame.** Off by default, and the default is what put the
+        // mirror's picture in the top-left corner: a window filter draws the window at its *native*
+        // pixels, anchored top-left, and pads the rest of the frame with black; a display filter
+        // scales itself. The mirror asks for the pane's cell box, which is routinely larger than
+        // the window's own pixels, so that padding arrived as tiles and the window shrank into a
+        // corner of them. Measured here (macOS 27.0.1; same request, only this flag changed), as the
+        // share of the frame the picture covers:
+        //   window 56  (360x180 pt = 720x360 px) asked 1440x720:  48 % x 46 % -> 96 % x 92 %
+        //   window 55  (360x360 px) asked 1800x1800:              18 % x 18 % -> 92 % x 92 %
+        //   window 103 (3024x1898 px) asked 3400x2200:            89 % x 86 % -> 100 % x 97 %
+        //   display 1  asked 2400x1560:                           100 % -> 100 %
+        // So this is a *window* fix, which is why issues #69 and #121 (the placement box comes from
+        // the source, not the pane; a stream upscales to it instead of being padded) were visible
+        // only there. `PanelCapture.fitted` holds the same knowledge for the screenshot path, where
+        // it is enough to not ask for more than the source has: `SCScreenshotManager` is one
+        // image, so it can be capped and upscaled once on the CPU. A mirror is a stream: it cannot
+        // afford a CPU upscale per frame, so the scaling belongs on the compositor's side.
+        //
+        // The running stream keeps this: `updateSource` copies this same configuration, so the flag
+        // survives a pan.
+        config.scalesToFit = true
+        return config
+    }
+
+    /// `sourceRect` crops on the server (macOS 14+), so a zoomed capture copies *fewer* pixels per
+    /// frame instead of being upscaled on the CPU. It is relative to the filter's content origin
+    /// (see `Desk.cropForFilter`).
+    func start(filter: SCContentFilter, sourceRect: CGRect?, width: Int, height: Int, fps: Int) async throws {
+        let config = Self.configuration(width: width, height: height, fps: fps,
+                                        sourceRect: sourceRect, showsCursor: showsCursor)
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)

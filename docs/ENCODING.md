@@ -249,11 +249,27 @@ that is the point of measuring it.
 ## The placement box comes from the source, not the pane (issue #69)
 
 `--window` used to size the capture from the pane's box (`cols × cellW × rows × cellH`) whatever the
-source was. ScreenCaptureKit does not upscale a window into a box larger than the window: it draws the
-window 1:1 in the top-left and **pads the rest with black**. On a 1024×678 window in a 70×24 pane
+source was. ScreenCaptureKit does not upscale a window into a box larger than the window unless told to: it
+draws the window 1:1 in the top-left and **pads the rest with black**. On a 1024×678 window in a 70×24 pane
 (1190×792 px box) that was 31.8 % of the frame, and because the pointer was mapped across the whole
 padded box, a click near the picture's right edge was sent ~143 pt to its left — which is why the
-window felt unoperable.
+window felt unoperable. That 1:1 draw is the **default** of a window-filtered stream; `Capturer` sets
+`SCStreamConfiguration.scalesToFit` now (macOS 12.3+, so no guard is needed), and the stream scales the
+source into the requested box instead of padding it. The aspect is kept
+(`preservesAspectRatio` defaults on), so the sub-cell slack that `TileGrid`'s `ceil` can leave becomes a
+thin band inside the frame rather than a stretch.
+
+Measured with the flag (macOS 27.0.1, `probe/stream_fit_probe.swift`): the 360×180 pt window whose native pixels
+are 720×360 fills 96 % by 92 % of a 1440×720 request, where without it krd drew 690×328 px at (15,16) - 48 % of
+the width by 46 % of the height; a 180×180 pt control asked for 1800×1800 goes 18 % by 18 % → 92 % by 92 %, a
+3024×1898 px window asked for 3400×2200 89 % by 86 % → 100 % by 97 %, while a display stream measured 100 %
+either way, and a display asked for an aspect it does not have letterboxes identically with the flag off and
+on (a 2400×1200 request for a 1512×982 display: 1848×1200 at x = 276, both ways) - so the display page is
+unchanged. What makes #121 safe for the mirror is the first line: the frame may be larger than the source
+because the stream makes up the difference, where the *screenshot* path keeps its request inside the source
+(`PanelCapture.fitted`: a screenshot can be enlarged afterwards, but that is CPU work on every capture,
+`PanelRaster.rgb`). #69 ran without the flag, so capping the request was the only way to keep the padding
+out of the frame.
 
 The rule now:
 

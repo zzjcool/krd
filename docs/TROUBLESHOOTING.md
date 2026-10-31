@@ -355,8 +355,9 @@ tile row showed the background: ten tile rows, nine seams.
 Fix (#121): a tile's pixel rect **is that tile's own cell box** now (`TileGrid.rect`), never a slice of
 the frame, and the frame **is** the cell box too (`TileGrid.make`; `--scale` still applies where the cell
 arrived in points - see `ARCHITECTURE.md` §6, Capture scale). The stream upscales to the request —
-measured 1920x1200 -> 2006x1254, no dropped frames. A screenshot cannot (it pads with black, §23e), which
-is why the wall caps its request and upscales itself; two transports, two rules.
+measured 1920x1200 -> 2006x1254, no dropped frames, and a window stream joins it once `scalesToFit` is set.
+A screenshot does not scale on its own (it pads with black, §23e), which is why the wall caps its request and
+upscales itself; the stream's rule and the screenshot's are stated together in §23e.
 
 | what you see | what it means |
 |---|---|
@@ -392,10 +393,27 @@ use whichever one the probe picked, so this section applies to either page.
    fills the box it was given, just at an odd shape).
 
    *If the desktop shrinks as the picture gets bigger*, the picture is not the problem: `SCStreamConfiguration`
-   does not upscale, it draws the source at its own size and pads the rest with black, so a request for more pixels
+   does not upscale by default, it draws the source at its own size and pads the rest with black, so a request for more pixels
    than the source has arrives as a desktop in the corner of a larger black canvas. krd logs both numbers -
    `capture 2431x1518 px asked, 1920x1199 px from a 1920x1200 px source` - and caps the request at the source
    (`PanelCapture.fitted`), upscaling to the panel's exact pixels itself.
+
+   Three transports, three answers: a *window* stream draws the source at its own size and pads - the same corner
+   as the screenshot above, but with the mirror's own log line - a *display* stream upscales on request all along,
+   and a *screenshot* pads too unless told otherwise, and once told the enlargement is CPU work on every capture
+   (`PanelRaster.rgb`), which is why `PanelCapture.fitted` keeps that request inside the source. `config.scalesToFit` (macOS 12.3+, below the package's 14 floor) makes
+   both filters upscale, and `Capturer` sets it: a 360x180 pt window (720x360 px native) got 690x328 px at (15,16) of a
+   1440x720 request and gets 96 % by 92 % now, a 180x180 pt control went from 18 % by 18 % to 92 % by 92 %, a
+   3024x1898 px window from 89 % by 86 % to 100 % by 97 %, and a display stayed at 100 % (a request below the source
+   changes nothing, and one whose aspect misses letterboxes identically with the flag off and on: a 2400x1200 request
+   for a 1512x982 display gives 1848x1200 at x = 276 either way). The aspect is kept, so the sub-cell slack that
+   `TileGrid`'s `ceil` can leave is a thin band inside the frame, not a stretch. So the signature is not a too-small
+   frame - `frame` and `grid wants` agree while the desktop
+   still sits in the corner at its own size:
+   `mirror grid 140x36 cells at 17x33 px, pane 141x56, src 360x180 px, fit 6.600, origin 1,11, frame 2380x1188 px`
+   was that (the `src` is in points; that window's native pixels were 720x360), 687x327 px of content in a
+   2380x1188 px frame (29 % by 28 %), invisible to every size check in the log.
+   `probe/stream_fit_probe.swift` re-measures it; if it returns, check the `scalesToFit` line in `Capturer`.
 
 3. `--placeholders` / `--no-placeholders` force either path, which is how a terminal is compared against itself.
 
@@ -815,9 +833,10 @@ trips it). The state of that investigation is in
 
 Both halves were one bug (issue #69): the capture size came from the pane's box, and when that box is
 larger than the window ScreenCaptureKit does **not** upscale — it draws the window 1:1 in the top-left
-and pads the rest with black (31.8 % of the frame in a 70×24 pane on a 1024×678 window). The pointer
-was mapped across the whole padded box, so a click near the right edge of the picture was sent ~143 pt
-to its left.
+and pads the rest with black (31.8 % of the frame in a 70×24 pane on a 1024×678 window) unless
+`scalesToFit` is set - §23e has that flag and what it changed; a window stream with it on upscales into
+the request instead of padding. The pointer was mapped across the whole padded box, so a click near the
+right edge of the picture was sent ~143 pt to its left.
 
 The frame is now the source at `min(boxW/srcW, boxH/srcH, 1)` px, placed as large as the pane allows
 (`ceil` cells, anchored at the pane's top-left — the terminal upscales the frame into them); cells the
