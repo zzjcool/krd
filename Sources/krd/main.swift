@@ -40,6 +40,12 @@ struct Options {
     /// Whether `--quality` (or `--no-quantise`) was typed. The selftest's sha256 is a byte contract,
     /// so naming a lossy rung next to it is a usage error -- the default must keep working.
     var qualityPinned = false
+    /// How much colour the **landing screen's** pictures may lose (`--wall-quality`, 0...100, default
+    /// 70 = 5-5-5). Separate from `--quality` on purpose (issue #88): the mirror's number answers a
+    /// per-frame question and its ladder moves it as the pipe falls behind, while the wall paints once
+    /// per change and the reader is waiting for *a* picture, over the same link that then carries it.
+    /// One knob, one axis: bits per pixel. Never a smaller picture (see `QualityBudget.wall`).
+    var wallQuality = QualityBudget.wall
     /// How characters reach the mirrored Mac (issue #16). `auto` presses physical keys where the
     /// terminal reports one and injects text otherwise; `raw` never injects; `unicode` injects
     /// anything that is not plain ASCII.
@@ -200,11 +206,20 @@ func usage() -> String {
                           50 is 4-4-4 for everything. Values in between round down to the next
                           rung (79 is 80). Bit depth is the axis: on a photograph 70 costs 1.48x
                           and 50 costs 1.69x less than 100 (docs/ENCODING.md). Only the mirror
-                          path encodes pixels, so the wall and --full-frame ignore it. 'auto' is
-                          the default: it spends colour first (80 -> 70 -> 50), then frame rate
+                          path encodes pixels: the landing screen has its own knob
+                          (--wall-quality) and --full-frame ignores both. 'auto' is the default:
+                          it spends colour first (80 -> 70 -> 50), then frame rate
                           (20 -> 15 -> 10), and only then lets --scale auto take resolution.
                           Give a number to pin it (--quality 80 is then exactly the old behaviour)
-      --no-quantise       same as --quality 100 (pinned, no ladder)
+      --no-quantise       same as --quality 100 (pinned, no ladder). It is the MIRROR's lossless:
+                          the wall's is --wall-quality 100, and --no-quantise does not set it
+      --wall-quality <0-100|auto>
+                          how much colour the landing screen's pictures may lose (issue #88): 100
+                          is the old lossless wall, 70 (the default) is 5-5-5 and 50 is 4-4-4, on
+                          every panel. Bit depth only: the picture is still exactly its cells,
+                          never a smaller picture in the same box, so nothing is cropped and no
+                          seam appears. 'auto' is the default rung - the wall captures once per
+                          change, so there is no ladder to climb and nothing to adapt to
       --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
                           out (Ctrl-V: terminal -> target), both
       --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
@@ -321,6 +336,20 @@ func parseQualitySpec(_ spec: String) throws -> (budget: QualityBudget, auto: Bo
         throw UsageError("--quality wants 0...100 or auto, got \"\(spec)\"")
     }
     return (QualityBudget(value), false)
+}
+
+/// `--wall-quality <0-100|auto>`, or a usage error: same grammar as `--quality`, one difference.
+///
+/// The wall has no quality ladder -- it captures once per change rather than once per frame, so there
+/// is no write rate to react to and nothing to climb down. `auto` therefore resolves to the default
+/// rung (`QualityBudget.wall`, 5-5-5) instead of to a governor: it is the honest spelling of "krd
+/// decides" for a knob whose only other answer is a fixed number.
+func parseWallQualitySpec(_ spec: String) throws -> QualityBudget {
+    if spec.lowercased() == "auto" { return .wall }
+    guard let value = Int(spec), (0...100).contains(value) else {
+        throw UsageError("--wall-quality wants 0...100 or auto, got \"\(spec)\"")
+    }
+    return QualityBudget(value)
 }
 
 /// `--symbols <spec>`, or a usage error: a typo must not silently pick a glyph table.
@@ -481,6 +510,12 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             options.quality = parsed.budget
             options.qualityAuto = parsed.auto
             options.qualityPinned = true
+        // The wall's own knob (issue #88), with both spellings for the same reason as `--quality=`:
+        // a flag that silently does nothing when typed the natural way is worse than a usage error.
+        case "--wall-quality":
+            options.wallQuality = try parseWallQualitySpec(value("--wall-quality", args, &i))
+        case let arg where arg.hasPrefix("--wall-quality="):
+            options.wallQuality = try parseWallQualitySpec(String(arg.dropFirst("--wall-quality=".count)))
         case "--cursor": options.drawsCursor = true
         case "--no-cursor": options.drawsCursor = false
         case "--selftest": options.selftest = true
@@ -1293,6 +1328,11 @@ final class Desk {
         wallPane = pane
         WallPictures.demo = options.demo
         WallPictures.square = options.square
+        WallPictures.quality = options.wallQuality
+        // One line, because this knob moves a byte count nobody can see: `--wall-quality 100` is how a
+        // reader (or a bench) asks for the pre-#88 wall back, so the log says which rung is in force.
+        Log.write("krd: wall pictures at --wall-quality \(options.wallQuality.value) "
+                  + "(\(options.wallQuality.label))\n")
         // Pictures: kitty unicode placeholders when the terminal accepts them, else pixel-sized
         // placements. One probe, one log line, and the answer is a reply rather than a hope - a
         // terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells.
@@ -1562,26 +1602,39 @@ final class Desk {
             // picture lands where the layout says whatever the terminal claims its cell is. The
             // pixel-sized path stays behind the flag: it is the only way to tell which of the two
             // misbehaved when a terminal refuses placeholders.
+            let bytes: Int
             if wallPlaceholders {
-                writer.emitPanelAsPlaceholder(id: picture.panel.imageID,
-                                              placementID: picture.panel.placementID,
-                                              row: picture.panel.rect.row,
-                                              col: picture.panel.rect.col,
-                                              cols: picture.panel.rect.cols,
-                                              rows: picture.panel.rect.rows,
-                                              pixels: picture.pixels, width: picture.width,
-                                              height: picture.height, level: Self.wallPanelLevel,
-                                              paneCols: pane.cols, paneRows: pane.rows,
-                                              format: .rgba, sync: writer.perTileSync)
+                bytes = writer.emitPanelAsPlaceholder(id: picture.panel.imageID,
+                                                      placementID: picture.panel.placementID,
+                                                      row: picture.panel.rect.row,
+                                                      col: picture.panel.rect.col,
+                                                      cols: picture.panel.rect.cols,
+                                                      rows: picture.panel.rect.rows,
+                                                      pixels: picture.pixels, width: picture.width,
+                                                      height: picture.height, level: Self.wallPanelLevel,
+                                                      paneCols: pane.cols, paneRows: pane.rows,
+                                                      format: .rgba, sync: writer.perTileSync)
             } else {
-                writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
-                                 row: picture.panel.rect.row, col: picture.panel.rect.col,
-                                 cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
-                                 pixels: picture.pixels, width: picture.width,
-                                 height: picture.height, level: Self.wallPanelLevel,
-                                 // RGBA: the bars are transparent so the wall's own background shows
-                                 // through (design §6.6) - the mirror's tiles stay opaque RGB.
-                                 format: .rgba, sync: writer.perTileSync)
+                bytes = writer.emitPanel(id: picture.panel.imageID, placementID: picture.panel.placementID,
+                                         row: picture.panel.rect.row, col: picture.panel.rect.col,
+                                         cols: picture.panel.rect.cols, rows: picture.panel.rect.rows,
+                                         pixels: picture.pixels, width: picture.width,
+                                         height: picture.height, level: Self.wallPanelLevel,
+                                         // RGBA: the bars are transparent so the wall's own background shows
+                                         // through (design §6.6) - the mirror's tiles stay opaque RGB.
+                                         format: .rgba, sync: writer.perTileSync)
+            }
+            // The landing screen's own unit of cost (issue #88): one line per panel, saying how many
+            // pixels it was and how many bytes zlib made of them at this `--wall-quality`. `--demo`
+            // is what makes the number reproducible without a desktop - same pattern, same path, same
+            // encoder - and `--wall-quality 100` beside it is the before/after pair.
+            if options.demo || options.debug, bytes > 0 {
+                // `bytes` is the zlib payload, not the whole wire (the escapes and the placeholder
+                // grid are the transport's), so the line says payload.
+                Log.write("krd: wall slot \(picture.panel.slot) picture "
+                          + "\(picture.width)x\(picture.height) px -> \(bytes) B payload "
+                          + "at --wall-quality \(options.wallQuality.value) "
+                          + "(\(options.wallQuality.label))\n")
             }
         }
         writer.endFrame()
@@ -1724,6 +1777,13 @@ final class Desk {
             arguments += ["--quality", "auto"]
         } else if options.qualityPinned {
             arguments += ["--quality", String(options.quality.value)]
+        }
+        // The wall's own rung travels for the same reason (issue #88): it is a decision about *this
+        // pane's* link, typed once, and a click into a picture and back is a new process. `auto`
+        // equals the default, so an untyped knob needs no flag - the guard is the value, not a
+        // pinned bit.
+        if options.wallQuality != QualityBudget.wall {
+            arguments += ["--wall-quality", String(options.wallQuality.value)]
         }
         if options.fps != Options().fps {
             arguments += ["--fps", String(options.fps)]

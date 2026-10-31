@@ -1,4 +1,5 @@
 import XCTest
+import krdcore
 @testable import krd
 
 /// The command line is the first thing krd reads, and until issue #122 it was the one thing it could
@@ -38,7 +39,8 @@ final class ArgumentTests: XCTestCase {
 
     func testAFlagWithNoValueIsRefusedAndNamesItself() {
         for flag in ["--fps", "--display", "--zoom", "--tile", "--cell", "--format",
-                     "--window", "--quality", "--ime", "--clipboard", "--log", "--scale"] {
+                     "--window", "--quality", "--wall-quality", "--ime", "--clipboard", "--log",
+                     "--scale"] {
             XCTAssertEqual(refusal(["krd", flag]), "\(flag) needs a value", flag)
         }
     }
@@ -79,6 +81,14 @@ final class ArgumentTests: XCTestCase {
                        "--wall-at wants <stage>:<card>, got \"nonsense\"")
         XCTAssertEqual(refusal(["krd", "--said", "1"]),
                        "--said needs <exit> <text> (the failed mirror's status and its sentence)")
+        // The wall's own knob has the mirror's grammar, and its own sentence: a typo must not quietly
+        // leave the landing screen at the default rung (issue #88).
+        XCTAssertEqual(refusal(["krd", "--wall-quality", "150"]),
+                       "--wall-quality wants 0...100 or auto, got \"150\"")
+        XCTAssertEqual(refusal(["krd", "--wall-quality", "cheap"]),
+                       "--wall-quality wants 0...100 or auto, got \"cheap\"")
+        XCTAssertEqual(refusal(["krd", "--wall-quality=abc"]),
+                       "--wall-quality wants 0...100 or auto, got \"abc\"")
     }
 
     /// A parseable value keeps its old normalisation even when it is out of the useful range: the
@@ -89,6 +99,32 @@ final class ArgumentTests: XCTestCase {
         XCTAssertEqual(try parseArguments(["krd", "--fps", "-1"]).fps, 1)
         XCTAssertEqual(try parseArguments(["krd", "--zoom", "0"]).zoom, 0)
         XCTAssertEqual(try parseArguments(["krd", "--display", "-1"]).displayIndex, -1)
+    }
+
+    /// The two quality knobs are one grammar and two answers (issue #88): a value is a rung of the
+    /// same ladder, `auto` is "krd decides", and the wall's default is not the mirror's.
+    func testTheWallQualityKnobIsItsOwnDefault() throws {
+        let untouched = try parseArguments(["krd"])
+        XCTAssertEqual(untouched.wallQuality, QualityBudget.wall)
+        XCTAssertEqual(untouched.wallQuality.value, 70)
+        XCTAssertEqual(untouched.wallQuality.label, "5-5-5")
+        XCTAssertEqual(untouched.quality, QualityBudget.default, "the mirror's default is untouched")
+        XCTAssertFalse(untouched.qualityPinned)
+
+        // Both spellings, and every rung of the ladder the mirror already knows.
+        XCTAssertEqual(try parseArguments(["krd", "--wall-quality", "100"]).wallQuality.bits, nil)
+        XCTAssertEqual(try parseArguments(["krd", "--wall-quality", "80"]).wallQuality.label, "5-6-5")
+        XCTAssertEqual(try parseArguments(["krd", "--wall-quality=50"]).wallQuality.label, "4-4-4")
+        XCTAssertEqual(try parseArguments(["krd", "--wall-quality", "auto"]).wallQuality,
+                       QualityBudget.wall, "auto is the default rung: the wall has no ladder")
+        XCTAssertEqual(try parseArguments(["krd", "--wall-quality", "AUTO"]).wallQuality,
+                       QualityBudget.wall)
+        // Naming one knob must not move the other: a reader who types only `--wall-quality 50` keeps
+        // the mirror's own default (`--quality auto`).
+        let wallOnly = try parseArguments(["krd", "--wall-quality", "50"])
+        XCTAssertEqual(wallOnly.quality, QualityBudget.default)
+        XCTAssertFalse(wallOnly.qualityPinned)
+        XCTAssertFalse(wallOnly.qualityAuto)
     }
 
     func testAValidCommandLineParsesExactlyAsBefore() throws {

@@ -48,6 +48,22 @@ enum WallPictures {
     /// Square corners (`--square`). Rounded is the default: a picture is the size of its cells, so a
     /// cut corner shows the wall underneath, not a frame around a smaller picture (§6.6).
     static var square = false
+    /// `--wall-quality`: how far a panel's colour may drop before zlib (issue #88, `QualityBudget`).
+    /// Set once before the first paint, like `demo` and `square`.
+    ///
+    /// Lossy *only in bit depth*: the picture keeps every pixel `WallPanels.plan` gave it, because the
+    /// landing screen's rule is that the picture is its cells (§6.6, #121) - so this knob can never
+    /// re-open "a smaller picture in the same box", and it can never show a seam. What it buys is
+    /// bytes on the wire and, because quantised pixels are more repetitive, a cheaper deflate.
+    static var quality = QualityBudget.wall
+
+    /// A panel's pixels after `--wall-quality`. 4 bytes per pixel, so the alpha the rounded corners
+    /// put in their holes survives untouched - this is a colour-depth knob, not an alpha one.
+    /// `--wall-quality 100` returns the pixels it was given, byte for byte.
+    static func quantised(_ pixels: [UInt8], quality: QualityBudget) -> [UInt8] {
+        guard let bits = quality.bits else { return pixels }
+        return ScreenWriter.quantise(pixels, bits: bits, bytesPerPixel: 4)
+    }
 
     static func capture(_ panels: [WallPanel]) async -> (pictures: [Picture],
                                                           failures: [Int: PanelCaptureError]) {
@@ -76,7 +92,10 @@ enum WallPictures {
                     Log.write("krd: demo picture on slot \(panel.slot): "
                               + "\(panel.rect.cols)x\(panel.rect.rows) cells, "
                               + "\(width)x\(height) px\n")
-                    pictures.append(Picture(panel: panel, pixels: pixels,
+                    // The demo takes the same path as a capture, quantisation included: a byte count
+                    // measured on the demo is only worth reporting if it is the real encoder's.
+                    pictures.append(Picture(panel: panel,
+                                            pixels: Self.quantised(pixels, quality: Self.quality),
                                             width: width, height: height))
                     continue
                 }
@@ -121,7 +140,8 @@ enum WallPictures {
                 guard canvas.count == raster.width * raster.height * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                pictures.append(Picture(panel: panel, pixels: canvas,
+                pictures.append(Picture(panel: panel,
+                                        pixels: Self.quantised(canvas, quality: Self.quality),
                                         width: raster.width, height: raster.height))
             } catch {
                 let reason = PanelCapture.classify(error)
