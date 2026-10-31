@@ -154,6 +154,39 @@ to, because the cards of the new page are different windows. The footer gains th
 its hint (`Tab selects · Enter opens · Esc clears`) only once the ring is on, which is why the four
 golden dumps are byte for byte what they were.
 
+**The chrome answers the same pointer, out of the same kind of table.** The mirror's bar and the
+`--dev` status line and panels were hit-tested by a hand-written set of rectangles: a cell was a
+control only if the drawer happened to stamp an id on it, and every other cell of a chrome row — the
+bar's reversed fill, its numbers, the status line's separators, the clock — answered "the picture",
+i.e. "not the chrome". So `chromeOwns` said no, the report fell through to the outside-the-picture
+branch, and that branch hands the cell back to the chrome's click path, whose `.picture` arm does
+nothing: a **dead cell**, painted as furniture and answering nothing. (The one way a chrome cell could
+still reach the desktop was a band one pixel wide at the picture's far edge, where
+`Viewport.contains(pixel:)` is inclusive — the pixel-reporting path, not the normal case; a chrome row
+now answers for itself, which closes it.) The drawer now registers one `ChromeWidget` (`id`, the
+`rect` it actually painted, a `role`, `disabled`) per painted thing, in the same loop that paints it,
+and `Chrome.route`, the hover answer and the click's action are all read out of that list: **the table
+that draws is the table that hits.** A widget's rect is the extent of the cells it wrote — never a
+second computation of where it goes — so a segment cut by the pane's edge is hit exactly where it is
+visible, and only one nesting is legal: a menu tick drawn over the panel's box wins its own cells and
+the box answers for the rest. A chrome row that carries no control answers "the chrome" (the chrome
+owns it, there is nothing to click); only the rows above the picture answer "the picture".
+
+The pointer is the wall's own value — `Pointer<Target>` in `krdcore`, with a widget id for the chrome
+and a `WallState.Focus` for the wall (`WallPointer` is now a `typealias` of it) — so `hover`/
+`pressed` are one implementation, not two. Coming onto a control underlines it in its own colour, a
+press fills it in accent and is on screen **before** the panel it opens (one main-queue job: press →
+paint → action → paint), and moving inside one control costs 0 B. Measured on a 120×30 bar:
+**31 B** entering a control, **126 B** crossing from one to another, **90 B** leaving, **29 B** for a
+press, against the plan's 600 B budget; the menu's own repaint is **1,671 B** against its 6 KB one
+(`ChromeWidgetTableTests` prints those five figures and pins a 200 B ceiling on a one-control hover —
+the plan's 600 B is the one on a whole crossing). The chrome's bytes carry no kitty graphics APC at
+all: a panel's rows come out of the picture (that is #118's row budget, and the re-fit that follows is
+the picture's own cost — unchanged here), while the chrome itself never re-sends an image, which is
+what the wall's first hover got wrong at 18 KB a move (PR #195). One control is drawn and disabled:
+the `scale` readout names a number nothing on this page can move, so it neither hovers, nor presses,
+nor routes — the state the plan calls `disabled`, rather than a string no switch happens to answer.
+
 ## 6. The bar on the right
 
 There is exactly one shape of scroll control that works in a terminal: **big, on the edge, always in the same
@@ -329,13 +362,18 @@ this bug.
 A mirror the **wall handed over** (`--wall-at`) gets one row of macOS window furniture at the top:
 
 ```
- ●  ●  ●   Terminal — admin — scroll.sh            18 fps  ·  1.8 MB/s  20:07:17  [ - ]
+ ●  ●  ●   Terminal — admin — scroll.sh    18 fps · 1.8 MB/s · 38.0 ms · 20:07:17  [ ≡ ]  [ - ]
 ```
 
 * reversed end to end, so it reads as furniture and not as picture;
 * the title is the window's app and title, or `display 1 · 1440×2560`;
 * `[ - ]` (and the traffic lights, which is what a red one does) **shrinks the window back into the wall**, on the
   page it was clicked from. It runs the same path as `Ctrl-\`: `shutdown()` → `exec` the wall with `--wall-at`;
+* `[ ≡ ]` opens the three sliders — colour, quality and frame rate (issue #87) — and the same button closes them;
+* the pointer is answered: a control underlines while the pointer is on it and fills in accent while it is pressed,
+  and the press is drawn before the menu it opens (§5). The title is a readout, not a button — the highlight is the
+  dots and `[ - ]`, so its size does not grow with the window's name. Nothing on the bar is a dead cell either: the
+  reversed fill, the numbers and the clock route as chrome, so none of them answers "the picture";
 * narrow panes drop the rate and then the clock; **the button is never dropped** — a bar without it is decoration
   pretending to be a control;
 * on by default only for a handed-over mirror. `krd --window <q>` typed by hand stays bare (it never came from a
@@ -399,9 +437,11 @@ roundings could disagree, and every "the box is right but the picture is not" re
    `>= chromeTop` — there is no runtime assertion).
 5. **Mouse already exists** (recon result, contrary to this document's earlier assumption): the SGR 1006 parse is
    `krdcore/Input.swift:176-243`, the cell-vs-pixel decision `krd/Input.swift:256-281`, `onChromeClick(cy, cx)`
-   already delivers **1-based row/col**, and `Chrome.hitTest` is there (`Chrome.swift:206`). `?1002/?1003/?1006/?1016`
-   are enabled today (`Render.swift:117-122`). **So the wall needs a policy, not a parser**: widen `hitTest`'s
-   return from `ChromeHit` into the wall's `Action`.
+   already delivers **1-based row/col**, and the chrome's own hit test is there (the `Chrome.swift` this document was
+   written against; since #200 it is `Chrome.route`, which answers out of the table the drawer built).
+   `?1002/?1003/?1006/?1016` are enabled today (`Render.swift:117-122`). **So the wall needs a policy, not a
+   parser**: answer every cell with the wall's own action table (`WallLayout.action`), the way the chrome answers
+   with its widget table.
 
    **The routing test is "inside the picture rect", not "inside the chrome area"**: `viewport.contains(cell:)` true
    → mapped and injected as a remote click (`Input.swift:282`, `Geometry.swift:64-75`); false → `onChromeClick` and

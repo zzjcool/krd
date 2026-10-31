@@ -12,8 +12,8 @@
 /// `text` is deliberately **not** a case. There is no text field in the wall (the footer is a hint,
 /// the header a count), so the third shape belongs to the mirror's later work; a case nobody can
 /// reach is a case that rots. When a text field exists, it is a `case` here plus one line in
-/// `WallPointer.shape` — the emission, the class rule and the teardown reset are already written
-/// against "whatever the wall asked for".
+/// `Pointer.shape` — the emission, the class rule and the teardown reset are already written
+/// against "whatever the surface asked for".
 ///
 /// Two facts, both measured in the recon that shaped this issue, decide everything below:
 ///

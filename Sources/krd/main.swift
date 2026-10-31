@@ -887,7 +887,9 @@ final class Desk {
     private var statsTimer: DispatchSourceTimer?
     // TUI layer (--dev). Everything below is written on the main queue at 1 Hz; the picture
     // never waits for it and the writer serializes the two.
-    private let chrome = Chrome()
+    /// Internal, with the rest of the layer's state, so a test can ask the frame's own table what
+    /// the last paint put where instead of recomputing the bar's columns by hand.
+    let chrome = Chrome()
     var chromeState = ChromeState()
     var chromeMetrics = ChromeMetrics()
     /// The log panel's offset into the log file, kept across ticks so a tick reads what the writer
@@ -4350,6 +4352,40 @@ final class Desk {
         return Array(rows.prefix(24))
     }
 
+    /// The chrome's three input seams, exactly as `startInput` installs them (and the only copy of
+    /// that wiring). Internal so a test can drive the real path.
+    ///
+    /// One seam, two surfaces: a click, a hover and "does the chrome own this cell" all end in this
+    /// class, and which half runs is decided once here — `--wall` has no chrome at all
+    /// (`chromeAvailable` is false there) and its clicks keep taking the outside-the-picture path
+    /// they were built on.
+    func installChromeSeams(_ reader: InputReader) {
+        // Read once, here: `startInput` calls this before `reader.start()`, so this is the only
+        // race-free moment to ask whether the desk is a wall.
+        let wall = wallMode
+        reader.onChromeClick = { [weak self] row, col, wheel in
+            self?.chromeClick(row: row, col: col, wheel: wheel)
+        }
+        // The pointer, for both surfaces: same thread and same hop as a click, because it ends in a
+        // repaint. The wall had this first (#195) and a mirrored desktop did not — the chrome's own
+        // buttons answered a *press* only, so the segment a reader was aiming at said nothing until
+        // they had already clicked it (#200).
+        reader.onChromeHover = { [weak self] row, col, down in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if wall { self.wallHover(row: row, col: col, down: down) }
+                else { self.chromeHover(row: row, col: col, down: down) }
+            }
+        }
+        // The reader asks this before the viewport guards: a chrome region is not "the cells the
+        // picture does not cover" (#118). Wall mode has no chrome at all (`chromeAvailable` is
+        // false there), so every wall click keeps taking the outside-the-picture path, which is
+        // what it was built on.
+        reader.chromeOwns = { [weak self] row, col in
+            self?.chromeOwns(row: row, col: col) ?? false
+        }
+    }
+
     private func startInput() {
         guard !options.noInput else { return }
         // Read once, here: `startInput()` runs on the main queue before `reader.start()` starts the
@@ -4378,9 +4414,8 @@ final class Desk {
         // the next key is the chrome's, whether it is a control byte or a printable one. Asked from
         // the reader thread, which is where `chromeKey` set it — one writer, one reader, one thread.
         reader.chromePrefixArmed = { [weak self] in self?.chromeState.prefix ?? false }
-        reader.onChromeClick = { [weak self] row, col, wheel in
-            self?.chromeClick(row: row, col: col, wheel: wheel)
-        }
+        // The three seams that end in this class: `installChromeSeams` is the only copy of them.
+        installChromeSeams(reader)
         // The wall's own keyboard: `Tab`/`Shift-Tab`, the arrows, `Enter`/`Space`, `Esc`
         // (issue #201). Installed only in wall mode — a mirrored desktop has a keyboard of its own,
         // and every one of these keys is a keystroke for *it* — and asked before the desktop sees the
@@ -4391,22 +4426,6 @@ final class Desk {
                 DispatchQueue.main.async { [weak self] in self?.wallKey(key) }
                 return true
             }
-        }
-        // The pointer, for the wall's hover: same thread and same hop as a click, because it ends in
-        // a repaint. `nil` outside wall mode -- a mirrored desktop has a real pointer of its own, and
-        // lighting up a status-line button would be krd inventing feedback the target never sent.
-        reader.onChromeHover = { [weak self] row, col, down in
-            guard let self, self.wallMode else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.wallHover(row: row, col: col, down: down)
-            }
-        }
-        // The reader asks this before the viewport guards: a chrome region is not "the cells the
-        // picture does not cover" (#118). Wall mode has no chrome at all (`chromeAvailable` is
-        // false there), so every wall click keeps taking the outside-the-picture path, which is
-        // what it was built on.
-        reader.chromeOwns = { [weak self] row, col in
-            self?.chromeOwns(row: row, col: col) ?? false
         }
         // Focus reports (`CSI I` / `CSI O`, DECSET 1004, issue #110) are about the *picture*, never
         // about the desktop: the reader hands them straight here, on the reader thread, and
@@ -4477,7 +4496,11 @@ final class Desk {
 
     /// Draw and write, on the main queue. `ScreenWriter.writeChrome` is serialized against the
     /// tile flush, so this can never split a base64 payload.
-    private func drawChrome() {
+    ///
+    /// Not `private`: the press a click paints before its action lands (#200) is a fact about the
+    /// bytes this function writes, and a test drives it rather than a copy of it (`chromeKey`'s
+    /// precedent).
+    func drawChrome() {
         guard chromeAvailable, chromeDirty, let geometry = chromeGeometry else { return }
         chromeDirty = false
         let bytes = chrome.draw(geometry: geometry, metrics: chromeMetrics, state: chromeState)
@@ -4631,10 +4654,46 @@ final class Desk {
         }
     }
 
+    /// The pointer moved over the chrome, or a button changed state: light up the widget under it.
+    ///
+    /// Asked on the main queue, from the reader's hop. The answer is `Chrome.route` — the widget
+    /// table itself — so the highlight can never sit on something a click would not act on, and the
+    /// disabled `scale` readout is never lit. A repaint happens only when the value *changes*: a
+    /// hover is one frame per crossing, not one per motion report (the wall's rule and its
+    /// measurement: 39-97 B a crossing against 9351 B for a whole wall).
+    ///
+    /// The chrome's public half of this arrived with the table (#200). The wall had a hover already
+    /// (#195) because a card is a target; the status line's segments were, until then, the surface a
+    /// reader could see and not aim at.
+    func chromeHover(row: Int, col: Int, down: Bool) {
+        guard chromeAvailable, let geometry = chromeGeometry else { return }
+        var over: String? = nil
+        if case .widget(let id) = chrome.route(row: row, col: col, geometry: geometry) { over = id }
+        // While a press the chrome took is in flight the target is frozen: the button under the
+        // finger stays lit and whatever the drag crosses does not, until the release arrives.
+        if down, chromeState.pointer.down, let held = chromeState.pointer.over { over = held }
+        let next = Pointer(over: over, down: down && over != nil)
+        guard next != chromeState.pointer else { return }
+        chromeState.pointer = next
+        if options.debug {
+            // The one thing a reader cannot see in a screenshot of a *hover*: whether the report
+            // arrived at all, and what the table made of the cell (the wall's line, verbatim in
+            // shape).
+            Log.write("chrome: pointer (\(row),\(col)) over \(over ?? "nothing")"
+                      + (next.down ? " down" : "") + "\n")
+        }
+        chromeDirty = true
+        drawChrome()
+    }
+
     /// The wall consumes every click on the pane: the whole pane is text, so "outside the picture"
-    /// is the normal case there, and a cell the wall does not know is swallowed rather than
-    /// forwarded to the remote desktop (design §8: the route decision is "inside the picture
-    /// rect", and the wall has no picture at all).
+    /// is the normal case there, and a cell the wall does not know is swallowed rather than handed to
+    /// the remote desktop (design §8: the route decision is "inside the picture rect", and the wall
+    /// has no picture at all).
+    ///
+    /// The chrome's half asks the frame's table for the *widget* under the cell and does what its
+    /// role says — no id is spelled out in this file (#200): a control's `ChromeAction` is what it
+    /// does, and a widget the table disables is skipped here without being named.
     func chromeClick(row: Int, col: Int, wheel: Int) {
         if wallMode {
             // A wheel report is not a click: it scrolls the shelf it is over instead of entering
@@ -4650,72 +4709,70 @@ final class Desk {
             return
         }
         guard chromeAvailable, let geometry = chromeGeometry else { return }
+        let widget = chrome.widget(row: row, col: col, geometry: geometry)
         if options.debug {
-            Log.write("chrome: click wall=\(wallMode ? 1 : 0) row=\(row) col=\(col) wheel=\(wheel) "
-                      + "hit=\(chrome.hitTest(row: row, col: col, geometry: geometry))\n")
+            // The table's answer twice: the widget is what the click acts on, the route is what the
+            // reader decided the cell was. Printed only here, so a click that is not being traced
+            // asks the table once.
+            Log.write("chrome: click wall=0 row=\(row) col=\(col) wheel=\(wheel) "
+                      + "route=\(chrome.route(row: row, col: col, geometry: geometry)) "
+                      + "widget=\(widget?.id ?? "-")\n")
         }
-        switch chrome.route(row: row, col: col, geometry: geometry) {
-        case .status(let id):
-            // A notch is not a click, even when it lands on a segment: a two-finger scroll over the
-            // bar used to take whatever the segment does, and one of them shrinks the mirror back
-            // into the wall (#118).
-            //
-            // …but a *panel* row that happens to carry a control must not swallow the wheel either:
-            // the menu's tracks are the first panel cells with `hit` ids, and a notch over a tick used
-            // to hit this guard and do nothing -- the fourth row of a four-row panel was unreachable
-            // at the sizes where the box scrolls (issue #87, and #118's "the wheel reaches the rest").
-            guard wheel == 0 else {
-                if Chrome.scrollsPanel(.status(id), wheel: wheel) {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.scrollPanel(by: wheel < 0 ? -1 : 1)
-                    }
-                }
-                return
-            }
-            // The bar's one control: a click on `[ - ]` (or on the traffic lights, which is what a
-            // red one does) shrinks this window back into the wall. Same path as `Ctrl-\`, so the
-            // two ways out cannot drift.
-            if id == "shrink" {
-                shutdown()
-                return
-            }
-            // The menu's three sliders (issue #87). The same button closes it: a menu with no way
-            // out but a key would be a keyboard control, and this one has to work on a page that
-            // has no `--dev` chord table at all.
-            if id == "menu" {
-                openPanel(chromeState.panel == .menu ? nil : .menu)
-                return
-            }
-            // A tick on one of the tracks: `rung:colour:2`, `rung:fps:11`, … Applied on the main
-            // queue -- this closure runs on the *reader* thread (`InputReader.onChromeClick`) while
-            // `applyRung` writes the writer's quality and the frame gate.
-            if let rung = ChromeAxis.parse(id) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.applyRung(rung.axis, rung.step)
-                }
-                return
-            }
-            switch id {
-            case "stats": openPanel(.stats)
-            case "help": openPanel(.help)
-            case "fps": openPanel(.settings)
-            case "target": openPanel(.devices)
-            default: break
-            }
-        case .panel:
-            // The wheel over a panel is how the rows its box cannot hold are reached (#118): one
-            // notch is one row, clamped at both ends. A click inside a panel is still not forwarded
-            // anywhere -- it is not a picture cell and there is no control under it.
-            guard Chrome.scrollsPanel(.panel, wheel: wheel) else { return }
-            // …and the hop is the wall's, for the same reason: this closure runs on the *reader*
-            // thread, while the window arithmetic reads `chromeMetrics` and the repaint writes the
-            // pty, both of which the main queue owns.
+        // A notch is not a click, even on a control: a two-finger scroll over the bar used to take
+        // whatever the segment does, and one of them shrinks the mirror back into the wall (#118).
+        // The one thing a wheel does in the chrome is scroll the open panel -- the box's own cells,
+        // or a tick inside it, which is a panel row with a control on it (#87) -- and the widget the
+        // table holds at this cell is the whole decision. Nothing else scrolls, and nothing here is
+        // measured against the geometry.
+        if wheel != 0 {
+            guard Chrome.scrollsPanel(widget, wheel: wheel) else { return }
+            // The hop is the wall's, for the same reason: this closure runs on the *reader* thread,
+            // while the window arithmetic reads `chromeMetrics` and the repaint writes the pty, both
+            // of which the main queue owns.
             DispatchQueue.main.async { [weak self] in
                 self?.scrollPanel(by: wheel < 0 ? -1 : 1)
             }
-        case .picture:
-            break
+            return
         }
+        // A click is *one* main-queue job: the press, the action and the paint are one gesture, and
+        // splitting them across two hops would let a second report paint between them.
+        guard let widget, case .control(let action) = widget.role, !widget.disabled else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.performChrome(widget, action)
+        }
+    }
+
+    /// One click on a control, on the main queue: the press, then what it does, then the frame it
+    /// left behind.
+    ///
+    /// The order is the feature (issue #200): a press has to be in the byte stream *before* the
+    /// panel it opens, or the only feedback a click gets is a panel appearing somewhere else on the
+    /// screen. The press is not cleared here — the release the reader already reports clears it
+    /// (`chromeHover(down: false)`), which is what makes a drag off a button end its look too.
+    private func performChrome(_ widget: ChromeWidget, _ action: ChromeAction) {
+        chromeState.pointer = Pointer(over: widget.id, down: true)
+        chromeDirty = true
+        drawChrome()
+        switch action {
+        case .shrink:
+            // The press is the last frame this session paints: the window is about to become a card
+            // in the wall, and a repaint after `shutdown()` would draw into a pane already handed
+            // back. Same path as `Ctrl-\`, so the two ways out cannot drift.
+            shutdown()
+            return
+        case .openPanel(let panel):
+            openPanel(panel)
+        case .togglePanel(let panel):
+            // The same button closes what it opened: a menu with no way out but a key would be a
+            // keyboard control, and this one has to work on a page with no `--dev` chord table.
+            openPanel(chromeState.panel == panel ? nil : panel)
+        case .rung(let axis, let step):
+            applyRung(axis, step)
+        }
+        // The action changed what the chrome says (a panel's rows, a tick's value), so the frame
+        // that shows it is painted here rather than waiting up to a second for the 1 Hz tick.
+        chromeDirty = true
+        drawChrome()
     }
 
     /// One click on a tick in the menu's three tracks (issue #87), on the main queue.
@@ -4773,10 +4830,11 @@ final class Desk {
     /// Whether the chrome owns a cell, asked from the *reader* thread (`InputReader.chromeOwns`).
     ///
     /// It reads two things and nothing else: `chromeAvailable` (fixed before the reader starts) and
-    /// `chromeGeometry` (a value type the main queue replaces wholesale), plus — for the status line
-    /// and the bar only — the cell grid. The panel arm is a rectangle out of the geometry
-    /// (`Chrome.panelRect`), so a repaint or a resize on the main queue can never turn a panel cell
-    /// into "nobody's" half way through this question.
+    /// `chromeGeometry` (a value type the main queue replaces wholesale), and then the frame's table,
+    /// which `Chrome` publishes in one assignment per paint — so a repaint or a resize on the main
+    /// queue can never answer this half way through one. The chrome answers for its own rows as well
+    /// as its controls (#200), which is also what closes the one pixel band at the picture's edge
+    /// that used to reach the remote desktop.
     func chromeOwns(row: Int, col: Int) -> Bool {
         guard chromeAvailable, let geometry = chromeGeometry else { return false }
         return chrome.route(row: row, col: col, geometry: geometry) != .picture

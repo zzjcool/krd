@@ -46,10 +46,11 @@ struct ChromeGeometry: Equatable {
     /// Whether a panel can be **drawn** in this geometry: the bar alone is enough furniture for one.
     ///
     /// The `--dev` status line and the panels used to share `devStatus`, and a handed-over mirror
-    /// runs `--bar` with no `--dev` -- so `[ ≡ ]` opened a panel the drawer skipped while
-    /// `panelRect` still claimed its rows, and the menu was invisible on exactly the page it was
-    /// built for (issue #87). One predicate, read by the drawer *and* by `panelRect`, so the rows a
-    /// click thinks are a panel and the rows a panel is painted in cannot disagree.
+    /// runs `--bar` with no `--dev` -- so `[ ≡ ]` opened a panel the drawer skipped while a
+    /// rectangle computed from this geometry still claimed its rows, and the menu was invisible on
+    /// exactly the page it was built for (issue #87). One predicate, read by the drawer; the click
+    /// path asks the painted table instead of a second rectangle (#200), so the rows a click thinks
+    /// are a panel are the rows a panel was drawn in, by construction.
     var panelsDrawable: Bool { barRow != nil || devStatus }
 
     /// Rows a panel's box has inside its two borders: what `drawPanel` writes into, and what the
@@ -64,8 +65,8 @@ enum ChromePanel: String, CaseIterable {
     /// The three sliders (issue #87). A panel rather than a box of its own: a panel is what the
     /// layout already knows how to give rows to, and its cells go through the same positioned
     /// writes, the same `panelInsideRows` clamp and the same "never the final row" rule as every
-    /// other one. Only its cells carry `hit` ids -- the tracks below -- which is why it is also the
-    /// only panel whose rows a click can reach (`Chrome.route`).
+    /// other one. The tracks below are the only controls inside a panel, which is why the wheel -- the
+    /// one gesture a panel answers -- has to keep working on a cell that is also a control (#118).
     case menu
 
     var title: String { rawValue }
@@ -120,6 +121,17 @@ struct ChromeState {
     /// moves it; the drawer clamps it with the same window arithmetic the wheel uses, so a scroll
     /// past the end cannot leave a panel blank.
     var panelOffset: Int? = nil
+    /// What the pointer is doing over the chrome: the widget under it, and whether a button is down.
+    ///
+    /// The same value the wall keeps (`Pointer`), with a widget id as its target, because the
+    /// chrome's answer to "what is here" is the table `route` reads (#200). The drawer is the only
+    /// reader: a widget is drawn hovered by marking its *cells* (`ChromeHot`), never by checking this
+    /// against a second copy of the widget's rectangle.
+    var pointer = Pointer<String>()
+
+    /// The widget under the pointer, and the one a press is on -- what the drawer lights up.
+    var hover: String? { pointer.over }
+    var pressed: String? { pointer.pressed }
 }
 
 extension ChromeMetrics {
@@ -346,50 +358,98 @@ enum ChromeAxis: String, CaseIterable {
         }
     }
 
-    /// `rung:colour:2`. Prefixed, so it can never collide with a status segment or bar button id,
-    /// and parseable back without a second table of strings in the click path.
+    /// `rung:colour:2`. Prefixed, so it can never collide with a status segment or a bar button: the
+    /// id is the widget's *name* — the hover answers it and the `--debug` line prints it — while what
+    /// a click on that widget does is the `ChromeAction` it carries (`.rung(axis, step)`).
     static func id(_ axis: ChromeAxis, _ step: Int) -> String { "rung:\(axis.rawValue):\(step)" }
+}
 
-    static func parse(_ id: String) -> (axis: ChromeAxis, step: Int)? {
-        let parts = id.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 3, parts[0] == "rung",
-              let axis = ChromeAxis(rawValue: String(parts[1])),
-              let step = Int(parts[2]), step >= 0, step < axis.steps else { return nil }
-        return (axis, step)
+/// 0-based cells in the chrome's own grid — the drawer's coordinates, so what it painted and what a
+/// report asks about are measured with one arithmetic.
+struct ChromeRect: Equatable {
+    var row: Int
+    var col: Int
+    var width: Int
+    var height: Int = 1
+
+    func contains(row y: Int, col x: Int) -> Bool {
+        width > 0 && height > 0 && y >= row && y < row + height && x >= col && x < col + width
+    }
+
+    /// Rects that share at least one cell. A zero-size rect shares nothing, so a widget that painted
+    /// no cells would claim no cell either.
+    func intersects(_ other: ChromeRect) -> Bool {
+        width > 0 && height > 0 && other.width > 0 && other.height > 0
+            && col < other.col + other.width && other.col < col + width
+            && row < other.row + other.height && other.row < row + height
     }
 }
 
-enum ChromeHit: Equatable {
-    case statusSegment(String)
-    case insidePanel
-    case outside
+/// The pointer state a cell was drawn in — the third thing the renderer's diff compares, which is
+/// what makes a hover re-emit exactly the cells whose look changed and no others.
+enum ChromeHot: Equatable {
+    case none, hover, pressed
 }
 
-/// Who owns a cell, in priority order — the decision the input path routes a mouse report on.
+/// What a click on a control does — the only place a control's behaviour lives.
 ///
-/// `ChromeHit` is the same answer in the shape the click path wants (`status/panel/outside`), and
-/// it is derived from this one so the two cannot drift. The order is the whole rule: the panel's
-/// rectangle, then a chrome row that carries a `hit` id, then the picture. A panel cell is *not*
-/// "outside the picture" in general — with `?1016h` a one-row picture's pixel box is the whole pane,
-/// so `Viewport.contains(pixel:)` answers true over the panel and the wheel never reaches it (#118).
-/// Hence: a chrome region must never be expressed as "a cell the picture does not cover".
-extension ChromeHit {
-    /// The same verdict, without the id: what `Chrome.route` is asked for.
-    init(route: ChromeRoute) {
-        switch route {
-        case .panel: self = .insidePanel
-        case .status(let id): self = .statusSegment(id)
-        case .picture: self = .outside
-        }
-    }
+/// The drawer writes it when it draws the control and the click path runs it
+/// (`Desk.performChrome`), so no id string appears in either: a control in the table is a control
+/// that does something, and a control whose *name* is misspelled cannot exist (#200).
+enum ChromeAction: Equatable {
+    /// A status segment: the panel it opens.
+    case openPanel(ChromePanel)
+    /// `[ ≡ ]`: the same button closes what it opened.
+    case togglePanel(ChromePanel)
+    /// `[ - ]`, the traffic lights and the title: back into the wall.
+    case shrink
+    /// One tick of the menu's three tracks.
+    case rung(ChromeAxis, Int)
 }
 
-enum ChromeRoute: Equatable {
-    /// A cell inside an open panel's box: the panel owns the pointer there (wheel: scroll it).
+enum ChromeWidgetRole: Equatable {
+    case control(ChromeAction)
+    /// An open panel's box: the wheel scrolls it, a click does nothing.
     case panel
-    /// A cell on the status line or the bar that carries a control id.
-    case status(String)
-    /// Everything else, i.e. the picture: the report keeps its old meaning.
+    /// Drawn and chrome-owned, but not a control: the bar's numbers, a separator, a clock, a toast.
+    case furniture
+}
+
+/// One thing a frame drew, in the coordinates it drew it in.
+///
+/// **The table that draws is the table that hits** (#200). Every cell the chrome paints belongs to
+/// one of these, `Chrome.route` is this list plus the row the cell is on, and the hover and the click
+/// read it and nothing else — so a control cannot be drawn in one place and act in another, which is
+/// what two copies of the same arithmetic always eventually were.
+struct ChromeWidget: Equatable {
+    var id: String
+    /// Measured from the cells the paint actually wrote, clipped at the pane's edge: a title cut at
+    /// the last column has the rect it was cut to, not the one it asked for.
+    var rect: ChromeRect
+    var role: ChromeWidgetRole
+    /// Drawn and chrome-owned, but not a control: no hover, no press, and `route` answers
+    /// `.background`. Exactly one widget is disabled today — the `scale` readout, which names a
+    /// number nothing here can move, so it is a readout rather than a button that does nothing.
+    var disabled: Bool = false
+}
+
+/// Who owns a cell — the decision the input path routes a mouse report on, and the one the hover and
+/// the click both read (#200).
+///
+/// The order is the whole rule: the topmost widget the drawer registered at that cell (its last write
+/// there wins, so a tick inside a panel's box is the tick), then the row the cell is on. A panel cell
+/// or a chrome row is *not* "outside the picture" in general — with `?1016h` a one-row picture's
+/// pixel box is the whole pane, so `Viewport.contains(pixel:)` answers true over the panel and the
+/// wheel never reached it (#118). Hence a chrome region must never be expressed as "a cell the
+/// picture does not cover".
+enum ChromeRoute: Equatable {
+    /// An enabled control's cell: a click does its action.
+    case widget(String)
+    /// An open panel's box (and the cells the box fills): the wheel scrolls it.
+    case panel
+    /// The chrome's own rows: nothing to click, and nothing that reaches the desktop either.
+    case background
+    /// Not the chrome's: the report keeps its old meaning.
     case picture
 }
 
@@ -397,9 +457,16 @@ final class Chrome {
     private struct Cell: Equatable {
         var ch: Character = " "
         var style: Style = .plain
-        var hit: String = ""
+        /// The widget whose paint wrote this cell: an index into the frame's table, `-1` for none.
+        /// It is what makes "the cells this widget drew" a fact rather than a second rectangle the
+        /// painter would have to compute again.
+        var widget: Int32 = -1
+        /// The pointer state the widget was in while it wrote this cell. On the *cell* because the
+        /// renderer's diff is per cell: a hover has to re-emit exactly what changed, and a rect copy
+        /// on the widget would be the second source of truth this issue deleted.
+        var hot: ChromeHot = .none
         /// The second column of a 2-cell glyph. It is part of the cell before it: never a run of
-        /// its own, never trimmed as a trailing blank, and never the target of a click.
+        /// its own, never trimmed as a trailing blank, and never a widget's own first column.
         var continuation = false
         var wide = false
     }
@@ -422,12 +489,80 @@ final class Chrome {
             case .barBright: return "7;1;97"
             }
         }
+
+        /// The SGR a cell is written with, given what the pointer is doing on it (#200).
+        ///
+        /// One table, and no colour arithmetic in it: a hover adds underline to the style's own
+        /// weight, a press replaces the look with reverse video, and every style names its own pair.
+        /// That is what lets the diff stay a per-cell comparison — two cells with the same style but
+        /// different pointer states are different bytes, which is exactly what a hover repaint is.
+        static func sgr(_ style: Style, _ hot: ChromeHot) -> String {
+            switch hot {
+            case .none:
+                return style.sgr
+            case .hover:
+                switch style {
+                case .plain, .dim: return "4;36"
+                case .bright: return "1;4;97"
+                case .accent: return "1;4;36"
+                case .warn: return "1;4;33"
+                case .bad: return "1;4;31"
+                case .reverse: return "7;4;97"
+                case .barDim: return "7;4;37"
+                case .barBright: return "7;1;4;97"
+                }
+            case .pressed:
+                switch style {
+                case .plain, .dim: return "7;1"
+                case .bright: return "7;1;97"
+                case .accent: return "7;1;36"
+                case .warn: return "7;1;33"
+                case .bad: return "7;1;31"
+                case .reverse: return "7;1;36"
+                case .barDim, .barBright: return "7;1;36"
+                }
+            }
+        }
     }
 
-    private var cells: [Cell] = []
+    /// One frame's paint: the grid, the table that explains it, and the size it was laid out for.
+    ///
+    /// Two of these exist, and the split is the whole point. `frame` is the drawing buffer, mutated
+    /// cell by cell in `draw` on the main queue; `published` is the frame that *finished*, swapped in
+    /// with one assignment at the end of `draw`. The reader thread (`route`, `widget`) answers from
+    /// `published`, so a report that arrives mid-paint is answered by the previous frame — never by a
+    /// half-built table, and never by a size that belongs to the next one.
+    private struct Frame {
+        var cells: [Cell] = []
+        var widgets: [ChromeWidget] = []
+        var cols = 0
+        var rows = 0
+    }
+
+    private var frame = Frame()
+    /// The last frame `draw` completed. The only thing the reader thread reads.
+    private var published = Frame()
     private var prev: [Cell]?
-    private(set) var cols = 0
-    private(set) var rows = 0
+    private var cols: Int { frame.cols }
+    private var rows: Int { frame.rows }
+
+    /// The widgets this frame drew, in drawing order.
+    var widgets: [ChromeWidget] { published.widgets }
+
+    // MARK: the table
+
+    /// Where one widget's paint landed, in 0-based cells: the extent of the cells it wrote.
+    private struct Paint {
+        var row: Int, col: Int, maxRow: Int, maxCol: Int
+    }
+
+    /// The widget the paint in progress belongs to (`-1` = none) and the pointer state it is in.
+    private var stampWidget: Int32 = -1
+    private var stampHot: ChromeHot = .none
+    /// What each widget actually painted. Its rect is this and never a second computation.
+    private var painted: [Int32: Paint] = [:]
+    /// The pointer this frame is drawn for, taken from the state `draw` was handed.
+    private var pointer = Pointer<String>()
 
     // MARK: layout
 
@@ -492,6 +627,13 @@ final class Chrome {
 
     func draw(geometry: ChromeGeometry, metrics m: ChromeMetrics, state: ChromeState) -> [UInt8] {
         resize(cols: geometry.cols, rows: geometry.rows)
+        // A frame is painted from nothing: the table, the extents and the pointer are this draw's,
+        // and a widget left over from the previous one would be a control with a stale rectangle.
+        frame.widgets.removeAll(keepingCapacity: true)
+        painted.removeAll(keepingCapacity: true)
+        stampWidget = -1
+        stampHot = .none
+        pointer = state.pointer
         for y in geometry.chromeTop..<rows {
             for x in 0..<cols { set(x, y, " ", .plain) }
         }
@@ -506,7 +648,11 @@ final class Chrome {
         if geometry.panelsDrawable, let panel = state.panel {
             drawPanel(panel, geometry: geometry, m: m, requested: state.panelOffset)
         }
-        return render(from: min(geometry.chromeTop, geometry.barRow ?? Int.max))
+        let bytes = render(from: min(geometry.chromeTop, geometry.barRow ?? Int.max))
+        // Everything above was half-built state; this one assignment is what the reader thread is
+        // allowed to see, and it happens only once the frame is whole (see `Frame`).
+        published = frame
+        return bytes
     }
 
     // MARK: bar
@@ -528,12 +674,17 @@ final class Chrome {
     /// gives up the rate first and the delay outlives both the clock and the rate.
     private func drawBar(row: Int, geometry: ChromeGeometry, m: ChromeMetrics) {
         guard row >= 0, row < rows, cols > 0 else { return }
+        // The fill is not a widget of its own: it *is* the row's background (the row rule in
+        // `route` answers for it), and a widget spanning the row would claim the same cells as every
+        // control drawn on it -- one cell, one owner.
         for x in 0..<cols { set(x, row, " ", .reverse) }
         // Left cluster. The dots are the macOS window buttons; a click anywhere on them does what
-        // the red one does, because there is only one thing a window can do here.
+        // the red one does, because there is only one thing a window can do here. Three boxes, one
+        // id: hovering any of them lights all three, which is what "one control" means here.
+        // The title between them is furniture (see below): the window's name is not a button.
         var x = 0
         for dot in [" ● ", " ● ", " ● "] {
-            text(x, row, dot, .reverse, hit: "shrink")
+            paint("shrink", .control(.shrink)) { text(x, row, dot, .reverse) }
             x += DisplayWidth.of(dot)
         }
         x += 1
@@ -553,15 +704,18 @@ final class Chrome {
         let room = max(0, cols - x - right - 1)
         if room > 8 {
             let title = DisplayWidth.truncate(m.title, to: room)
-            text(x, row, title, .barBright, hit: "shrink")
+            // The title is a readout, not a control: what it names is the window, and a title that
+            // hovered would make the hover's cost grow with the window's name (a 400-column pane
+            // would blow the 600 B budget on one crossing). The dots and `[ - ]` are the way out.
+            paint("title", .furniture) { text(x, row, title, .barBright) }
         }
         var rx = cols - DisplayWidth.of(button)
-        text(rx, row, button, .barBright, hit: "shrink")
+        paint("shrink", .control(.shrink)) { text(rx, row, button, .barBright) }
         rx -= DisplayWidth.of(menu)
-        text(rx, row, menu, .barBright, hit: "menu")
+        paint("menu", .control(.togglePanel(.menu))) { text(rx, row, menu, .barBright) }
         if !numbers.isEmpty {
             rx -= DisplayWidth.of(numbers) + 2
-            text(rx, row, "  " + numbers, .barDim)
+            paint("numbers", .furniture) { text(rx, row, "  " + numbers, .barDim) }
         }
     }
 
@@ -593,112 +747,164 @@ final class Chrome {
     /// Force a full repaint on the next draw (after a resize or a cleared screen).
     func invalidate() { prev = nil }
 
-    /// Mouse coordinates arrive 1-based, in cells.
-    func hitTest(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeHit {
-        ChromeHit(route: route(row: row, col: col, geometry: geometry))
+    // MARK: the table
+
+    /// The topmost widget whose rect holds this cell (1-based), or nil.
+    ///
+    /// The last write wins, which is what makes the menu's ticks reachable: they are drawn after the
+    /// box they sit in, so a tick is the answer and the box is what the cells around it answer. No
+    /// widget's rect reaches outside the pane, so the geometry here is only the pane's extent.
+    func widget(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeWidget? {
+        guard row >= 1, row <= geometry.rows, col >= 1, col <= geometry.cols else { return nil }
+        return Chrome.topmost(published.widgets, row: row - 1, col: col - 1)
     }
 
-    /// An open panel's box, as a rectangle of 1-based cells. **Pure geometry, never the cell grid.**
-    ///
-    /// The two callers live on different threads (the drawer and the 1 Hz tick on the main queue,
-    /// the wheel in `Desk.chromeClick` on the reader thread), and `cells` is replaced wholesale by
-    /// `resize` on every pane-size change. A rectangle read out of `ChromeGeometry` is a fact about
-    /// the layout, so the reader's answer cannot go blank because a repaint is half way through.
-    static func panelRect(_ geometry: ChromeGeometry, row: Int, col: Int) -> Bool {
-        let y = row - 1
-        guard col >= 1, col <= geometry.cols, row >= 1, row <= geometry.rows else { return false }
-        // The drawer's own predicate, not a second opinion: a rectangle over rows no panel is
-        // painted in is how a handed-over mirror swallowed clicks on a strip of its own picture.
-        return geometry.panelsDrawable && geometry.panelHeight > 0
-            && y >= geometry.panelTop && y < geometry.panelTop + geometry.panelHeight
+    private static func topmost(_ widgets: [ChromeWidget], row: Int, col: Int) -> ChromeWidget? {
+        for w in widgets.reversed() where w.rect.contains(row: row, col: col) { return w }
+        return nil
     }
 
-    /// Whether a wheel notch on this route scrolls the panel instead of being swallowed (issue #87).
+    /// Who owns this cell (1-based): the widget the drawer registered there, read through its role,
+    /// and otherwise the row the cell sits on.
     ///
-    /// The panel's own cells always scroll it (#118), and a cell that carries a *rung* id is still a
-    /// panel cell: the menu's tracks are the first panel rows with ids, and `guard wheel == 0` in the
-    /// click path used to eat exactly those notches, which is how the box's last row became
-    /// unreachable at the sizes where it scrolls. Bar and status controls keep ignoring the wheel.
-    /// Pure, so the rule is a test rather than a gesture.
-    static func scrollsPanel(_ route: ChromeRoute, wheel: Int) -> Bool {
-        guard wheel != 0 else { return false }
-        switch route {
-        case .panel: return true
-        case .status(let id): return ChromeAxis.parse(id) != nil
-        case .picture: return false
-        }
-    }
-
-    /// The routing decision, in priority order: panel rectangle → a cell with a `hit` id (the panel's
-    /// tracks, then the bar and the status line) → picture.
+    /// The rule, in full — there is no second arithmetic of where things are, which is the whole
+    /// invariant (#200):
     ///
-    /// Only the middle arm reads `cells`, and a panel cell with **no** id is still `.panel` -- which
-    /// is what the wheel needs (#118), and which no other panel can lose, because no other panel
-    /// draws an id on its rows. The menu's three tracks do, and a click on a tick has to arrive
-    /// through the same `hit` id path the bar's own buttons use (issue #87).
+    ///  * a cell outside the pane is nobody's, so it stays the picture's (claiming a column that does
+    ///    not exist would swallow a desktop scroll);
+    ///  * a widget's cell: `.widget(id)` for an enabled control, `.panel` for a box, `.background`
+    ///    for furniture and for the disabled readout (drawn and chrome-owned, but inert);
+    ///  * otherwise a chrome row — the bar, or at or below `chromeTop` — is `.background`: nothing to
+    ///    click and nothing for the input path to hand anywhere else. It used to be `.picture`, which
+    ///    made a click on the window's own furniture a *dead* cell: `chromeOwns` said no, the report
+    ///    fell to the outside-the-picture branch, and the chrome's `.picture` arm dropped it. (One
+    ///    pixel band at the picture's edge did reach the remote desktop, because
+    ///    `Viewport.contains(pixel:)` uses closed ranges where `contains(cell:)` is half-open;
+    ///    answering for chrome rows here closes that too.) A chrome row is the chrome's by layout,
+    ///    painted or not: the row is the one the drawer paints, so a report that arrives before that
+    ///    paint belongs to the chrome too -- it just has no control under it yet;
+    ///  * otherwise the picture, whose report keeps its old meaning.
     func route(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeRoute {
-        // One snapshot of the grid, because `resize` runs on the main queue and replaces `cells`,
-        // `cols` and `rows` one field at a time while this runs on the reader thread. Reading them
-        // again inside the index expression is a race that can trap (an index past the end of the
-        // array the other fields still describe); bound once, the three agree by construction, and
-        // a snapshot taken mid-resize is simply the older grid — the one the report was made over.
-        let cells = self.cells, cols = self.cols, rows = self.rows
+        // The frame the drawer *finished*, read as one value: a report that arrives mid-paint is
+        // answered by the previous frame rather than by the half-built one (see `Frame`).
+        let table = published
         let y = row - 1, x = col - 1
-        // Not a substitute for the snapshot, a check that the snapshot is not *torn*: `cells` and
-        // `cols`/`rows` are three separate loads, so a resize between them can still leave this
-        // thread holding the new grid's size with the old grid's array. That answers "nobody's"
-        // instead of reading a cell the array does not have.
-        let sane = cols > 0 && rows > 0 && cells.count == cols * rows
-            && y >= 0 && y < rows && x >= 0 && x < cols
-        if Chrome.panelRect(geometry, row: row, col: col) {
-            // A control inside the box, or the box itself. Only the menu draws ids; every other
-            // panel's rows carry none, so their cells keep meaning "the panel owns the pointer".
-            guard sane else { return .panel }
-            let id = cells[y * cols + x].hit
-            return id.isEmpty ? .panel : .status(id)
+        guard row >= 1, row <= geometry.rows, col >= 1, col <= geometry.cols else { return .picture }
+        if let w = Chrome.topmost(table.widgets, row: y, col: x) {
+            switch w.role {
+            case .control: return w.disabled ? .background : .widget(w.id)
+            case .panel: return .panel
+            case .furniture: return .background
+            }
         }
-        guard sane else { return .picture }
-        if y == geometry.statusRow || y == geometry.barRow {
-            let id = cells[y * cols + x].hit
-            return id.isEmpty ? .picture : .status(id)
+        return y == geometry.barRow || y >= geometry.chromeTop ? .background : .picture
+    }
+
+    /// Whether a wheel notch on this widget scrolls the open panel instead of being swallowed (#87).
+    ///
+    /// The box's own cells always scroll it (#118), and a *rung* is still a panel cell: the menu's
+    /// tracks are panel rows with a control on them, and `guard wheel == 0` in the click path used to
+    /// eat exactly those notches, which is how the box's last row became unreachable at the sizes
+    /// where it scrolls. The bar's and the status line's controls keep ignoring the wheel. Pure, so
+    /// the rule is a test rather than a gesture.
+    static func scrollsPanel(_ widget: ChromeWidget?, wheel: Int) -> Bool {
+        guard wheel != 0, let widget, !widget.disabled else { return false }
+        switch widget.role {
+        case .panel: return true
+        case .control(.rung(_, _)): return true
+        case .control, .furniture: return false
         }
-        return .picture
     }
 
     // MARK: cells
 
     private func resize(cols: Int, rows: Int) {
-        guard cols != self.cols || rows != self.rows else { return }
-        self.cols = cols
-        self.rows = rows
-        cells = [Cell](repeating: Cell(), count: cols * rows)
+        guard cols != frame.cols || rows != frame.rows else { return }
+        frame.cols = cols
+        frame.rows = rows
+        frame.cells = [Cell](repeating: Cell(), count: cols * rows)
         prev = nil
     }
 
-    private func set(_ x: Int, _ y: Int, _ ch: Character, _ style: Style, hit: String = "") {
+    /// Paint one widget: the cells `body` writes are stamped with it, and their extent becomes its
+    /// rect — the one the hover, the click and the wheel all read.
+    ///
+    /// A widget with nothing drawn is not registered at all: a widget in the table that no cell
+    /// answers is a control that looks live and is not, and a test asks every one of them for a
+    /// cell. Every call site therefore asks its own guard first (no room for a title, a segment the
+    /// width ladder dropped).
+    private func paint(_ id: String, _ role: ChromeWidgetRole, disabled: Bool = false,
+                       _ body: () -> Void) {
+        let index = Int32(frame.widgets.count)
+        frame.widgets.append(ChromeWidget(id: id, rect: ChromeRect(row: 0, col: 0, width: 0),
+                                          role: role, disabled: disabled))
+        let saved = (stampWidget, stampHot)
+        stampWidget = index
+        stampHot = Chrome.hot(role, id: id, disabled: disabled, pointer: pointer)
+        body()
+        (stampWidget, stampHot) = saved
+        guard let extent = painted.removeValue(forKey: index) else {
+            // Nothing was drawn: a widget in the table that no cell answers is a control that looks
+            // live and is not. Removed by index, because a body may register widgets of its own (the
+            // panel's box paints its ticks), so this one need not be the last entry.
+            frame.widgets.remove(at: Int(index))
+            return
+        }
+        frame.widgets[Int(index)].rect = ChromeRect(row: extent.row, col: extent.col,
+                                                    width: extent.maxCol - extent.col + 1,
+                                                    height: extent.maxRow - extent.row + 1)
+    }
+
+    /// What the pointer is doing on this widget: a press beats a hover, and only a control with
+    /// something to do answers the pointer at all — the `scale` readout is drawn and inert.
+    private static func hot(_ role: ChromeWidgetRole, id: String, disabled: Bool,
+                            pointer: Pointer<String>) -> ChromeHot {
+        guard case .control = role, !disabled, id == pointer.over else { return .none }
+        return pointer.down ? .pressed : .hover
+    }
+
+    private func set(_ x: Int, _ y: Int, _ ch: Character, _ style: Style) {
         guard x >= 0, y >= 0, x < cols, y < rows else { return }
         let width = DisplayWidth.of(ch)
         if width == 2 {
             // A wide glyph needs the cell after it; at the right edge it would be clipped by the
             // terminal and drag the rest of the row left, so draw a blank there instead.
             guard x + 1 < cols else {
-                cells[y * cols + x] = Cell(ch: " ", style: style, hit: hit)
+                put(x, y, Cell(ch: " ", style: style, widget: stampWidget, hot: stampHot))
                 return
             }
-            cells[y * cols + x] = Cell(ch: ch, style: style, hit: hit, wide: true)
-            cells[y * cols + x + 1] = Cell(ch: " ", style: style, hit: hit, continuation: true)
+            put(x, y, Cell(ch: ch, style: style, widget: stampWidget, hot: stampHot, wide: true))
+            put(x + 1, y, Cell(ch: " ", style: style, widget: stampWidget, hot: stampHot,
+                               continuation: true))
             return
         }
-        cells[y * cols + x] = Cell(ch: ch, style: style, hit: hit)
+        put(x, y, Cell(ch: ch, style: style, widget: stampWidget, hot: stampHot))
     }
 
-    private func text(_ x: Int, _ y: Int, _ s: String, _ style: Style = .plain, hit: String = "") {
+    /// Write one cell and extend the widget the paint belongs to. The two go together: a rect that
+    /// was computed separately from the cells is how a control ends up drawn in one place and hit in
+    /// another, which is the bug this table replaced.
+    private func put(_ x: Int, _ y: Int, _ cell: Cell) {
+        frame.cells[y * cols + x] = cell
+        guard stampWidget >= 0 else { return }
+        guard var extent = painted[stampWidget] else {
+            painted[stampWidget] = Paint(row: y, col: x, maxRow: y, maxCol: x)
+            return
+        }
+        extent.row = min(extent.row, y)
+        extent.col = min(extent.col, x)
+        extent.maxRow = max(extent.maxRow, y)
+        extent.maxCol = max(extent.maxCol, x)
+        painted[stampWidget] = extent
+    }
+
+    private func text(_ x: Int, _ y: Int, _ s: String, _ style: Style = .plain) {
         var cx = x
         for ch in s {
             let width = DisplayWidth.of(ch)
             if width == 0 { continue }          // a lone combining mark has nothing to attach to
             if cx + width > cols { break }
-            set(cx, y, ch, style, hit: hit)
+            set(cx, y, ch, style)
             cx += width
         }
     }
@@ -743,26 +949,51 @@ final class Chrome {
 
     // MARK: status line
 
+    /// One status segment: what to draw, how, and who owns its cells once they are drawn — an
+    /// enabled control (its id and what a click on it does, together, so the two cannot name
+    /// different things), the disabled `scale` readout, or the plain furniture of a separator.
+    private struct Segment {
+        var body: String
+        var style: Style
+        var id: String = ""
+        var role: ChromeWidgetRole = .furniture
+        /// A readout: drawn and chrome-owned, carrying the action a click *would* have if it were
+        /// ever made live (the stats panel is where the scale is explained) — `disabled` is why it
+        /// does not run. One kind of thing with a flag between them, not two kinds.
+        var readout = false
+    }
+
     /// Segments degrade by width instead of wrapping; every rung is a complete, valid list.
-    private func segments(_ m: ChromeMetrics, prefix: Bool) -> [(String, Style, String)] {
+    private func segments(_ m: ChromeMetrics, prefix: Bool) -> [Segment] {
         let fpsStyle: Style = m.fpsTarget > 0 && m.fps < Double(m.fpsTarget) * 0.85 ? .warn : .plain
         let latStyle: Style = m.e2eMs > 200 ? .bad : (m.e2eMs > 110 ? .warn : .plain)
-        typealias Seg = (String, Style, String)
-        let sep: Seg = ("  │  ", .dim, "")
-        let target: Seg = (" \(m.target) ", .bright, "target")
-        let fps: Seg = ("\(String(format: "%.1f", m.fps))/\(m.fpsTarget) fps", fpsStyle, "fps")
+        let sep = Segment(body: "  │  ", style: .dim, id: "separator")
+        // Unique ids for the two segments that open the stats panel, even though they do the same
+        // thing: the hover answers a widget *id*, so two boxes sharing one id would light up together
+        // and the reader could not tell which number the pointer is on (#200).
+        let target = Segment(body: " \(m.target) ", style: .bright,
+                             id: "target", role: .control(.openPanel(.devices)))
+        let fps = Segment(body: "\(String(format: "%.1f", m.fps))/\(m.fpsTarget) fps", style: fpsStyle,
+                          id: "fps", role: .control(.openPanel(.settings)))
         // Only when it is not 1: the segment then appears exactly when the picture changed quality,
-        // which is the moment it has to be noticed.
-        let scale: Seg = ("\(String(format: "%.2g", m.scale))×", m.scaleAuto ? .accent : .warn, "scale")
-        let bw: Seg = ("\(String(format: "%.1f", m.mbps)) MB/s", .plain, "stats")
+        // which is the moment it has to be noticed. A readout (`readout`, i.e. `disabled`): it names
+        // the scale the capture is at, and there is nothing a click on it could change here -- which
+        // is why the click path never had a case for it, only an absent string.
+        let scale = Segment(body: "\(String(format: "%.2g", m.scale))×",
+                            style: m.scaleAuto ? .accent : .warn, id: "scale",
+                            role: .control(.openPanel(.stats)), readout: true)
+        let bw = Segment(body: "\(String(format: "%.1f", m.mbps)) MB/s", style: .plain,
+                         id: "bandwidth", role: .control(.openPanel(.stats)))
         // `frame`, not `pipe`: since #52 this number is cap + pipe, and the bar must not call all of
         // it ours -- at 10 fps the capture half is ~50 ms on its own. With no `cap` measured the sum
         // *is* the pipe half, so the segment takes the panel's name for that half; `frame 0 ms` read
         // as a measured end to end (#117).
         let latencyName = m.capMs < 0 ? "pipe" : "frame"
-        let lat: Seg = (cols >= 84 ? "\(latencyName) \(Int(m.e2eMs)) ms"
-                                   : "\(Int(m.e2eMs)) ms", latStyle, "stats")
-        let menu: Seg = (prefix ? "^\\ … " : "^\\ menu ", .dim, "help")
+        let lat = Segment(body: cols >= 84 ? "\(latencyName) \(Int(m.e2eMs)) ms"
+                                          : "\(Int(m.e2eMs)) ms",
+                          style: latStyle, id: "latency", role: .control(.openPanel(.stats)))
+        let menu = Segment(body: prefix ? "^\\ … " : "^\\ menu ", style: .dim,
+                           id: "help", role: .control(.openPanel(.help)))
         let scaled = m.scale < 0.999
         switch cols {
         case 84...: return scaled ? [target, sep, fps, sep, scale, sep, bw, sep, lat, sep, menu]
@@ -771,7 +1002,9 @@ final class Chrome {
                                  : [fps, sep, bw, sep, lat, sep, menu]
         case 30...: return scaled ? [fps, sep, scale, sep, lat, sep, menu] : [fps, sep, lat, sep, menu]
         case 20...: return scaled ? [fps, sep, scale, sep, lat] : [fps, sep, lat]
-        default: return [(String(format: "%.0f", m.fps), fpsStyle, "fps")]
+        default:
+            return [Segment(body: String(format: "%.0f", m.fps), style: fpsStyle,
+                            id: "fps", role: .control(.openPanel(.settings)))]
         }
     }
 
@@ -779,11 +1012,13 @@ final class Chrome {
         let y = geometry.statusRow
         guard y >= 0, y < rows, cols > 0 else { return }
         var x = 0
-        for (body0, style, hit) in segments(m, prefix: state.prefix) {
-            var body = body0
+        for seg in segments(m, prefix: state.prefix) {
+            var body = seg.body
             if x + DisplayWidth.of(body) > cols { body = DisplayWidth.truncate(body, to: max(0, cols - x)) }
             guard !body.isEmpty else { break }
-            text(x, y, body, style, hit: hit)
+            // The body actually drawn is what the widget's rect is measured from, so a segment cut by
+            // the pane's edge is hit exactly where it is visible.
+            paint(seg.id, seg.role, disabled: seg.readout) { text(x, y, body, seg.style) }
             x += DisplayWidth.of(body)
         }
         // The clock is the end-to-end instrument: compare it with your own and you are looking at
@@ -792,11 +1027,12 @@ final class Chrome {
         var right = cols - 1
         if !m.clock.isEmpty, cols >= 60 {
             right = DisplayWidth.rightAlignedStart(m.clock, cells: cols - 1)
-            text(right, y, m.clock, .dim)
+            paint("clock", .furniture) { text(right, y, m.clock, .dim) }
             right -= 2
         }
         if let toast = state.toast, x + DisplayWidth.of(toast) + 2 < right {
-            text(max(x + 1, right - DisplayWidth.of(toast)), y, toast, .dim)
+            let at = max(x + 1, right - DisplayWidth.of(toast))
+            paint("toast", .furniture) { text(at, y, toast, .dim) }
         }
     }
 
@@ -836,11 +1072,25 @@ final class Chrome {
         return (panel.readsFromTheEnd && wanted == last) ? nil : wanted
     }
 
+    /// One open panel, drawn as **one widget**: the box is what a wheel over its rows scrolls, and
+    /// everything its rows hold — the title, the badge, the labels, the values — is inside the box's
+    /// rect, so a cell that is not one of the menu's ticks answers `.panel` (the wheel needs that,
+    /// #118) while the ticks, drawn after the box, win their own cells (issue #87).
+    ///
+    /// The box is named after the panel it is; that is a name, not a lookup — `route` answers it by
+    /// role, so nothing downstream reads it.
     private func drawPanel(_ panel: ChromePanel, geometry: ChromeGeometry, m: ChromeMetrics,
                            requested: Int?) {
         let y = geometry.panelTop
         let inside = geometry.panelInsideRows          // h - 2, and never the final row: autowrap
         guard inside > 0, cols > 8 else { return }
+        paint(panel.rawValue, .panel) {
+            panelBody(panel, y: y, inside: inside, m: m, requested: requested)
+        }
+    }
+
+    private func panelBody(_ panel: ChromePanel, y: Int, inside: Int, m: ChromeMetrics,
+                           requested: Int?) {
         let w = cols
         let (offset, total, _) = Chrome.panelWindow(panel, m, inside: inside, requested: requested)
         // A marker, not silence: a panel with more rows than its box holds says which rows it is
@@ -956,9 +1206,9 @@ final class Chrome {
             }
         case .menu:
             // Three axes, one row each: the label column every panel uses, a track of ticks, and the
-            // value as it stands. Every tick carries a `hit` id (`rung:<axis>:<step>`), so a click is
-            // the whole interaction -- no key opens this and no key moves it. The bar exists on
-            // pages without `--dev` (a handed-over window mirror) and the chord table is being
+            // value as it stands. Every tick is a control of its own (`rung:<axis>:<step>`), so a
+            // click is the whole interaction -- no key opens this and no key moves it. The bar exists
+            // on pages without `--dev` (a handed-over window mirror) and the chord table is being
             // reworked elsewhere (#180), so the mouse route has to stand on its own (issue #87).
             for (i, axis) in ChromeAxis.allCases.enumerated() {
                 guard let r = slot(i) else { continue }
@@ -971,9 +1221,12 @@ final class Chrome {
                 let track = max(1, min(axis.steps, w - valueCol - valueRoom - 1))
                 for step in 0..<track {
                     let reached = step <= selected
-                    text(valueCol + step, y0, reached ? "█" : "▁",
-                         step == selected ? .barBright : (reached ? .accent : .dim),
-                         hit: ChromeAxis.id(axis, step))
+                    // One widget per tick, and its action is what a click does: the id is only the
+                    // name the hover answers and the `--debug` line prints.
+                    paint(ChromeAxis.id(axis, step), .control(.rung(axis, step))) {
+                        text(valueCol + step, y0, reached ? "█" : "▁",
+                             step == selected ? .barBright : (reached ? .accent : .dim))
+                    }
                 }
                 text(valueCol + track + 2, y0,
                      DisplayWidth.truncate(axis.value(m), to: max(0, w - valueCol - track - 3)),
@@ -1045,9 +1298,17 @@ final class Chrome {
 
     /// Positioned writes for the rows that changed. No newline, no last cell of the last row,
     /// no row above `fromRow`.
+    ///
+    /// A cell counts as changed when its glyph, its style **or its pointer state** differs from the
+    /// previous frame, and the SGR it is written with is the pair (`Style.sgr(_:_:)`) — so a hover
+    /// re-emits the cells it changed, the style around them once, and nothing else (#200: the budget
+    /// only allows a repaint that is a handful of cells).
     private func render(from fromRow: Int) -> [UInt8] {
         var out = [UInt8]()
-        var style: Style? = nil
+        // One snapshot of the grid: `frame` is a value, and reading `frame.cells[i]` per cell would
+        // copy-check the array in every index expression.
+        let cells = frame.cells, cols = frame.cols, rows = frame.rows
+        var sgr: String? = nil
         for y in max(0, fromRow)..<rows {
             var x = 0
             while x < cols {
@@ -1091,9 +1352,10 @@ final class Chrome {
                     // overflowed its column and lost the box's border (#118). It is never a run of
                     // its own (see `Cell.continuation`), so it is never written at all.
                     if cell.continuation { continue }
-                    if style != cell.style {
-                        out.append(contentsOf: Array("\u{1B}[\(cell.style.sgr)m".utf8))
-                        style = cell.style
+                    let want = Style.sgr(cell.style, cell.hot)
+                    if sgr != want {
+                        out.append(contentsOf: Array("\u{1B}[\(want)m".utf8))
+                        sgr = want
                     }
                     out.append(contentsOf: Array(String(cell.ch).utf8))
                 }
