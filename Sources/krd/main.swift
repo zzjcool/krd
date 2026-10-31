@@ -834,6 +834,12 @@ final class Desk {
     private var chromeSampleDelivered = 0
 
     private var resizeSource: DispatchSourceSignal?
+    /// The `SIGWINCH` stream's trailing edge (issue #89). Main queue only.
+    private var resizeBurst = ResizeCoalescer()
+    /// The pane the mirror's current picture was laid out for, i.e. what `handleResize` last built
+    /// a grid from. `nil` until the first resize: a picture that was never re-fitted has no claim
+    /// to "the pane did not move".
+    private var mirrorPane: ResizePane?
     private var statsTimer: DispatchSourceTimer?
     // TUI layer (--dev). Everything below is written on the main queue at 1 Hz; the picture
     // never waits for it and the writer serializes the two.
@@ -3066,6 +3072,13 @@ final class Desk {
                             originPixelX: (layout.originCol - 1) * Int(layout.cellW.rounded()),
                             originPixelY: (layout.originRow - 1) * Int(layout.cellH.rounded()))
         stateLock.unlock()
+        // Any grid rebuild that is *not* a resize has to forget the pane the resize path remembers
+        // (issue #89): a pan, a zoom, a `--scale` step, a display change and a panel all re-lay out
+        // from `self.geometry`, and the picture is then no longer "the pane we last fitted". Leaving
+        // `mirrorPane` at its old value would let the next `SIGWINCH` claim "the pane did not move"
+        // and skip the re-layout that used to heal exactly this. `handleResize` sets it again right
+        // after this call, so a resize still remembers its own pane.
+        mirrorPane = nil
     }
 
     // MARK: zoom follow
@@ -3492,15 +3505,38 @@ final class Desk {
 
     private func installResizeHandler() {
         signal(SIGWINCH, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .global(qos: .userInitiated))
+        // The source itself runs on the *main* queue now, not on a global one that hops here: a
+        // `SIGWINCH` and the `asyncAfter` that used to carry it both ended up on the main queue
+        // anyway, and `resizeBurst` is a main-queue value that a second thread must not mutate.
+        let source = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
         source.setEventHandler { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self?.handleResize() }
+            guard let self else { return }
+            // A trailing edge, not one handler run per event (issue #89). The deadline restarts on
+            // every arrival and only the work item that still owns the newest token relayouts, so a
+            // drag of N `SIGWINCH`es is **one** re-layout, at the pane the drag ended on — the
+            // handler reads `TermGeometry` when it runs, never when the event arrived. What this
+            // replaces was worse than one run per event: each run deleted every placement (`clear`),
+            // re-laid out and restarted the stream -- 40 clears and 4,564 tile transmissions for a
+            // 1.4 s drag (`bench/loop-resize-storm.py`).
+            let now = ResizeCoalescer.now()
+            let arrival = self.resizeBurst.arrive(at: now)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (arrival.fireAt - now)) { [weak self] in
+                guard let self,
+                      let collapsed = self.resizeBurst.fire(token: arrival.token,
+                                                            at: ResizeCoalescer.now())
+                else { return }
+                self.handleResize(burst: collapsed)
+            }
         }
         source.resume()
         resizeSource = source
     }
 
-    private func handleResize() {
+    /// `burst` is how many `SIGWINCH`es the coalescer collapsed into this run (`1` for a single
+    /// resize). It decides nothing — it is logged, so the number in the log is the number that was
+    /// measured. `force` is a caller that is not a signal and cannot be "unchanged" (`applyPanel`,
+    /// whose change is the panel rather than the pane): it skips the shortcut below.
+    private func handleResize(burst: Int = 1, force: Bool = false) {
         // The wall has no picture to re-fit: the pane changed size, so the canvas forgets its
         // previous grid (the next draw is a full repaint at the new width) and the model is re-read.
         // The guard below would no-op here — a wall session has no filter and no mock.
@@ -3522,8 +3558,29 @@ final class Desk {
         }
         guard !cleanedUp, filter != nil || mock != nil else { return }
         let geometry = TermGeometry.read()
+        // Did the pane move at all? A `SIGWINCH` that answers with the grid the picture is already
+        // fitted to (a terminal's second report for one drag, a drag out and back) has nothing to
+        // do, and everything below is destructive: `clear` deletes every placement, the restart
+        // tears the stream down, and the repaint re-sends every tile -- to draw the picture that is
+        // already on screen. `drawn == nil` is the first resize of a session, which cannot claim
+        // "unchanged" and therefore relayouts.
+        let pane = ResizePane(cols: geometry.cols, rows: geometry.rows,
+                             cellW: geometry.cellSize.w, cellH: geometry.cellSize.h)
+        if ResizePlan.decide(drawn: mirrorPane, now: pane, force: force) == .skip {
+            if options.debug {
+                Log.write("resize: \(pane.cols)x\(pane.rows) unchanged, nothing to repaint\n")
+            }
+            return
+        }
         applyLayout(geometry: geometry)
         guard let layout = currentGrid(), layout.pixelW > 8, layout.pixelH > 8 else { return }
+        // Only once the layout exists: a pane that came out degenerate must be retried by the next
+        // report, not remembered as done.
+        mirrorPane = pane
+        if burst > 1, options.debug {
+            Log.write("resize: \(burst) SIGWINCHes coalesced into one relayout at "
+                      + "\(layout.pixelW)x\(layout.pixelH)\n")
+        }
         writer.clear()
         chrome.invalidate()
         chromeDirty = true
@@ -3565,7 +3622,12 @@ final class Desk {
             // Same rule as `openPanel`: a different panel starts at its own end, not at the window
             // the previous one was left scrolled to (#118).
             self.chromeState.panelOffset = nil
-            self.chromeDirty = true
+            // ...and the same relayout `openPanel` does, forced for the same reason (issue #89): the
+            // panel's rows come out of the picture while the pane stays put. This handler used to
+            // leave the grid alone, which was invisible only because the next `SIGWINCH` -- even a
+            // same-size duplicate -- used to re-lay out unconditionally. Now that a duplicate is a
+            // no-op, the cycle has to say what it changed.
+            self.applyPanel()
             self.drawChrome()
         }
         cycle.resume()
@@ -4259,7 +4321,21 @@ final class Desk {
     private func applyPanel() {
         // The panel's rows come out of the picture, which changes the capture size. The resize
         // path already knows how to do that: re-measure, re-fit, clear, restart the stream.
-        handleResize()
+        //
+        // Two things on top of plain `handleResize()` (issue #89):
+        //  * it is forced, because the *pane did not move* — what moved is `chromeState.panel`, and
+        //    the picture's rows follow it. The resize path's "nothing changed" shortcut is about the
+        //    pane and must never swallow this call (a skipped `applyLayout` here leaves
+        //    `chromeGeometry` sized for the old panel: a panel that never appears, or a picture
+        //    squeezed into rows that are no longer taken).
+        //  * it runs on the main queue: `chromeKey` reaches `openPanel` from the input reader's
+        //    thread, and everything below this hop (`writer`, `grid`, `mirrorPane`,
+        //    `restartCapture`) is main-queue state.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.applyPanel() }
+            return
+        }
+        handleResize(force: true)
         chromeDirty = true
     }
 
