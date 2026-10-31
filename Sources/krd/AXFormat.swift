@@ -43,33 +43,48 @@ enum AXText {
     /// Two reasons this is not optional: window titles come from arbitrary documents
     /// (SECURITY.md §"untrusted titles"), and a raw ESC in the stream would repaint the
     /// caller's terminal instead of being printed.
+    ///
+    /// `limit` counts **extended grapheme clusters** — what a terminal draws as one glyph and
+    /// what a reader calls one character — not unicode scalars. Counting scalars cut a flag
+    /// between its two regional indicators, stranded the marks of `ễ`, and left a ZWJ in
+    /// front of the ellipsis: a clip that splits a cluster does not shorten the string, it
+    /// *changes* it (issue #128). Each cluster is therefore kept or dropped whole: it is
+    /// appended when it is safe, and replaced by a single space when it carries a control
+    /// scalar (`"\r\n"` is one cluster and becomes one space). A clip never splits a cluster.
+    ///
+    /// That makes `limit` a readability budget, not a column budget: a cluster is at most two
+    /// terminal columns (`DisplayWidth`), so the result can be up to `2 * limit` cells plus the
+    /// one-cell `…` — the same ceiling the scalar version already had for CJK, but wider than
+    /// before for a ZWJ sequence, whose seven scalars now buy one character instead of seven.
+    /// A caller that needs a hard column bound must cut by cells itself (`DisplayWidth.truncate`);
+    /// this function only clamps the cluster count.
     static func sanitize(_ raw: String, limit: Int = 80) -> String {
         var out = String()
         out.reserveCapacity(min(raw.count, limit + 1))
         var taken = 0
-        for scalar in raw.unicodeScalars {
-            let value = scalar.value
-            let unsafe = value < 0x20                       // C0, including ESC and newline
-                || (0x7F...0x9F).contains(value)            // DEL + C1
-                || value == 0x2028 || value == 0x2029       // line / paragraph separator
-                || value == 0x202E                          // right-to-left override
-            if unsafe {
-                if taken >= limit {
-                    out.append("…")
-                    break
-                }
-                out.append(" ")
-                taken += 1
-                continue
-            }
+        for character in raw {
             if taken >= limit {
                 out.append("…")
                 break
             }
-            out.unicodeScalars.append(scalar)
+            if character.unicodeScalars.contains(where: isUnsafeScalar) {
+                out.append(" ")
+            } else {
+                out.append(character)
+            }
             taken += 1
         }
         return out
+    }
+
+    /// A scalar a terminal would interpret: C0 (ESC, newline, …), DEL + C1, the line/paragraph
+    /// separators and the right-to-left override.
+    private static func isUnsafeScalar(_ scalar: UnicodeScalar) -> Bool {
+        let value = scalar.value
+        return value < 0x20
+            || (0x7F...0x9F).contains(value)
+            || value == 0x2028 || value == 0x2029
+            || value == 0x202E
     }
 
     /// "AXButton" → "button". Agents read the short form; JSON keeps the full one.
