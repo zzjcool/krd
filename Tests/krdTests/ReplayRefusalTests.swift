@@ -135,14 +135,15 @@ final class ReplayRefusalTests: XCTestCase {
                      "frame 1 is exactly what a 4x3 layout renders")
     }
 
-    /// A line that declares no frame at all (a `w` of 0) makes the whole set unusable, wherever in the
-    /// file it sits: the pre-flight only ever looked at the sizes, so it would have passed a zero-size
-    /// entry on to `frame(_:)` and reported a "truncated" frame that is simply not a frame.
+    /// A line that declares no frame at all (a `w` of 0) makes the whole set unusable -- and it sits in
+    /// the middle of the file, because a guard that only looked at the first entry would pass this case
+    /// (mutation: `entries.allSatisfy(renderable)` -> `renderable(first)` stayed green while the bad line
+    /// was first).
     func testAManifestLineDeclaringNoFrameIsRefused() throws {
         try writeManifest([
             Self.headerLine,
-            frameLine(n: 0, w: 4, h: 0, tMs: 0),
-            frameLine(n: 1, w: 4, h: 2, tMs: 33.3),
+            frameLine(n: 0, w: 4, h: 2, tMs: 0),
+            frameLine(n: 1, w: 4, h: 0, tMs: 33.3),
         ])
         try writeFile(pixels(count: 4 * 2 * 3, seed: 0x10), "000000.raw")
         try writeFile(pixels(count: 4 * 2 * 3, seed: 0x40), "000001.raw")
@@ -152,12 +153,12 @@ final class ReplayRefusalTests: XCTestCase {
 
     /// A hand-edited line can declare a size no `Int` holds, and `Entry.byteCount` multiplies it: the
     /// manifest is refused where it is read instead of trapping the pre-flight (measured before this:
-    /// `Trace/BPT trap: 5`, exit 133, where cd9ac5d exited 0).
+    /// `Trace/BPT trap: 5`, exit 133, where cd9ac5d exited 0). Also a middle line, for the reason above.
     func testALineWhoseSizeOverflowsIsRefusedWithoutTrapping() throws {
         try writeManifest([
             Self.headerLine,
-            #"{"n":0,"w":100000000000,"h":100000000000,"bpp":3,"t_ms":0}"#,
-            frameLine(n: 1, w: 4, h: 2, tMs: 33.3),
+            frameLine(n: 0, w: 4, h: 2, tMs: 0),
+            #"{"n":1,"w":100000000000,"h":100000000000,"bpp":3,"t_ms":33.33}"#,
         ])
         try writeFile(pixels(count: 4 * 2 * 3, seed: 0x10), "000000.raw")
         try writeFile(pixels(count: 4 * 2 * 3, seed: 0x40), "000001.raw")

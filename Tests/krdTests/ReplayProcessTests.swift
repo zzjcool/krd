@@ -8,8 +8,9 @@ import Darwin
 /// with no tty, no capture and no permissions.
 ///
 /// On cd9ac5d every case below except the last replays nothing, prints the ordinary summary and exits
-/// 0, so a scripted replay of a valid recording reports success while painting nothing. Deleting the
-/// pre-flight in `runReplay` keeps the rest of this bundle green, which is why this file exists.
+/// 0, so a scripted replay of a valid recording reports success while painting nothing. No other test
+/// in this bundle spawns the binary, so without this file deleting the pre-flight in `runReplay`
+/// leaves every other replay test green -- which is exactly why this file exists.
 final class ReplayProcessTests: XCTestCase {
     /// `pane 8x4` of `cell 4x6` is 32x24 px, and a source of the same aspect keeps the grid from
     /// scaling it; 32*24*3 = 2304 B per frame.
@@ -40,8 +41,8 @@ final class ReplayProcessTests: XCTestCase {
         try Data(payload).write(to: dir.appendingPathComponent(String(format: "%06d.raw", index)))
     }
 
-    private func frameLine(n: Int, w: Int, h: Int, tMs: Double) -> String {
-        String(format: "{\"n\":%d,\"w\":%d,\"h\":%d,\"bpp\":3,\"t_ms\":%.2f}", n, w, h, tMs)
+    private func frameLine(n: Int, w: Int, h: Int, bpp: Int = 3, tMs: Double) -> String {
+        String(format: "{\"n\":%d,\"w\":%d,\"h\":%d,\"bpp\":%d,\"t_ms\":%.2f}", n, w, h, bpp, tMs)
     }
 
     /// One `--replay --bench` of the temp recording: what the shell would see, i.e. the exit status
@@ -51,7 +52,7 @@ final class ReplayProcessTests: XCTestCase {
     /// parent still holds the write end, and a deadlocked test bundle is worse than a red one.
     /// `waitUntilExit()` is avoided for the same reason -- a replay that hangs must fail here, not
     /// hang the suite -- so the child is polled and killed after the deadline.
-    private func replay() throws -> (status: Int32, out: String, err: String)? {
+    private func replay(extraArguments: [String] = []) throws -> (status: Int32, out: String, err: String)? {
         // The test bundle sits next to the executable it is testing. A missing binary fails loudly:
         // a silently skipped test is worse than a failing one, because this is the only place that
         // can catch a replay that reports success without painting.
@@ -75,7 +76,7 @@ final class ReplayProcessTests: XCTestCase {
 
         let child = Process()
         child.executableURL = binary
-        child.arguments = ["--replay", dir.path, "--bench"]
+        child.arguments = ["--replay", dir.path, "--bench"] + extraArguments
         child.standardInput = FileHandle.nullDevice
         child.standardOutput = outHandle
         child.standardError = errHandle
@@ -85,6 +86,9 @@ final class ReplayProcessTests: XCTestCase {
         while child.isRunning, Date() < deadline { usleep(20_000) }
         if child.isRunning {
             kill(child.processIdentifier, SIGKILL)
+            // Reap it: a recycled pid must not be signalled by a later case, and the failure is
+            // reported once, here.
+            _ = child.waitUntilExit()
             XCTFail("krd --replay did not finish within 30 s")
             return nil
         }
@@ -109,7 +113,8 @@ final class ReplayProcessTests: XCTestCase {
         XCTAssertTrue(run.err.contains("frame 1"), run.err)
         XCTAssertTrue(run.err.contains("000001.raw"), run.err)
         XCTAssertTrue(run.err.contains("2300 B"), run.err)
-        XCTAssertTrue(run.err.contains("32x24 px, 3 bpp = 2304 B"), run.err)
+        XCTAssertTrue(run.err.contains("32x24 px"), run.err)
+        XCTAssertTrue(run.err.contains("2304 B"), run.err)
         XCTAssertFalse(run.out.contains("frames"),
                        "the summary must not report a replay that did not happen: \(run.out)")
     }
@@ -133,6 +138,54 @@ final class ReplayProcessTests: XCTestCase {
         XCTAssertFalse(run.out.contains("frames"), run.out)
     }
 
+    /// A `.raw` that `stat` can size but the process cannot open: the pre-flight passes it (its size
+    /// matches its line exactly), so this is the loop's own branch -- and it must blame the read, not
+    /// call a present file missing or truncated.
+    func testAnUnreadableFrameExitsNonZeroWithoutBlamingTheManifest() throws {
+        try writeManifest([
+            Self.headerLine,
+            frameLine(n: 0, w: 32, h: 24, tMs: 0),
+            frameLine(n: 1, w: 32, h: 24, tMs: 33.3),
+        ])
+        try writeFrame(0, bytes: Self.frameBytes)
+        try writeFrame(1, bytes: Self.frameBytes)
+        let locked = dir.appendingPathComponent("000001.raw")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
+        }
+
+        let run = try XCTUnwrap(try replay())
+        XCTAssertEqual(run.status, 1, run.err)
+        XCTAssertTrue(run.err.contains("could not be read"), run.err)
+        XCTAssertTrue(run.err.contains("000001.raw"), run.err)
+    }
+
+    /// An empty directory: no `manifest.jsonl`, so there is nothing to replay and nothing to
+    /// summarise.
+    func testAnEmptyDirectoryIsRefusedWithoutASummary() throws {
+        let run = try XCTUnwrap(try replay())
+        XCTAssertEqual(run.status, 1, run.err)
+        XCTAssertTrue(run.err.contains("no usable manifest.jsonl"), run.err)
+        XCTAssertFalse(run.out.contains("frames"), run.out)
+    }
+
+    /// The recording was made with `--format rgba` and replayed without it. The `--format` hint is a
+    /// refusal like any other, and it used to be thrown into the void.
+    func testABppMismatchExitsNonZeroAndNamesTheFormatFlag() throws {
+        try writeManifest([
+            Self.headerLine,
+            frameLine(n: 0, w: 32, h: 24, bpp: 4, tMs: 0),
+            frameLine(n: 1, w: 32, h: 24, bpp: 4, tMs: 33.3),
+        ])
+        try writeFrame(0, bytes: 32 * 24 * 4)
+        try writeFrame(1, bytes: 32 * 24 * 4)
+
+        let run = try XCTUnwrap(try replay())
+        XCTAssertEqual(run.status, 1, run.err)
+        XCTAssertTrue(run.err.contains("--format rgba"), run.err)
+    }
+
     /// Two intact files whose lines disagree (32x26 then 32x24, header renders 32x24): refused before
     /// the first frame, because `handleFrame` is handed the *layout* size -- a mismatched buffer there
     /// is a memcpy past the end, not a message.
@@ -154,6 +207,23 @@ final class ReplayProcessTests: XCTestCase {
         XCTAssertTrue(run.err.contains("32x24 px"), run.err)
     }
 
+    /// The other direction, and the one that would paint garbage: a frame *smaller* than the layout.
+    /// `handleFrame` reads a buffer of the layout's size, so a short one is read past its end unless
+    /// the pre-flight refuses it first.
+    func testAFrameSmallerThanTheLayoutIsRefusedBeforeTheFirstFrame() throws {
+        try writeManifest([
+            Self.headerLine,
+            frameLine(n: 0, w: 32, h: 20, tMs: 0),
+        ])
+        try writeFrame(0, bytes: 32 * 20 * 3)
+
+        let run = try XCTUnwrap(try replay())
+        XCTAssertEqual(run.status, 1, run.err)
+        XCTAssertFalse(run.out.contains("frames"), run.out)
+        XCTAssertTrue(run.err.contains("frame 0"), run.err)
+        XCTAssertTrue(run.err.contains("32x20 px"), run.err)
+    }
+
     /// The path the benchmarks use must keep working end to end: a recording whose lines agree
     /// replays every frame and exits 0, with nothing on stderr.
     func testASingleSizeRecordingReplaysAndExitsZero() throws {
@@ -167,8 +237,33 @@ final class ReplayProcessTests: XCTestCase {
 
         let run = try XCTUnwrap(try replay())
         XCTAssertEqual(run.status, 0, run.err)
-        XCTAssertTrue(run.out.contains("2 frames"), run.out)
         XCTAssertTrue(run.out.contains("32x24"), run.out)
+        // `2 frames` is the *declared* count -- the buggy build printed it while painting nothing.
+        // The payload column is the only number in the summary that says a frame went through the
+        // pipeline, so that is what this asserts.
+        let row = try XCTUnwrap(run.out.split(separator: "\n").first { $0.hasPrefix("  bytes") },
+                                "no bytes row in the summary: \(run.out)")
+        let p50 = try XCTUnwrap(row.split(separator: " ").dropFirst().first.flatMap { Int($0) },
+                                "the bytes row carries no number: \(row)")
+        XCTAssertGreaterThan(p50, 0, "`2 frames` is the *declared* count; the payload column is the only "
+                            + "one that says a frame went through the pipeline")
         XCTAssertEqual(run.err, "", "a replay that works has nothing to explain")
+    }
+
+    /// `--mirror` leaves `Log`'s sink on stderr, so the sentence must still be written exactly once:
+    /// writing to the log *and* to stderr printed it twice there.
+    func testTheRefusalIsSaidOnceEvenWhenTheLogSinkIsStderr() throws {
+        try writeManifest([
+            Self.headerLine,
+            frameLine(n: 0, w: 32, h: 26, tMs: 0),
+        ])
+        try writeFrame(0, bytes: 32 * 26 * 3)
+
+        let run = try XCTUnwrap(try replay(extraArguments: ["--mirror"]))
+        XCTAssertEqual(run.status, 1, run.err)
+        // The other `krd:` lines here are setup notices (`--bench` names the quality and scale it pins,
+        // the mirror names its grid), so the sentence is what has to be counted.
+        let said = run.err.split(separator: "\n").filter { $0.contains("is 32x26 px") }
+        XCTAssertEqual(said.count, 1, "once, not once per destination: \(run.err)")
     }
 }
