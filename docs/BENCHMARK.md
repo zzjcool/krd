@@ -8,7 +8,7 @@ honestly, and where the harness lives.** It is the plan; `ENCODING.md` stays the
 
 | Harness | Measures | Blind to |
 |---|---|---|
-| `krd --bench` | dedupe, dirty, extract, zlib, base64, assembly; p50/p95/p99; payload + wire bytes | `write(2)`, real content, ScreenCaptureKit |
+| `krd --bench` | dedupe, dirty, extract, heuristic, quantise, zlib, compress, base64, assembly; p50/p95/p99; payload + wire bytes | `write(2)`, real content, ScreenCaptureKit |
 | `make bench` | all of the above + the pty harness + budget verdicts, in one report | terminal-side paint latency (see §8) |
 | `--debug` stats line (1 Hz) | tiles/s, KB, MB/s, `ms[zlib, write, max, over5]`, captures/idle/bad, `pipe` | anything comparable across runs unless you add `--stats-json` |
 | `probe/kbench.py` | raw pty throughput of a *foreign* Python encoder | krd itself |
@@ -144,7 +144,17 @@ cannot look the same:
 records: the one `TileGrid.diff` scan (timed as `dedupe`; its `dirty` tiles come out of the same pass,
 so the `dirty` column is 0 — #95), the serial reference (once per case, outside the
 timed frames — putting it inside made `total` include two compressions), the live parallel encode,
-and the escape assembly with a per-tile timer that only exists when a bench asks for it.
+and the escape assembly with a per-tile timer that only exists when a bench asks for it. The serial
+reference carries `extract`, `heuristic`, `quantise`, `zlib`, `compress`, `base64` and `assemble`;
+inside `compress` it times `looksCompressible` (`heuristic`), the 5-6-5 quantise (`quantise`) and
+deflate (`zlib`) separately, and `compress` stays the whole `ScreenWriter.compress` call.
+
+Until #96 the `zlib` column was that whole call: it charged `looksCompressible` and the quantise to
+the compressor — 16 % of `photo` in the issue — so a regression in either stage read as a deflate
+regression. The stages now add up: on the laptop `budget.json` comes from, `photo` reads heuristic
+9.85 ms, quantise 15.09 ms, deflate 112.40 ms inside a 137.3 ms `compress`, same serial reference,
+same frame, and the three sum to the whole call. #92 (quantise) and #94 (heuristic) now have columns
+that name them, and `compress` keeps the old number under its own name, so no history is lost.
 
 Actual emitted schema (one line of it shown per case):
 
@@ -156,8 +166,9 @@ Actual emitted schema (one line of it shown per case):
  "cases": [{"name": "char", "content": "text", "tiles": 1,
             "bytes": {"payload": 326, "wire": 541},
             "ms": {"dedupe": {"n":30,"p50":3.37,"p95":…,"p99":…,"max":…,"mean":…},
-                   "dirty": {…}, "extract": {…}, "zlib": {…}, "base64": {…},
-                   "assemble": {…}, "serial": {…}, "parallel": {…}, "total": {…}}}]}
+                   "dirty": {…}, "extract": {…}, "heuristic": {…}, "quantise": {…},
+                   "zlib": {…}, "compress": {…}, "base64": {…}, "assemble": {…},
+                   "serial": {…}, "parallel": {…}, "total": {…}}}]}
 ```
 
 `config` is the effective layout, never the flag value, and `bench/check-docs.py` pins
@@ -212,13 +223,20 @@ frames of the reference layout is ~800 MB, which is why the default limit is 60 
 | `full` text payload | ≤ 120 KB | |
 | `photo` payload | ≤ 20 MB | content-dominated, so this only catches a format regression |
 | `photo` total p99 | ≤ 120 ms | a runner is ~2× this laptop |
+| `photo` quantise p99 | ≤ 45 ms | ~3× the 15.09 ms measurement; #92's stage had no column of its own |
+| `photo` heuristic p99 | ≤ 30 ms | ~3× the 9.85 ms measurement; same for #94 |
 | `none` payload / wire | 0 B / ≤ 64 B | a delivered frame that changed nothing |
 | `none@unlimited` bytes after frame 1 | **0** | static desktop is free, per pty |
 | `line@unlimited` write p99 | ≤ 10 ms | |
 | `line@unlimited` late frames | ≤ 3 | |
 
+No existing threshold was renamed, retuned or migrated to a new column in #96: the two new rules are
+added beside the old ones, and `photo` `ms.total.p99` still gates exactly what it gated before — the
+live-path parallel total, in which `dedupe` is deliberately not included, because the frame scan runs
+once per delivered frame whether or not the encoder ever sees that frame.
+
 CI runs `python3 bench/bench.py --quick --rounds 8` as a step in `.github/workflows/ci.yml`: the
-encoder plus two wire runs (~8 s) and all 15 checks in `bench/budget.json`. It does **not** compare
+encoder plus two wire runs (~8 s) and all 21 checks in `bench/budget.json` (#96 added two). It does **not** compare
 against a committed timing baseline — a macOS runner is not the same machine class as the laptop
 these come from, and a gate that fails on runner noise is deleted within a week. Bytes, tile counts
 and the zero-byte invariant are deterministic, so those are gated at their absolute values.

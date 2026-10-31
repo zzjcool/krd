@@ -8,7 +8,9 @@ import krdcore
 ///
 ///  - one clock (`DispatchTime`, monotonic), never `Date`
 ///  - stages are timed separately: dedupe (the one scan that also yields the dirty tiles, #95),
-///    dirty (a read of that scan's result), extract, zlib, base64, assembly
+///    dirty (a read of that scan's result), extract, heuristic, quantise, zlib (deflate alone
+///    since #96), compress (the whole `ScreenWriter.compress` call, which is what this column
+///    reported before the split), base64, assembly
 ///  - every result carries its configuration (pane, cell, tile, format, machine, cores)
 ///  - distributions, not best-of: p50/p95/p99 over `--rounds` frames
 ///  - warm-up rounds are discarded, so first-touch page faults and `LevelPolicy` learning
@@ -358,7 +360,15 @@ struct StageResult {
     var dedupe: Percentiles
     var dirty: Percentiles
     var extract: Percentiles
+    /// The compressibility predictor (`looksCompressible`) alone: pixel work, not compression.
+    var heuristic: Percentiles
+    /// The quantise pass alone (`ScreenWriter.quantise`): pixel work, not compression.
+    var quantise: Percentiles
+    /// Deflate alone (`zlibCompress`) — this is what the column name promised all along.
     var zlib: Percentiles
+    /// The whole `ScreenWriter.compress` call: exactly the number the old mislabelled `zlib`
+    /// column reported, kept under an honest name so old runs stay comparable (#96).
+    var compress: Percentiles
     var base64: Percentiles
     var assemble: Percentiles
     var total: Percentiles
@@ -387,7 +397,8 @@ enum Bench {
             var previous = base
             var payloads: [Double] = [], wires: [Double] = []
             var dedupeMs: [Double] = [], dirtyMs: [Double] = []
-            var extractMs: [Double] = [], zlibMs: [Double] = []
+            var extractMs: [Double] = [], heuristicMs: [Double] = []
+            var quantiseMs: [Double] = [], zlibMs: [Double] = [], compressMs: [Double] = []
             var base64Ms: [Double] = [], assembleMs: [Double] = []
             var totalMs: [Double] = [], serialMs: [Double] = [], parallelMs: [Double] = []
             var tiles = 0
@@ -478,25 +489,35 @@ enum Bench {
             if serial, !lastDirty.isEmpty {
                 let rects = lastDirty.map { layout.rect($0 % layout.tilesX, $0 / layout.tilesX) }
                 let plans = lastDirty.map { writer.plan(for: $0) }
-                var best = Double.infinity, bestExtract = 0.0, bestZlib = 0.0
+                var best = Double.infinity, bestExtract = 0.0, bestCompressed = 0.0
+                var bestTiming = CompressTiming()
                 for _ in 0..<3 {
-                    var extract = 0.0, zlib = 0.0
+                    var extract = 0.0, compressed = 0.0
+                    var timing = CompressTiming()
                     let start = benchNowMs()
                     for i in 0..<lastDirty.count {
                         let t0 = benchNowMs()
                         let pixels = layout.extract(lastFrame, rect: rects[i])
                         let t1 = benchNowMs()
-                        _ = ScreenWriter.compress(index: lastDirty[i], rect: rects[i],
-                                                  pixels: pixels, plan: plans[i])
+                        withUnsafeMutablePointer(to: &timing) { timingPtr in
+                            _ = ScreenWriter.compress(index: lastDirty[i], rect: rects[i],
+                                                      pixels: pixels, plan: plans[i], timing: timingPtr)
+                        }
                         let t2 = benchNowMs()
-                        extract += t1 - t0; zlib += t2 - t1
+                        extract += t1 - t0; compressed += t2 - t1
                     }
                     let elapsed = benchNowMs() - start
-                    if elapsed < best { best = elapsed; bestExtract = extract; bestZlib = zlib }
+                    if elapsed < best {
+                        best = elapsed; bestExtract = extract; bestCompressed = compressed
+                        bestTiming = timing
+                    }
                 }
                 serialMs = [best]
                 extractMs = [bestExtract]
-                zlibMs = [bestZlib]
+                heuristicMs = [bestTiming.heuristicMs]
+                quantiseMs = [bestTiming.quantiseMs]
+                zlibMs = [bestTiming.deflateMs]
+                compressMs = [bestCompressed]
             }
 
             // The case definition is an assertion, not a comment: a "one character" case that
@@ -521,7 +542,9 @@ enum Bench {
                 payloadBytes: Int(Percentiles(payloads).p50),
                 wireBytes: Int(Percentiles(wires).p50),
                 dedupe: Percentiles(dedupeMs), dirty: Percentiles(dirtyMs),
-                extract: Percentiles(extractMs), zlib: Percentiles(zlibMs),
+                extract: Percentiles(extractMs),
+                heuristic: Percentiles(heuristicMs), quantise: Percentiles(quantiseMs),
+                zlib: Percentiles(zlibMs), compress: Percentiles(compressMs),
                 base64: Percentiles(base64Ms), assemble: Percentiles(assembleMs),
                 total: Percentiles(totalMs),
                 serial: Percentiles(serialMs), parallel: Percentiles(parallelMs)
@@ -570,10 +593,13 @@ enum Bench {
                          pad(num(r.total.p50), 8), pad(num(r.total.p99), 8)]
             text += "  " + cells.joined(separator: " ") + "\n"
         }
-        text += "\n" + header(["case", "extract", "zlib", "base64", "assemble", "serial", "parallel"],
-                               [10, 9, 9, 9, 9, 9, 9])
+        text += "\n" + header(["case", "extract", "heuristic", "quantise", "zlib", "compress",
+                                "base64", "assemble", "serial", "parallel"],
+                               [10, 9, 9, 9, 9, 9, 9, 9, 9, 9])
         for r in results {
-            let cells = [pad(r.name, 10, left: true), pad(num(r.extract.p50), 9), pad(num(r.zlib.p50), 9),
+            let cells = [pad(r.name, 10, left: true), pad(num(r.extract.p50), 9),
+                         pad(num(r.heuristic.p50), 9), pad(num(r.quantise.p50), 9),
+                         pad(num(r.zlib.p50), 9), pad(num(r.compress.p50), 9),
                          pad(num(r.base64.p50), 9), pad(num(r.assemble.p50), 9),
                          pad(num(r.serial.p50), 9), pad(num(r.parallel.p50), 9)]
             text += "  " + cells.joined(separator: " ") + "\n"
@@ -591,8 +617,10 @@ enum Bench {
               {"name":"\(r.name)","content":"\(r.content)","tiles":\(r.tiles),
                "bytes":{"payload":\(r.payloadBytes),"wire":\(r.wireBytes)},
                "ms":{\(stage("dedupe", r.dedupe)),\(stage("dirty", r.dirty)),\
-              \(stage("extract", r.extract)),\(stage("zlib", r.zlib)),\
-              \(stage("base64", r.base64)),\(stage("assemble", r.assemble)),\
+              \(stage("extract", r.extract)),\(stage("heuristic", r.heuristic)),\
+              \(stage("quantise", r.quantise)),\(stage("zlib", r.zlib)),\
+              \(stage("compress", r.compress)),\(stage("base64", r.base64)),\
+              \(stage("assemble", r.assemble)),\
               \(stage("serial", r.serial)),\(stage("parallel", r.parallel)),\
               \(stage("total", r.total))}}
             """
