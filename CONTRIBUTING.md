@@ -171,16 +171,19 @@ that the tag matches `VERSION` and `Version.swift`, builds the universal binary,
 with a local identity — users who care about a stable TCC grant sign it themselves (see
 [docs/DEPLOY.md](docs/DEPLOY.md)).
 
-The demo clips live in `docs/media/` (`demo.gif` for the README, `demo.mp4` for the release page) and
-are not part of the release tarball. They are a plain screen recording of a terminal pane running
-`krd`, compressed with:
+The demo clips live in `docs/media/` (`demo.gif` for the README, `demo.mp4` for the release page,
+`demo-poster.png` as its still) and are not part of the release tarball. They are a plain screen
+recording of a terminal pane running `krd` — drop the dead lead-in, then compress with:
 
 ```bash
 ffmpeg -i raw.mov -vf "scale=720:-2:flags=lanczos,fps=30" -c:v libx264 -crf 27 -pix_fmt yuv420p -an \
        -movflags +faststart docs/media/demo.mp4
-ffmpeg -i raw.mov -vf "fps=10,scale=480:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
+ffmpeg -i raw.mov -vf "fps=12,scale=640:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
        -loop 0 docs/media/demo.gif
+ffmpeg -ss 10.6 -i docs/media/demo.mp4 -frames:v 1 -y docs/media/demo-poster.png   # a frame where the wall is painted
 ```
+
+`640` is the width the README renders at, so the GIF stays sharp on a retina screen.
 
 Keep the GIF under ~3 MB; anything larger makes the README slow to load.
 
