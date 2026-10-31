@@ -14,6 +14,13 @@ public struct WallPanel: Equatable {
     public enum Source: Equatable, Hashable {
         case display(UInt32)
         case window(UInt32)
+
+        /// The stage is a display and a card is a window: the cache's one asymmetry (a display's
+        /// picture has no age signal in its stamp, a window's does) hangs off this.
+        public var isDisplay: Bool {
+            if case .display = self { return true }
+            return false
+        }
     }
 
     /// 0 is the stage, 1... are the cards of the current page in the layout's order.

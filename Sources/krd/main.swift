@@ -1762,6 +1762,10 @@ final class Desk {
     /// through here — the enumeration path and the relayout path — so there is one definition of
     /// how many cards fit.
     private func clampAndDraw(model: WallModel, pane: PaneGeometry) {
+        // The desk changed (or the pane did), so the one panel whose picture has no age signal in
+        // its key — the display — is re-photographed on the repaint that follows. A page step comes
+        // through `drawWall` from a click and never lands here, which is what keeps it free.
+        wallPictureCache.forgetStage()
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
         // offsets still point past the end; clamping here is what keeps the shelf from going blank.
         // The clamp takes the layout's *effective page size*: below 28 columns `WallLayout.make`
@@ -1995,12 +1999,6 @@ final class Desk {
                 if panel.slot > 0 { paints.cardPictureCells[panel.slot] = panel.rect }
             }
         }
-        // The same statement for a slot that was planned and produced no picture at all: whatever is
-        // in its cells, it is not the payload the cache recorded.
-        let pictured = Set(pictures.map(\.panel.slot))
-        for panel in panels where !pictured.contains(panel.slot) {
-            wallPictureCache.forget(slot: panel.slot)
-        }
         if options.demo {
             // One line that answers "why does the picture not fill its box" without a screenshot:
             // the pane, the cell it was measured at, the quality factor, the stage's cells and
@@ -2059,10 +2057,13 @@ final class Desk {
                 // stage's key did not change (issue #100).
                 let key = panel.key(quality: options.wallQuality.value, rounded: !options.square)
                 if wallPictureCache.isOnScreen(slot: panel.slot, key: key, rect: panel.rect) {
-                    // A placeholder picture *is* its cells: the text layer blanks them every frame
-                    // (`WallCanvas` draws `clear` where a picture goes), so the invisible grid has to
-                    // be rewritten even though the image itself is not re-sent. A pixel-sized
-                    // placement is not text and survives a repaint untouched.
+                    // A placeholder picture *is* its cells. `WallCanvas` diffs runs, so a cell whose
+                    // text did not change is not rewritten and its grid survives — but a card whose
+                    // caption changed has its cells rewritten, and the cursor-addressed grid is what
+                    // draws the image there. Rewriting the grid is ~2-9 KB against a 132 KB payload,
+                    // so the cheap-and-always-safe half wins over guessing which of the two happened.
+                    // A pixel-sized placement is not text and survives a repaint untouched, which is
+                    // why that transport sends nothing at all.
                     if wallPlaceholders {
                         writer.placePanelAsPlaceholder(id: panel.imageID,
                                                        placementID: panel.placementID,
@@ -2099,7 +2100,7 @@ final class Desk {
                 // This picture is on screen now: the next paint may skip it if nothing about it
                 // changed (that is the whole cache, and it is recorded whether or not this emit
                 // went out as a full panel or was reused from the capture cache).
-                wallPictureCache.didPlace(slot: panel.slot, key: key, rect: panel.rect)
+                if bytes > 0 { wallPictureCache.didPlace(slot: panel.slot, key: key, rect: panel.rect) }
                 emitted += 1
                 payloadBytes += bytes
                 // The landing screen's own unit of cost (issue #88): one line per panel, saying how many

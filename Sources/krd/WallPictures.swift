@@ -77,17 +77,30 @@ enum WallPictures {
     ///   because an image id is per slot: if slot 2 now shows a different window, the payload for
     ///   it has to go out again even though the picture itself is cached.
     ///
-    /// Not a stream, not a loop: the wall captures on change, so this is a memo between two paints
-    /// and it is cleared whenever the terminal's images are (`Desk.runWall`, right after the
-    /// `writer.clear()` that drops them).
+    /// Not a stream, not a loop: the wall captures on change, so this is a memo between two paints.
+    /// It is cleared whenever the terminal's images are (`Desk.runWall`, the resize path) — and, for
+    /// the stage only, on every desk change (`forgetStage`): see below.
+    ///
+    /// Locked: `capture` runs in a `Task` off the main queue while `handleResize`/`runWall` reset the
+    /// memo on it, so this is shared state across two threads, exactly like `Log`'s ring.
     final class PanelCache {
-        /// How many pictures are worth keeping. A picture is RGBA, so 16 of the biggest panel the
-        /// wall can ask for (`WallPictures.maxSide` 4096 on both axes would be 64 MiB each — the real
-        /// ones are a pane's worth) bounds the memo at roughly a desktop's card count plus a page or
-        /// two of history: a two-page back-and-forth stays free, and a model that keeps growing
-        /// cannot grow this cache with it.
+        /// How many pictures are worth keeping: two pages of four, so a page step back and forth is
+        /// free and a model that keeps growing cannot grow the memo with it.
+        ///
+        /// A count, not a byte budget — and the count is what the doc can honestly promise: a picture
+        /// is `fit.contentWidth x fit.contentHeight x 4` (the size the *layout* asked for, which
+        /// `WallPictures.maxSide` does not cap: that caps the capture request, and `PanelRaster.rgb`
+        /// resamples *up* to the panel). At 137x44 with dpr 2 that is 4.8 MiB for the stage plus
+        /// 1.1 MiB a card, so the whole memo is ~77 MiB; on a 6K pane one stage is ~55 MiB and the
+        /// cap would be ~0.9 GiB. A byte budget is the right follow-up if the wall ever meets a
+        /// terminal that large — the cap here is a *count* so that the invariant (a picture is
+        /// reused only when its key is equal) stays the only thing the cache has to decide.
         static let capacity = 16
 
+        /// Guards everything below. `capture` (off-main) is the only writer of `byKey`; `sent` is
+        /// written on the main queue by `paintWall` and read by `isOnScreen` from the same queue, but
+        /// `reset()`/`forgetStage()` can arrive from the main queue while a capture is in flight.
+        private let lock = NSLock()
         private var byKey: [PanelKey: Picture] = [:]
         /// Least recently used first: a hit or a store moves its key to the end, and the front is
         /// what `store` drops when the cap is reached.
@@ -95,12 +108,16 @@ enum WallPictures {
         private var sent: [Int: (key: PanelKey, rect: CellRect)] = [:]
 
         func picture(for key: PanelKey) -> Picture? {
+            lock.lock()
+            defer { lock.unlock() }
             guard let picture = byKey[key] else { return nil }
             Self.touch(&order, key)
             return picture
         }
 
         func store(_ picture: Picture, _ key: PanelKey) {
+            lock.lock()
+            defer { lock.unlock() }
             byKey[key] = picture
             Self.touch(&order, key)
             // Eviction forgets the *capture* cache only. `sent` keeps its entry because the terminal
@@ -120,11 +137,15 @@ enum WallPictures {
         /// matter: the key alone is "the terminal holds the pixels", the rectangle is "where it
         /// draws them" — a moved placement must be re-emitted.
         func isOnScreen(slot: Int, key: PanelKey, rect: CellRect) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
             guard let placed = sent[slot] else { return false }
             return placed.key == key && placed.rect == rect
         }
 
         func didPlace(slot: Int, key: PanelKey, rect: CellRect) {
+            lock.lock()
+            defer { lock.unlock() }
             sent[slot] = (key: key, rect: rect)
         }
 
@@ -136,19 +157,48 @@ enum WallPictures {
         /// that is not there. The captured payload stays in `byKey`: the picture is not wrong, it is
         /// just not on screen any more.
         func forget(slot: Int) {
+            lock.lock()
+            defer { lock.unlock() }
             sent.removeValue(forKey: slot)
+        }
+
+        /// A **desk change**: drop the stage's picture and its placement record, so the next paint
+        /// photographs the display again.
+        ///
+        /// Why the stage alone has an age, when a card's key is enough for the card: a window's stamp
+        /// (bounds, size, title) is what makes its picture a picture of *that* window, and the wall
+        /// has never promised otherwise. A display's stamp is only its resolution, and its content is
+        /// the whole desk — which changes constantly and is described by no metadata at all. Reusing
+        /// it across a desk change would turn the wall's biggest panel into a screenshot of the first
+        /// second of the process. Before this cache, *any* model change re-shot every panel; keeping
+        /// that for the stage keeps the wall as live as it was, while a page step (which is a click,
+        /// not a desk change) still reuses it — that is the case issue #100 is about.
+        func forgetStage() {
+            lock.lock()
+            defer { lock.unlock() }
+            sent.removeValue(forKey: 0)
+            for key in order where key.source.isDisplay {
+                byKey.removeValue(forKey: key)
+                order.removeAll { $0 == key }
+            }
         }
 
         /// Forget everything: the terminal no longer holds these images (the wall dropped them, or a
         /// new process is painting a pane that used to hold a mirror's pictures).
         func reset() {
+            lock.lock()
+            defer { lock.unlock() }
             byKey.removeAll()
             order.removeAll()
             sent.removeAll()
         }
 
-        /// How many distinct pictures are cached — the number a test (and the log) can check.
-        var count: Int { byKey.count }
+        /// How many distinct pictures are cached — the number a test can check.
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return byKey.count
+        }
     }
 
     static func capture(_ panels: [WallPanel], cache: PanelCache? = nil)

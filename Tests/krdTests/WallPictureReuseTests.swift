@@ -118,6 +118,51 @@ final class WallPictureReuseTests: XCTestCase {
         }
     }
 
+    // MARK: the wired invalidation rule (not just the key's arithmetic)
+
+    /// A window that is dragged is the same window, the same size, the same slot — and a different
+    /// picture. The key has to be what `capture` actually consults, not only what `PanelKey` can
+    /// express: this plans the same page twice with one window's origin moved and reads the answer
+    /// off the `reused` set.
+    func testAWindowThatMovedIsPhotographedAgain() async {
+        let cache = WallPictures.PanelCache()
+        let model = WallSource.demoModel()
+        let pageA = plan(model: model, cardStart: 0)
+        _ = await WallPictures.capture(pageA, cache: cache)
+        let keysAfterA = cache.count
+
+        var movedModel = model
+        let first = model.windows[0]
+        movedModel.windows[0] = OrderedWindow(windowID: first.windowID, pid: first.pid,
+                                              app: first.app, title: first.title,
+                                              bounds: CGRectCompat(x: first.bounds.x + 120,
+                                                                   y: first.bounds.y + 80,
+                                                                   width: first.bounds.width,
+                                                                   height: first.bounds.height))
+        let pageB = plan(model: movedModel, cardStart: 0)
+        XCTAssertEqual(pageA.map(\.fit), pageB.map(\.fit),
+                       "the size is the same: only the stamp moved, or this proves nothing")
+        let second = await WallPictures.capture(pageB, cache: cache)
+        XCTAssertTrue(second.reused.contains(0), "the display did not move")
+        XCTAssertFalse(second.reused.contains(1), "a window that moved is a different picture")
+        XCTAssertEqual(cache.count, keysAfterA + 1)
+    }
+
+    /// The one asymmetry in the cache, pinned: a **desk change** re-photographs the display (its
+    /// stamp is only its resolution, so nothing else can ever dirty it) and leaves the cards alone
+    /// (their stamps are the windows). A page step is a click and does not go through
+    /// `forgetStage`, which is the case the issue is about.
+    func testADeskChangeRePhotographsTheStageAndKeepsTheCards() async {
+        let cache = WallPictures.PanelCache()
+        let page = demoPlan(cardStart: 0)
+        _ = await WallPictures.capture(page, cache: cache)
+        cache.forgetStage()
+        let after = await WallPictures.capture(page, cache: cache)
+        XCTAssertFalse(after.reused.contains(0), "the desk changed: the display is shot again")
+        XCTAssertTrue(after.reused.contains(1), "the card's window did not")
+        XCTAssertEqual(after.pictures.count, page.count, "every slot still gets a picture")
+    }
+
     // MARK: a repaint that changes nothing
 
     func testTheSamePageTwiceCapturesNothing() async {
