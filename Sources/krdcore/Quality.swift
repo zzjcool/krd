@@ -88,11 +88,16 @@ public struct QualityBudget: Equatable {
     /// at that point the bytes matter more than the guard's small fidelity win on text.
     public let eager: Bool
 
-    public init(_ value: Int) {
+    /// `eager` overrides the rung's own default. The two axes are separable on purpose (issue #87):
+    /// the *bit depth* is how much colour a frame may lose and the *guard* is how eagerly the
+    /// encoder spends it, and the menu's two sliders move one each. `QualityBudget(80)` is still
+    /// "5-6-5 behind the guard" -- nothing about the default, and therefore nothing about the
+    /// byte contract, moved.
+    public init(_ value: Int, eager: Bool? = nil) {
         let clamped = min(100, max(0, value))
         self.value = clamped
         self.bits = Self.bits(for: clamped)
-        self.eager = clamped <= 70
+        self.eager = eager ?? (clamped <= 70)
     }
 
     private static func bits(for value: Int) -> Bits? {
