@@ -1547,7 +1547,7 @@ final class Desk {
         // The grid is cheap (an ioctl); the *cell* is what a resize can change and what a terminal
         // may only answer once its pane has been laid out - so it is re-asked here, not per tick.
         let fresh = PaneGeometry.measure(cell: options.cell, grid: options.pane,
-                                         dpr: options.dpr) { Log.write($0) }
+                                         dpr: options.dpr, refreshCaps: true) { Log.write($0) }
         guard fresh != pane else { return }
         wallPane = fresh
         // No refresh here: the only caller is `handleResize`, which clears the screen and forces its
@@ -1606,7 +1606,7 @@ final class Desk {
         // mode, and it runs on the main queue before the reader thread exists — the only race-free
         // moment to read that. The first paint is *also* before it now (issue #99): the frame must not
         // wait for a probe a terminal may never answer, and the probes must run before the mouse is
-        // live (`TermGeometry.ask` reads stdin, so a probe under a live reader steals its bytes).
+        // live (`TermCaps.ask` reads stdin, so a probe under a live reader steals its bytes).
         wallCanvas = WallCanvas(symbols: options.symbols)
         // A returning mirror brings the page the reader was on, and — when it failed — the sentence
         // it failed with. Both arrive in argv because the process that knew them was replaced.
@@ -1632,12 +1632,14 @@ final class Desk {
     /// The two terminal probes that used to run before the wall's first byte (issue #99), moved behind
     /// it.
     ///
-    /// `PaneGeometry.measure` (`CSI 16t`/`14t`, up to 500 ms) and `supportsPlaceholders` (`U=1`, up to
-    /// 600 ms) are both questions a terminal is free never to answer, and `runWall` paid for them with
-    /// an empty alternate screen. So the first frame went out at the assumed cell on the pixel path,
-    /// and this asks with a wall already on screen: on Rex/kitty both answers arrive in ~1 ms, the
-    /// stale capture is dropped by the `desk.wallPane == pane` guard in `drawWall`, and the frame is
-    /// captured again once — with the real cell and the real transport.
+    /// `PaneGeometry.measure` (the capability batch: `CSI 16t`/`14t`/`DECRQM 2027`, one write, up to
+    /// 500 ms — see `TermCaps`) and `supportsPlaceholders` (`U=1`, up to 600 ms) are both questions a
+    /// terminal is free never to answer, and `runWall` paid for them with an empty alternate screen. So
+    /// the first frame went out at the assumed cell on the pixel path, and this asks with a wall
+    /// already on screen: on Rex/kitty both answers arrive in ~1 ms, the stale capture is dropped by
+    /// the `desk.wallPane == pane` guard in `drawWall`, and the frame is captured again once — with
+    /// the real cell and the real transport. The batch is one write and ends on the terminal's `DA1`,
+    /// so the questions it carries cost one round trip between them, not one each (issue #197).
     ///
     /// Still before `startInput()`: a probe that runs while the reader thread is live eats the bytes
     /// the reader is waiting for.
@@ -2376,12 +2378,19 @@ final class Desk {
     /// (`ScreenWriter.restoreGraphemeMode`); one that says `1` is left alone in both directions,
     /// because the mode is the pane's and outlives us.
     ///
+    /// The question rides in the batch (`TermCaps`, issue #197): `DECRQM 2027` leaves in the same write
+    /// as `CSI 16t`/`14t` and the terminating `DA1`, so asking it costs no round trip of its own — and
+    /// `terminalCaps` memoises the answer, so the cell query behind the paint is that same write.
+    ///
     /// Silent where there is no terminal to ask: `--bench`, `--selftest` and the listing modes own
     /// stdout and read nothing from stdin, and a probe that reads stdin there would eat their input.
     private func prepareGraphemeMode() {
         guard isatty(STDIN_FILENO) != 0,
               !(options.bench || options.selftest || Self.listsOnly(options)) else { return }
-        let start = TermGeometry.query2027()
+        // The capability batch, not a probe of its own (issue #197): the same write that carries
+        // `DECRQM 2027` also asks for the cell and the text area, and `TermGeometry.terminalCaps`
+        // memoises it, so the wall's re-measure behind the first paint sends no second question.
+        let start = TermGeometry.terminalCaps().graphemeMode
         writer.graphemeClustering = start == 2 ? .enableAndReset : .leave
         let answer = start.map { String($0) } ?? "no answer"
         let action = writer.graphemeClustering == .enableAndReset

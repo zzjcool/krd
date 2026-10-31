@@ -2,15 +2,23 @@
 
 English | [简体中文](TESTING.zh-CN.md)
 
-There is no XCTest target in this repository: the interesting behaviour is a terminal protocol plus
-a screen-capture framework, so the checks are (a) a build, (b) a synthetic picture through the real
-render pipeline, and (c) a calibration routine you run inside the terminal you care about. Every
-switch below exists because a specific question needed answering without guessing.
+`swift test` covers the mechanical half (`Tests/krdTests`, `Tests/krdcoreTests`): the byte contract,
+the layout math, and the probes whose only observable is bytes on a tty. What is left is the
+interesting behaviour — a terminal protocol plus a screen-capture framework — so the switches below
+are the half a person runs: (a) a build, (b) a synthetic picture through the real render pipeline, and
+(c) a calibration routine you run inside the terminal you care about. Every switch below exists because
+a specific question needed answering without guessing.
 
 ```bash
 swift build -c release                 # the mechanical check
 .build/release/krd --selftest          # the renderer, end to end, no permissions
 ```
+
+The probe bytes have a process-level test of their own: `Tests/krdTests/ProbeBatchTests.swift` puts
+`krd --wall` behind a pty, **plays the terminal** (it answers the capability questions the way a real
+one does), and fails if those questions arrive in more than one write, or if the read runs past the
+`DA1` that terminates the batch (issue #197). "One write" is only visible from the other end of a pty;
+no in-process test can see it.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) does exactly the mechanical part, and
 only on pull requests or on demand (not on every push); release tags get the same build plus

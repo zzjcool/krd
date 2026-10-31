@@ -64,10 +64,9 @@ public enum GraphicsAPC {
         writeRaw(sequence(body))
     }
 
-    /// The synchronous write itself. Used by `TermGeometry.ask` for the bytes a *graphics* probe
-    /// sends, so the probe path has one write and one place where its envelope is checked. (The
-    /// `CSI 16t`/`14t` query keeps its own loop in `TermGeometry.query`: it emits no APC, and it is
-    /// the older path — routing it here is a follow-up, not a claim this method already makes.)
+    /// The synchronous write itself. Used by `TermCaps.ask` for the bytes a probe sends — the capability
+    /// batch (`CSI 16t`/`14t`/`DECRQM 2027`/`DA1`, issue #197) and the `U=1` graphics probe alike — so
+    /// the probe path has one write and one place where its envelope is checked.
     public static func writeRaw(_ text: String) {
         let bytes = Array(text.utf8)
         assert(passthrough ? isFullyEnveloped(bytes) : true,

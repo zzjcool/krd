@@ -50,8 +50,9 @@ clustering: with it set the *terminal* decides where a cluster ends (VS16, ZWJ, 
 regional-indicator flags), so `☰` and a flag occupy the cells their glyph does; with it reset every
 code point is laid out alone and a flag is two letters. Ghostty 1.4.0 starts with it **set**
 (`DECRQM 2027` answers `1`, permanently) and Rex starts with it **reset** (`2`), so krd asks once
-per process — `CSI ? 2027 $ p` and `CSI c` in one write, `DA1` being the terminator because a
-terminal with no such mode answers nothing at all — and:
+per process — `CSI ? 2027 $ p` rides in the startup capability batch (`CSI 16 t`, `CSI 14 t`,
+`DECRQM`, `CSI c` in one write, `DA1` terminating it because a terminal with no such mode answers
+nothing at all) — and:
 
 | `DECRQM 2027` answered | `beginSession` sends | teardown sends |
 |---|---|---|

@@ -112,36 +112,6 @@ struct PaneGeometry: Equatable {
 }
 
 extension TermGeometry {
-    /// Write `bytes` to the terminal and collect what comes back for up to `timeoutMs`, with stdin
-    /// in raw non-blocking mode. `nil` when nothing came back. Only used before input starts (a probe
-    /// steals whatever it reads, so it must not run while the mouse is live).
-    static func ask(_ bytes: String, timeoutMs: Int, until: (String) -> Bool) -> String? {
-        var original = termios()
-        guard tcgetattr(STDIN_FILENO, &original) == 0 else { return nil }
-        var raw = original
-        raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
-        // c_cc[0]/[1] are VEOF/VEOL on macOS, not VMIN/VTIME: name them, or the fd keeps blocking.
-        withUnsafeMutableBytes(of: &raw.c_cc) { p in
-            p[Int(VMIN)] = 0
-            p[Int(VTIME)] = 0
-        }
-        guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return nil }
-        defer { tcsetattr(STDIN_FILENO, TCSANOW, &original) }
-        // The probe's bytes leave through the same sink as everything else (issue #107): one write
-        // loop, and `GraphicsAPC` asserts its envelope there rather than trusting each call site.
-        GraphicsAPC.writeRaw(bytes)
-        var response = ""
-        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
-        var buffer = [UInt8](repeating: 0, count: 256)
-        while Date() < deadline, !until(response) {
-            var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
-            let remaining = max(1, Int32(deadline.timeIntervalSinceNow * 1000))
-            guard poll(&pfd, 1, remaining) > 0 else { continue }
-            let n = Darwin.read(STDIN_FILENO, &buffer, buffer.count)
-            if n > 0 { response += String(decoding: buffer[0..<n], as: UTF8.self) }
-        }
-        return response.isEmpty ? nil : response
-    }
 
     /// Does this terminal implement kitty unicode placeholders (`U=1`)?
     ///
@@ -189,10 +159,14 @@ extension TermGeometry {
         // `i=31;OK`. Matching the literal `i=31;OK` made every answer look like silence, which sent
         // the wall down the pixel path on a terminal that had accepted the placeholder (measured
         // against Rex: `ESC_Gi=31,p=1;OK ESC\`).
-        let reply = ask(transmit + place, timeoutMs: timeoutMs) { text in
+        let reply = TermCaps.ask(transmit + place, timeoutMs: timeoutMs) { text in
             placeholderProbeVerdict(text) != nil
         }
-        DeleteProbeImage()
+        // Only a terminal that was asked can hold the probe's image. `TermCaps.ask` writes nothing
+        // without a tty on stdin (`--bench`, `--selftest`, a pipe: `krd --wall > file`), and the blind
+        // delete was the one probe APC those paths still emitted — 20 bytes of cleanup for a transmit
+        // that never happened (issue #197). A *silent* terminal is asked, so it still gets the delete.
+        if isatty(STDIN_FILENO) != 0 { DeleteProbeImage() }
         placeholdersAnswer = placeholderProbeVerdict(reply)
         placeholdersAsked = true
         return placeholdersAnswer
@@ -227,73 +201,6 @@ extension TermGeometry {
     private static func DeleteProbeImage() {
         GraphicsAPC.write(PlaceholderProbe.delete)
     }
-
-    /// Ask the terminal which grapheme-clustering mode (`DECRQM 2027`) it starts in.
-    ///
-    /// 2027 is DEC's "grapheme clustering" mode, and it is the whole difference between the two
-    /// terminals this is tested against: Ghostty 1.4.0 answers `1` (**set**, and permanently so) and
-    /// Rex answers `2` (recognized, reset). With it set, the *terminal* decides where a grapheme
-    /// cluster ends — VS16, ZWJ, skin-tone modifiers, regional-indicator flags — and draws one glyph
-    /// in the cells it needs; with it reset, each code point is laid out on its own and a flag is two
-    /// separate letters. So `☰` and `🇨🇳` are one cell on a terminal that never asked anybody, and two
-    /// on the same terminal with 2027 off (measured, both terminals, `probe/termcaps.py`).
-    ///
-    /// A session that wants the same cell counts on both turns it on for its own duration and turns
-    /// it off again on the way out — never permanently, because the mode belongs to the pane, not to
-    /// krd, and the shell behind us may be a program that lays out its own clusters.
-    ///
-    /// **One write, two questions.** `DECRQM` and `DA1` leave together, and DA1 is the terminator:
-    /// a terminal that does not implement 2027 answers *nothing* to the first question, so without a
-    /// sentinel the probe would wait out its whole timeout on exactly the terminals that have no
-    /// such mode. Two writes would also cost a round trip each, and over ssh a second round trip is
-    /// 20–40 ms of the probe's budget (`docs/design-ui-v2.zh-CN.md` §2.2).
-    static func query2027(timeoutMs: Int = 300) -> Int?
-    {
-        let reply = ask("\u{1B}[?2027$p\u{1B}[c", timeoutMs: timeoutMs) { text in
-            containsPrimaryAttributes(text)
-        }
-        return graphemeModeVerdict(reply)
-    }
-
-    /// What a `DECRQM 2027` + `DA1` reply means: the mode number (`0`…`4`, DECRQM's `Ps`), or `nil`
-    /// when the terminal said nothing about 2027.
-    ///
-    /// Split out from the probe so the parse is testable without a terminal: `?2027;1$y` (set),
-    /// `?2027;2$y` (reset), `?2027;0$y` (not recognized), DA1 alone (no DECRQM support at all), and
-    /// a reply split across reads all have to land on the same answer.
-    static func graphemeModeVerdict(_ reply: String?) -> Int? {
-        guard let reply, let start = reply.range(of: "\u{1B}[?2027;") else { return nil }
-        let rest = reply[start.upperBound...]
-        guard let end = rest.firstIndex(of: "$") else { return nil }
-        let digits = rest[..<end]
-        // `DECRQM` answers `Ps $ y`; the `$y` has to be there or this was some other report that
-        // happens to start the same way, and a wrong number is worse than no number.
-        guard rest[end...].hasPrefix("$y") else { return nil }
-        guard let value = Int(digits), (0...4).contains(value) else { return nil }
-        return value
-    }
-
-    /// Does this reply carry a `DA1` (`CSI ? … c`)? The sentinel every startup probe ends on, so a
-    /// batched query has one terminator instead of one per question.
-    static func containsPrimaryAttributes(_ text: String) -> Bool {
-        var index = text.startIndex
-        while let start = text.range(of: "\u{1B}[", range: index..<text.endIndex) {
-            var cursor = start.upperBound
-            guard cursor < text.endIndex, text[cursor] == "?" else {
-                index = start.upperBound
-                continue
-            }
-            cursor = text.index(after: cursor)
-            var digits = false
-            while cursor < text.endIndex, text[cursor].isNumber || text[cursor] == ";" {
-                if text[cursor].isNumber { digits = true }
-                cursor = text.index(after: cursor)
-            }
-            if digits, cursor < text.endIndex, text[cursor] == "c" { return true }
-            index = start.upperBound
-        }
-        return false
-    }
 }
 
 extension PaneGeometry {
@@ -303,6 +210,10 @@ extension PaneGeometry {
     /// `grid` is `--pane CxR` (the bench and the mock path reproduce a wall at an exact size), and
     /// `cell` is `--cell WxH` (a cell the terminal will not answer for). Both win over measurement:
     /// a report has to be reproducible.
+    ///
+    /// `refreshCaps` re-asks the terminal's capability batch even when this process already has an
+    /// answer: the resize handler is the one caller, because a pane that has only now been laid out
+    /// may finally answer `CSI 16t` where it said nothing at startup.
     ///
     /// `askTerminal: false` is the wall's *first* measurement (issue #99): the first frame may be
     /// drawn before the terminal has answered `CSI 16t`/`14t`, and that query costs up to 500 ms of an
@@ -314,6 +225,7 @@ extension PaneGeometry {
                         grid: (cols: Int, rows: Int)?,
                         dpr: Double?,
                         askTerminal: Bool = true,
+                        refreshCaps: Bool = false,
                         log: (String) -> Void) -> PaneGeometry {
         let pty = TermGeometry.read()
         let cols = max(1, grid?.cols ?? pty.cols)
@@ -330,7 +242,7 @@ extension PaneGeometry {
             cellH = Double(pty.pixelHeight) / Double(rows)
             source = "the pty's pixel size \(pty.pixelWidth)x\(pty.pixelHeight)"
             deviceCell = true
-        } else if askTerminal, let measured = TermGeometry.query(timeoutMs: 500) {
+        } else if askTerminal, let measured = TermGeometry.query(timeoutMs: 500, refresh: refreshCaps) {
             (cellW, cellH) = (measured.cellSize.w, measured.cellSize.h)
             // Neither answer may be believed as *device* pixels: the protocol says `14t` is a pixel
             // count, but a terminal that reports its cell in points reports its text area in points
@@ -493,10 +405,13 @@ extension TermGeometry {
     /// The two answers out of a raw response string. Half an answer is not an answer: a sequence
     /// only counts once its terminating `t` has arrived, which is also what makes a truncated
     /// `ESC[14;600;800` harmless.
+    ///
+    /// One parser for the whole batch (`TermCaps.parse`, issue #197) read here as geometry: the two
+    /// sizes have to mean the same thing whether they came alone or behind a `DECRQM` and a `DA1`.
     static func answers(in text: String) -> (cell: PixelSize?, window: PixelSize?) {
-        let cell = parse(text, code: 6).map { PixelSize(w: $0.0, h: $0.1) }
-        let window = parse(text, code: 4).map { PixelSize(w: $0.0, h: $0.1) }
-        return (cell, window)
+        let caps = TermCaps.parse(text)
+        return (caps.cell.map { PixelSize(w: $0.w, h: $0.h) },
+                caps.window.map { PixelSize(w: $0.w, h: $0.h) })
     }
 
     /// The geometry those answers imply, or nil when the terminal answered neither question.
@@ -519,63 +434,56 @@ extension TermGeometry {
         return nil
     }
 
+    /// The capability batch (`TermCaps.probe`), asked **once per process** (issue #197).
+    ///
+    /// Two callers want the same answer before the first cell: `prepareGraphemeMode` has to know the
+    /// `DECRQM 2027` mode *before* the session starts (`?2027h` goes out in the same write as the
+    /// alternate screen), and the wall/mirror want the cell. Asking twice would put the batch on the
+    /// wire twice — two round trips where the batch exists to have one — so the answer is memoised
+    /// exactly like the `U=1` verdict (`placeholdersAsked`, #99/#183). `refresh` is for the one caller
+    /// whose question can genuinely change: the wall's re-measure on a resize, where a pane that has
+    /// only now been laid out may finally answer.
+    ///
+    /// A silent terminal is memoised too: it stays silent for the life of the process, and re-asking
+    /// it is the same timeout again.
+    private static var capsAsked = false
+    private static var capsAnswer = TermCaps.none
+
+    static func terminalCaps(refresh: Bool = false, timeoutMs: Int = 500) -> TermCaps {
+        if !refresh, capsAsked { return capsAnswer }
+        capsAnswer = TermCaps.probe(timeoutMs: timeoutMs)
+        capsAsked = true
+        return capsAnswer
+    }
+
     /// Ask the terminal for its geometry instead of trusting TIOCGWINSZ.
     ///
     /// Needed because a pty created by sshd (or by some terminals) reports 0 for
     /// `ws_xpixel`/`ws_ypixel`, which leaves the aspect ratio and mouse mapping guessed.
     /// `CSI 16 t` answers with the cell size in pixels, `CSI 14 t` with the window size.
-    static func query(timeoutMs: Int = 250) -> TermGeometry? {
-        let fd = STDOUT_FILENO
-        var original = termios()
-        guard tcgetattr(STDIN_FILENO, &original) == 0 else { return nil }
-        var raw = original
-        raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
-        // NOTE: c_cc[0]/[1] are VEOF/VEOL on macOS, not VMIN/VTIME -- setting those leaves
-        // the fd in blocking mode, which hangs the whole startup. Name them explicitly.
-        withUnsafeMutableBytes(of: &raw.c_cc) { p in
-            p[Int(VMIN)] = 0
-            p[Int(VTIME)] = 0
-        }
-        guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return nil }
-        defer { tcsetattr(STDIN_FILENO, TCSANOW, &original) }
-
+    ///
+    /// The question is not asked here: `TermCaps.probe` sends `16t`, `14t`, `DECRQM 2027` and the
+    /// terminating `DA1` in **one** write (issue #197), so the three questions cost one round trip
+    /// between them — on a link where a round trip is 20–40 ms, that is the difference between one wait
+    /// and three. This function is that one answer read as a grid; `lastAnswer` still says which half
+    /// of it arrived.
+    static func query(timeoutMs: Int = 250, refresh: Bool = false) -> TermGeometry? {
+        // The grid, before any bytes: a pane without a size is not a pane to ask questions of, and
+        // today's behaviour is no probe at all when TIOCGWINSZ fails.
         var ws = winsize()
-        guard ioctl(fd, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 else { return nil }
+        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 else { return nil }
         let cols = Int(ws.ws_col), rows = Int(ws.ws_row)
 
-        func writeAll(_ text: String) {
-            let bytes = Array(text.utf8)
-            bytes.withUnsafeBufferPointer { buf in
-                var off = 0
-                while off < buf.count {
-                    let n = Darwin.write(fd, buf.baseAddress! + off, buf.count - off)
-                    if n <= 0 { return }
-                    off += n
-                }
-            }
+        // The batch was asked in front of the first byte (`prepareGraphemeMode`) and its answer *is*
+        // the cell's, so this reads the memo instead of writing again. Ask afresh only when the batch
+        // said nothing about the size at all: that is a terminal which was too slow in front of the
+        // paint, and the re-measure behind it is exactly what #99 keeps this call site for.
+        var caps = terminalCaps(refresh: refresh)
+        if caps.cell == nil, caps.window == nil {
+            caps = terminalCaps(refresh: true, timeoutMs: timeoutMs)
         }
-        writeAll("\u{1B}[16t\u{1B}[14t")     // cell size, then window size, in pixels
-
-        var response = ""
-        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
-        var cell: PixelSize? = nil
-        var window: PixelSize? = nil
-        var buffer = [UInt8](repeating: 0, count: 256)
-        while Date() < deadline, cell == nil || window == nil {
-            var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
-            let remaining = max(0, Int32(deadline.timeIntervalSinceNow * 1000))
-            guard poll(&pfd, 1, remaining) > 0 else { usleep(5_000); continue }
-            let n = Darwin.read(STDIN_FILENO, &buffer, buffer.count)
-            if n > 0 {
-                response += String(decoding: buffer[0..<n], as: UTF8.self)
-                let answers = answers(in: response)
-                if let r = answers.cell, cell == nil { cell = r }
-                if let r = answers.window, window == nil { window = r }
-            } else {
-                usleep(5_000)
-            }
-        }
-
+        let cell = caps.cell.map { PixelSize(w: $0.w, h: $0.h) }
+        let window = caps.window.map { PixelSize(w: $0.w, h: $0.h) }
         guard let geometry = fromAnswers(cols: cols, rows: rows, cell: cell, window: window) else {
             lastAnswer = .none
             return nil
@@ -583,17 +491,6 @@ extension TermGeometry {
         lastAnswer = cell != nil ? (window != nil ? .cellAndWindow : .cellOnly) : .windowOnly
         lastGrid = (cols, rows)
         return geometry
-    }
-
-    private static func parse(_ text: String, code: Int) -> (Int, Int)? {
-        // \e[<code>;<height>;<width>t
-        let pattern = "\u{1B}[\(code);"
-        guard let start = text.range(of: pattern) else { return nil }
-        let rest = text[start.upperBound...]
-        guard let end = rest.firstIndex(of: "t") else { return nil }
-        let parts = rest[..<end].split(separator: ";")
-        guard parts.count == 2, let h = Int(parts[0]), let w = Int(parts[1]), h > 0, w > 0 else { return nil }
-        return (w, h)
     }
 }
 
