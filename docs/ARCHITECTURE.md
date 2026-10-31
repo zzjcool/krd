@@ -25,10 +25,11 @@ Sources/krdcore/          <- no AppKit, no CoreGraphics, no ScreenCaptureKit (is
   Render.swift    ScreenWriter: session frame, per-tile kitty escapes, KRD_DUMP, zlib
   Input.swift     InputParser: the CSI/SS3 state machine, bytes -> numeric Events
   Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy (the encoding policy)
+  TermCaps.swift  TermCaps: what the terminal answered about its capabilities, asked in one write
 
 Sources/krd/              <- everything that touches the OS
   main.swift      Options parsing, lifecycle, layout application, stats, resize, selftest
-  Geometry.swift  TermGeometry (CSI 16t/14t, TIOCGWINSZ) and Viewport (cells/pixels → points)
+  Geometry.swift  TermGeometry (TIOCGWINSZ; TermCaps read as a grid) and Viewport (cells/pixels → points)
   Displays.swift  DisplayPick (which display, and why) and Debounce (one action per burst)
   Capture.swift   Capturer: SCStream setup, BGRA→RGBA, byte-identical frame dropping
   Input.swift     InputReader: tty read loop, events -> CGEvent/postToPid, click counter
@@ -144,6 +145,22 @@ Desk.run():
 `NSApplication` exists because ScreenCaptureKit on the tested macOS build delivers exactly one
 frame without an AppKit context and a full stream with it (`KRD_NO_NSAPP=1` reproduces the
 failure). `.accessory` keeps krd out of the Dock and the app switcher.
+
+**The capability questions are one write, not one each** (issue #197). `TermCaps.probe` asks
+`CSI 16 t` (one cell), `CSI 14 t` (the text area), `DECRQM ? 2027` (grapheme clustering) and `DA1` in a
+single `write(2)`, and the read loop stops on the `DA1` answer — that is the one question no terminal
+can ignore, so a terminal that knows none of the other three still ends the read instead of leaving it
+to the timeout. Over ssh every wait is a round trip on OpenSSH's ~20 ms keystroke grid (measured p50
+23.5 ms; twenty questions one by one 488 ms, twenty in one write 17.7 ms —
+[`design-ui-v2.zh-CN.md`](design-ui-v2.zh-CN.md) §2.2), so the batch costs one instead of one per
+question. `TermGeometry.terminalCaps` memoises the answer for the life of the process (a silent terminal
+included), because two callers need it before the first cell: `prepareGraphemeMode` must know 2027
+before `beginSession` writes `?2027h`, and the cell is what the first paint is laid out for — so
+`query()`, the wall's re-measure behind the paint and the runtime path all read that one answer instead
+of asking again. `TermCaps` (`krdcore`) is the value type, the bytes and the pure parse; `lastAnswer`
+still says which half of the size answer arrived. The kitty `U=1` placeholder probe cannot join the
+batch — its answer is an APC and its *refusal* is silence, so it needs a timeout of its own — and it
+keeps its once-per-process memo (issue #99/#183).
 
 ### Display-set changes (issue #19)
 
@@ -495,9 +512,11 @@ the picture, which is the point: the number includes the backlog a person feels.
 
 Both signals feed the quality governor, and they are not interchangeable: `writeMs` says "our writes
 are blocking now" (free, per frame, late), the round trip says "the far end is this far behind"
-(4 bytes per probe, includes queueing, early). Downgrade needs either; upgrade needs both quiet. A
-terminal that never answers switches the probe off after three misses and the governor keeps working
-on write latency alone — the numbers stay `—`, never `0`. `KRD_RTT_BUDGET_MS` (default 250) is the
+(4 bytes per probe, includes queueing, early). The startup capability questions are the same
+currency: they leave in one write and end on the `DA1` (§4), so a start over ssh pays one of these
+round trips instead of one per question (issue #197). Downgrade needs either; upgrade needs both
+quiet. A terminal that never answers switches the probe off after three misses and the governor keeps
+working on write latency alone — the numbers stay `—`, never `0`. `KRD_RTT_BUDGET_MS` (default 250) is the
 threshold, `KRD_NO_RTT=1` disables the probe.
 
 One answer is not enough to call the link late (`RTTProbe.isLate`). A round trip is a single sample

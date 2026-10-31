@@ -2,14 +2,17 @@
 
 [English](TESTING.md) | 简体中文
 
-这个仓库里没有 XCTest target：真正值得验的东西是一个终端协议加一个截屏框架，所以检查手段就是
-(a) 编译一次，(b) 让一张合成画面走真实的渲染管线，(c) 在你真正在乎的那个终端里跑一遍标定流程。
+`swift test` 负责机械的那一半（`Tests/krdTests`、`Tests/krdcoreTests`）：字节契约、布局数学，以及唯一可观测量就是「tty 上的字节」的那些探针。剩下的是真正有意思的部分——一个终端协议加一个截屏框架——所以下面的开关是人跑的那一半：(a) 编译一次，(b) 让一张合成画面走真实的渲染管线，(c) 在你真正在乎的那个终端里跑一遍标定流程。
 下面每一个开关的存在，都是因为当时有个具体问题必须用事实回答，而不是靠猜。
 
 ```bash
 swift build -c release                 # the mechanical check
 .build/release/krd --selftest          # the renderer, end to end, no permissions
 ```
+
+探针的字节有它们自己的进程级测试：`Tests/krdTests/ProbeBatchTests.swift` 把 `krd --wall` 放到 pty 后面，
+**自己扮终端**（像真终端一样回答那些能力问题），一旦这些问题不是一次写完发出，或者读取越过了收尾的 `DA1`，
+测试就失败（issue #197）。「一次写完」只有在 pty 的另一端才看得见，进程内的测试做不到。
 
 CI（[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)）只负责机械的那一半，而且只在 PR 或手动触发时跑
 （不是每次 push）；发布 tag 走 [`release.yml`](../.github/workflows/release.yml)，同样是先构建再加 `swift test`：`swift build -c release`、

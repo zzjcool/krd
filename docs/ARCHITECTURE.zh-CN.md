@@ -22,10 +22,11 @@ Sources/krdcore/          <- 不含 AppKit / CoreGraphics / ScreenCaptureKit（i
   Render.swift    ScreenWriter：会话帧、逐块 kitty 逃逸序列、KRD_DUMP、zlib
   Input.swift     InputParser：CSI/SS3 状态机，字节 → 数字 Event
   Tile.swift      CompressedTile / PixelFormat / SyncMode / LevelPolicy（编码策略）
+  TermCaps.swift  TermCaps：终端对自身能力问题的回答，一次写完一起问
 
 Sources/krd/              <- 所有碰操作系统的部分
   main.swift      参数解析、生命周期、布局应用、统计、resize、selftest
-  Geometry.swift  TermGeometry（CSI 16t/14t、TIOCGWINSZ）与 Viewport（格/像素 → 点）
+  Geometry.swift  TermGeometry（TIOCGWINSZ；把 TermCaps 读成网格）与 Viewport（格/像素 → 点）
   Displays.swift  DisplayPick（选哪块屏，以及为什么）与 Debounce（一次突发只动作一次）
   Capture.swift   Capturer：SCStream 装配、BGRA→RGBA、字节相同的帧丢弃
   Input.swift     InputReader：tty 读循环、事件 → CGEvent/postToPid、点击计数
@@ -129,6 +130,18 @@ Desk.run():
 之所以要有 `NSApplication`：在被测的 macOS 版本上，没有 AppKit 上下文时 ScreenCaptureKit 只送一帧，
 有上下文才是完整流（`KRD_NO_NSAPP=1` 可复现这个故障）。`.accessory` 让 krd 不出现在 Dock 和
 ⌘-Tab 里。
+
+**能力问题是一次写，而不是一问一次**（issue #197）。`TermCaps.probe` 把 `CSI 16 t`（一格）、
+`CSI 14 t`（文本区）、`DECRQM ? 2027`（字素簇）和 `DA1` 放进**一个** `write(2)`，读循环停在 `DA1` 的应答上
+——它是唯一没有终端能无视的问题，所以一个完全不认识另外三个的终端也会当场结束读取，而不是把它留给超时。
+经 ssh 时每一次等待都是一次往返，而 OpenSSH 的击键混淆把应答压在 ~20 ms 的栅格上（实测 p50 23.5 ms；
+20 个问题逐个问 488 ms，一次写完 17.7 ms —— [`design-ui-v2.zh-CN.md`](design-ui-v2.zh-CN.md) §2.2），
+所以这批问题只付一次往返，而不是每个问题一次。`TermGeometry.terminalCaps` 把答案在这一个进程内记住
+（沉默的终端也一样记），因为首格之前有两个调用方都要它：`prepareGraphemeMode` 必须在 `beginSession`
+写 `?2027h` 之前知道 2027，而首帧的布局要那个格——于是 `query()`、wall 在首帧之后的那次重测、以及运行期
+路径都读这一份答案，不再各问一次。`TermCaps`（`krdcore`）是那个值类型、那串字节和那份纯解析；
+`lastAnswer` 依旧说明尺寸应答到了哪一半。kitty `U=1` 占位符探针无法入伙——它的应答是 APC，而它的**拒绝
+是沉默**，所以它必须有自己的超时——并且它保留进程内只问一次的备忘（issue #99/#183）。
 
 ### 显示器集合变化（issue #19）
 
@@ -404,7 +417,9 @@ ScreenCaptureKit 帧，按 sample attachments 里的 status 区分（`idle` = �
 本身就排在画面后面，这正是重点：它测到的数字包含用户能感受到的积压。
 
 两个信号都喂给质量 governor，但不能互相替代：`writeMs` 说明"我们的写现在被挡住了"（免费、每帧、偏晚），
-往返说明"远端落后多远"（每探测 4 字节、含排队、偏早）。降档任一成立即可，升档必须两者都安静。终端始终
+往返说明"远端落后多远"（每探测 4 字节、含排队、偏早）。启动时的能力问题是同一种货币：它们一次写完、
+以 `DA1` 收尾（§4），所以经 ssh 启动只付一次这样的往返，而不是每个问题一次（issue #197）。
+降档任一成立即可，升档必须两者都安静。终端始终
 不回应答时，连续三次就自动关掉探针，governor 退回只看写延迟——数字保持 `—`，绝不显示 `0`。
 阈值是 `KRD_RTT_BUDGET_MS`（默认 250），`KRD_NO_RTT=1` 可完全关闭。
 
