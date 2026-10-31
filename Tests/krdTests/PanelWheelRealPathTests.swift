@@ -224,6 +224,61 @@ final class PanelWheelRealPathTests: XCTestCase {
         }
     }
 
+    // MARK: (e) a press the chrome takes keeps its whole gesture
+
+    /// The third commit of this PR, and the one a unit test of `Chrome` alone cannot see: a press
+    /// the chrome is offered never reaches the remote desktop, and in pixel mode *neither may the
+    /// rest of its gesture* — the drag and the release would otherwise arrive as
+    /// `leftMouseDragged`/`leftMouseUp` with no `leftMouseDown` before them, leaving a mirrored app
+    /// holding a button it never saw pressed. Drives `InputReader.handleMouse` — the one function
+    /// the reader's byte loop calls for a mouse report — with the three reports of one gesture.
+    func testAPressThePanelTakesOwnsItsMotionAndItsRelease() {
+        // No tty in a test binary, and `handleMouse` latches "these are pixels" when a coordinate
+        // exceeds the grid it last read: pin the grid this pane really has, so a cell report is
+        // read as cells and this test measures the routing rather than the latch.
+        let saved = TermGeometry.lastGrid
+        TermGeometry.lastGrid = (cols: 40, rows: 15)
+        defer { TermGeometry.lastGrid = saved }
+
+        let (desk, _) = deskWithLogPanel()
+        desk.writer.sink = { _ in }
+        var clicks: [(row: Int, col: Int, wheel: Int)] = []
+        // `forward: false` is the no-tty half of the reader: the routing runs, the injection does
+        // not. Everything under test is before that gate.
+        let reader = InputReader(viewport: { Viewport(pixelWidth: 320, pixelHeight: 240, cols: 40,
+                                                      rows: 1,
+                                                      sourceRect: CGRect(x: 0, y: 0, width: 320,
+                                                                         height: 240)) },
+                                 dryRun: true, forward: false) {}
+        reader.chromeOwns = { [desk] row, col in desk.chromeOwns(row: row, col: col) }
+        reader.onChromeClick = { clicks.append((row: $0, col: $1, wheel: $2)) }
+
+        func report(_ code: Int, _ x: Int, _ y: Int,
+                    motion: Bool = false, release: Bool = false) -> MouseReport {
+            MouseReport(button: code & 3, x: x, y: y, isWheel: (code & 64) != 0,
+                        isRelease: release, isMotion: motion, mods: Modifiers(rawValue: 0))
+        }
+
+        // Press on the box (row 6, col 21), drag across it, release somewhere else entirely.
+        XCTAssertFalse(reader.chromePressInFlight, "nothing in flight before the gesture")
+        reader.handleMouse(report(0, 21, 6))
+        XCTAssertTrue(reader.chromePressInFlight, "the press went to the chrome")
+        reader.handleMouse(report(32, 30, 6, motion: true))
+        XCTAssertTrue(reader.chromePressInFlight, "the drag is part of the same gesture")
+        reader.handleMouse(report(0, 30, 6, release: true))
+        XCTAssertFalse(reader.chromePressInFlight, "the release ended the gesture")
+
+        XCTAssertEqual(clicks.count, 1, "only the press is the chrome's; the gesture is not a second click")
+        XCTAssertEqual(clicks.first?.row, 6)
+        XCTAssertEqual(clicks.first?.col, 21)
+
+        // The release ended it: a fresh press on the picture's one row is the desktop's, and it is
+        // not swallowed by a flag the previous gesture left set.
+        reader.handleMouse(report(0, 21, 1))
+        XCTAssertEqual(clicks.count, 1, "row 1 is the picture, so the chrome must not hear about it")
+        XCTAssertFalse(reader.chromePressInFlight, "a press that is not the chrome's clears the flag")
+    }
+
     // MARK: (d) a wall click is not a panel click
 
     func testAnUndrawnChromeOwnsNothingSoTheStatusLineStillFallsThrough() {

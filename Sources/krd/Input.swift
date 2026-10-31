@@ -100,6 +100,11 @@ final class InputReader {
     /// nor clears it.
     private var chromePress = false
 
+    /// Is a press the chrome took still waiting for its release? The flag above, as a question the
+    /// tests can ask: the rule is a rule about a *sequence*, and "was the drag swallowed" is only
+    /// observable through this (nothing else in the reader changes when a report is dropped).
+    var chromePressInFlight: Bool { chromePress }
+
     /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
     /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
     /// it means "legacy encoding only", which is exactly what the pre-#15 parser handled.
@@ -346,7 +351,12 @@ final class InputReader {
     /// One mouse report, in the terminal's own units. Everything that needs *this* machine happens
     /// here: the cell-vs-pixel latch (a cell can never exceed the grid), the viewport transform,
     /// the click counter and the injection (issue #45 keeps those on this side of the boundary).
-    private func handleMouse(_ report: MouseReport) {
+    ///
+    /// `internal`, not `private`: it is the one entry point a report takes, and the gesture rule
+    /// (`chromePress`, #118) is a rule about a *sequence* of reports — `PanelWheelRealPathTests`
+    /// feeds it three and asserts the desk heard one click. The tty is the only thing left in
+    /// `loop()`, so nothing here touches a file descriptor.
+    func handleMouse(_ report: MouseReport) {
         let cx = report.x, cy = report.y
         let motion = report.isMotion
 
