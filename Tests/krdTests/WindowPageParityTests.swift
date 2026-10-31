@@ -9,8 +9,8 @@ import XCTest
 /// The report's command line is the fixture: `krd --scale 0.8 --quality 70`, wall page, click a window
 /// card, terminal 118x73 cells of 17x33 px (Rex), picture pinned to the top-left at 80 % of the area.
 final class WindowPageParityTests: XCTestCase {
-    private func options(_ arguments: [String]) -> Options {
-        parseArguments(["/usr/local/bin/krd"] + arguments)
+    private func options(_ arguments: [String]) throws -> Options {
+        try parseArguments(["/usr/local/bin/krd"] + arguments)
     }
 
     /// A window card has to hand the mirror *exactly* what a display card does. `013b8d3` made the
@@ -18,8 +18,8 @@ final class WindowPageParityTests: XCTestCase {
     /// which was never pinned - and a page that forgets `--scale 0.8` streams at full resolution on a
     /// link the reader has already said is slow, while one that forgets `--quality 70` spends the
     /// colour budget on top of it.
-    func testAWindowCardHandsOverWhatADisplayCardDoes() {
-        let sticky = Desk.stickyArguments(options(["--scale", "0.8", "--quality", "70"]))
+    func testAWindowCardHandsOverWhatADisplayCardDoes() throws {
+        let sticky = Desk.stickyArguments(try options(["--scale", "0.8", "--quality", "70"]))
         let display = Desk.mirrorArguments(windowID: nil, cell: nil, at: (0, 2), sticky: sticky)
         let window = Desk.mirrorArguments(windowID: 950, cell: nil, at: (0, 2), sticky: sticky)
 
@@ -30,7 +30,7 @@ final class WindowPageParityTests: XCTestCase {
         XCTAssertEqual(Array(window.dropFirst(2)), Array(display.dropFirst(1)))
 
         for argv in [display, window] {
-            let mirror = options(argv)
+            let mirror = try options(argv)
             XCTAssertFalse(mirror.wall, "\(argv)")
             XCTAssertEqual(mirror.scale, 0.8, "\(argv)")
             XCTAssertTrue(mirror.scalePinned, "\(argv)")
@@ -39,8 +39,8 @@ final class WindowPageParityTests: XCTestCase {
             XCTAssertEqual(mirror.wallAt?.stage, 0, "and it still knows where the wall was")
             XCTAssertEqual(mirror.wallAt?.card, 2)
         }
-        XCTAssertEqual(options(display).windowQuery, nil)
-        XCTAssertEqual(options(window).windowQuery, "950")
+        XCTAssertEqual(try options(display).windowQuery, nil)
+        XCTAssertEqual(try options(window).windowQuery, "950")
     }
 
     /// The decision #84 turns on, asked for a *window* page. Neither helper takes a page or a source,

@@ -136,11 +136,31 @@ struct Options {
     var mockSize: (w: Int, h: Int)? = nil
 }
 
+/// A command line krd refuses: one sentence for stderr, and the documented "usage" status.
+///
+/// `parseArguments` throws this instead of calling `exit(2)` itself, so the failure is a value a unit
+/// test can name (`--nonsense`, `--fps` with nothing after it) instead of a process that has to be
+/// spawned in a pty to be observed. Exactly one place turns it into a diagnostic and a status: the
+/// top of `main`. It mirrors `AXOptions.parse`'s `AXFailure.usage`, so the binary's two flag parsers
+/// finally agree that unknown input is an error (issue #122).
+struct UsageError: Error, Equatable, CustomStringConvertible {
+    /// What the process leaves with: the documented "usage" code (README), shared with `krd ax`'s
+    /// `AXExit.usage` so the two flag parsers cannot drift about which status a usage error is.
+    static let status = AXExit.usage.rawValue
+
+    let message: String
+
+    init(_ message: String) { self.message = message }
+
+    var description: String { message }
+}
+
 /// `<stage>:<card>`, the wall's two scroll offsets in one flag (`--wall-at`).
 ///
 /// Negative and non-numeric halves are refused rather than clamped: this flag is written by krd for
-/// krd, so a malformed one is a bug in the hand-over, not a reader's typo to be patched over. A
-/// missing value means "start where a fresh wall starts", which is the same as not passing it.
+/// krd, so a malformed one is a bug in the hand-over, not a reader's typo to be patched over.
+/// `parseArguments` turns that nil into a usage error naming the flag, like every other malformed
+/// value, so a broken hand-over stops before it can paint the wrong page.
 func parseWallAt(_ spec: String) -> (stage: Int, card: Int)? {
     let parts = spec.split(separator: ":")
     guard parts.count == 2, let stage = Int(parts[0]), let card = Int(parts[1]),
@@ -275,21 +295,18 @@ func adaptiveQualityRefusal(bench: Bool, selftest: Bool, recording: Bool, replay
 }
 
 /// `--ime <spec>`, or a usage error: a typo must not silently pick a mode.
-func parseIMESpec(_ spec: String) -> IMEMode {
+func parseIMESpec(_ spec: String) throws -> IMEMode {
     guard let mode = IMEMode(spec: spec) else {
-        FileHandle.standardError.write(
-            Data("krd: --ime wants auto|raw|unicode, got \"\(spec)\"\n".utf8))
-        exit(2)
+        throw UsageError("--ime wants auto|raw|unicode, got \"\(spec)\"")
     }
     return mode
 }
 
 /// `--clipboard <spec>`, or a usage error: a typo must not read as "off".
-func parseClipboardSpec(_ spec: String) -> ClipboardPolicy {
+func parseClipboardSpec(_ spec: String) throws -> ClipboardPolicy {
     guard let policy = ClipboardPolicy(spec: spec) else {
-        FileHandle.standardError.write(
-            Data("krd: --clipboard wants off|in|out|both (in = target to terminal, out = terminal to target), got \"\(spec)\"\n".utf8))
-        exit(2)
+        throw UsageError("--clipboard wants off|in|out|both "
+            + "(in = target to terminal, out = terminal to target), got \"\(spec)\"")
     }
     return policy
 }
@@ -297,22 +314,18 @@ func parseClipboardSpec(_ spec: String) -> ClipboardPolicy {
 /// `--quality <0-100>`, or a usage error. Silent clamping would be the worst answer here: a user who
 /// types 150 means "as good as possible" and a user who types 5 means "as small as possible", and an
 /// assumption about which is a lie either way.
-func parseQualitySpec(_ spec: String?) -> (budget: QualityBudget, auto: Bool) {
-    if (spec ?? "").lowercased() == "auto" { return (.default, true) }
-    guard let spec, let value = Int(spec), (0...100).contains(value) else {
-        FileHandle.standardError.write(
-            Data("krd: --quality wants 0...100 or auto, got \"\(spec ?? "nothing")\"\n".utf8))
-        exit(2)
+func parseQualitySpec(_ spec: String) throws -> (budget: QualityBudget, auto: Bool) {
+    if spec.lowercased() == "auto" { return (.default, true) }
+    guard let value = Int(spec), (0...100).contains(value) else {
+        throw UsageError("--quality wants 0...100 or auto, got \"\(spec)\"")
     }
     return (QualityBudget(value), false)
 }
 
 /// `--symbols <spec>`, or a usage error: a typo must not silently pick a glyph table.
-func parseSymbolsSpec(_ spec: String) -> WallSymbols {
+func parseSymbolsSpec(_ spec: String) throws -> WallSymbols {
     guard let symbols = WallSymbols(spec: spec) else {
-        FileHandle.standardError.write(
-            Data("krd: --symbols wants emoji|ascii, got \"\(spec)\"\n".utf8))
-        exit(2)
+        throw UsageError("--symbols wants emoji|ascii, got \"\(spec)\"")
     }
     return symbols
 }
@@ -324,95 +337,146 @@ func invokedAsWall(_ argv0: String) -> Bool {
     (argv0 as NSString).lastPathComponent == "wall"
 }
 
+/// The token after a flag that takes one: present, and not itself an option.
+///
+/// Both halves are the defect of issue #122. A value-taking flag at the end of the line used to read
+/// `args[safe: i + 1] ?? ""` (`--fps` meant 20, `--window` meant nil) and `--fps --wall` used to read
+/// the *next flag* as the value (`"--wall"` also meant 20): either way the parse succeeded, the
+/// mirror started, and a typo streamed the desktop instead of printing one line. `-1` and `-0.5`
+/// still reach their parsers — those are numbers, not options — so the test is the long-option
+/// prefix plus the two short options this binary knows.
+func value(_ flag: String, _ args: [String], _ i: inout Int) throws -> String {
+    guard i + 1 < args.count else { throw UsageError("\(flag) needs a value") }
+    let token = args[i + 1]
+    if token.hasPrefix("--") || token == "-h" || token == "-v" {
+        throw UsageError("\(flag) needs a value (got the option \"\(token)\")")
+    }
+    i += 1
+    return token
+}
+
+/// `value` parsed as an integer in `min...max`, or a usage error naming the flag and what was typed.
+func intValue(_ flag: String, _ args: [String], _ i: inout Int,
+              wants: String, min: Int = .min, max: Int = .max) throws -> Int {
+    let spec = try value(flag, args, &i)
+    guard let number = Int(spec), number >= min, number <= max else {
+        throw UsageError("\(flag) wants \(wants), got \"\(spec)\"")
+    }
+    return number
+}
+
+/// `value` parsed as a finite double in `(above, atMost]`, or a usage error naming the flag and what
+/// was typed.
+func doubleValue(_ flag: String, _ args: [String], _ i: inout Int, wants: String,
+                 above: Double = -.infinity, atMost: Double = .infinity) throws -> Double {
+    let spec = try value(flag, args, &i)
+    guard let number = Double(spec), number.isFinite, number > above, number <= atMost else {
+        throw UsageError("\(flag) wants \(wants), got \"\(spec)\"")
+    }
+    return number
+}
+
 /// `argv` is a parameter for the tests' sake, not for the app's: the wall-vs-mirror decision is the
 /// one piece of the parse that a reader cannot check by running the binary, and it is now a default
 /// plus two overrides, i.e. exactly the shape that rots silently.
-func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
+func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options {
     var options = Options()
     if invokedAsWall(argv.first ?? "") { options.wall = true }
     let args = Array(argv.dropFirst())
     var i = 0
     while i < args.count {
         switch args[i] {
-        case "--fps": options.fps = max(1, Int(args[safe: i + 1] ?? "") ?? options.fps); i += 1
-        case "--display": options.displayIndex = Int(args[safe: i + 1] ?? ""); i += 1
+        case "--fps":
+            // Parseable but out of range keeps the old normalisation (`--fps 0` was 1, not an
+            // error); what used to be silent was a value that was not a number at all.
+            options.fps = max(1, try intValue("--fps", args, &i, wants: "a whole number"))
+        case "--display":
+            // Any integer is a parse; out-of-range is a live display set, which `DisplayPick`
+            // already explains and falls back from -- not a typo to refuse here.
+            options.displayIndex = try intValue("--display", args, &i,
+                                                wants: "a display index from --list")
         case "--window":
             // Naming one window to mirror is a request for the mirror, never for the wall.
-            options.windowQuery = args[safe: i + 1]
+            options.windowQuery = try value("--window", args, &i)
             options.wall = false
-            i += 1
         case "--zoom":
-            if let value = Double(args[safe: i + 1] ?? ""), value.isFinite { options.zoom = value }
-            i += 1
+            // As with `--fps`: a parseable value keeps its old meaning (`zoomScale` treats anything
+            // below 1 as 1), so only "not a number" is refused.
+            options.zoom = try doubleValue("--zoom", args, &i, wants: "a number")
         case "--scale":
-            // The parser does not throw; an unparsable value is carried to `run()` instead of
-            // silently meaning "1", because a typo here doubles the bytes on the wire.
-            if (args[safe: i + 1] ?? "").lowercased() == "auto" {
+            // A *range* miss is carried to `run()` instead of silently meaning "1", because a typo
+            // here doubles the bytes on the wire. A missing value has no fraction to carry, so that
+            // half is this parser's usage error (issue #122).
+            let spec = try value("--scale", args, &i)
+            if spec.lowercased() == "auto" {
                 options.scaleAuto = true
                 options.scalePinned = false
-            } else if let value = Double(args[safe: i + 1] ?? ""), value.isFinite, value > 0, value <= 1 {
+            } else if let value = Double(spec), value.isFinite, value > 0, value <= 1 {
                 options.scale = value
                 options.scaleAuto = false
                 options.scalePinned = true
             } else {
                 options.scaleError = "--scale takes a fraction of the pane's pixels, "
-                    + "0 < scale <= 1 (e.g. 0.5); got \(args[safe: i + 1] ?? "nothing")"
+                    + "0 < scale <= 1 (e.g. 0.5); got \(spec)"
             }
-            i += 1
         case "--zoom-at":
-            if let spec = args[safe: i + 1], case let parts = spec.split(separator: ","), parts.count == 2,
-               let x = Double(parts[0]), let y = Double(parts[1]), x.isFinite, y.isFinite {
-                options.zoomAt = CGPoint(x: x, y: y)
+            let spec = try value("--zoom-at", args, &i)
+            let parts = spec.split(separator: ",")
+            guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]),
+                  x.isFinite, y.isFinite else {
+                throw UsageError("--zoom-at wants <x>,<y> in global points, got \"\(spec)\"")
             }
-            i += 1
+            options.zoomAt = CGPoint(x: x, y: y)
         case "--zoom-follow": options.zoomFollow = true
         case "--tile":
-            if let spec = args[safe: i + 1], case let parts = spec.split(separator: "x"), parts.count == 2 {
-                options.tileCols = max(2, Int(parts[0]) ?? options.tileCols)
-                options.tileRows = max(1, Int(parts[1]) ?? options.tileRows)
+            let spec = try value("--tile", args, &i)
+            let parts = spec.split(separator: "x")
+            guard parts.count == 2, let cols = Int(parts[0]), let rows = Int(parts[1]) else {
+                throw UsageError("--tile wants <cols>x<rows>, got \"\(spec)\"")
             }
-            i += 1
+            options.tileCols = max(2, cols)
+            options.tileRows = max(1, rows)
         case "--cell":
-            if let spec = args[safe: i + 1], case let parts = spec.split(separator: "x"), parts.count == 2,
-               let w = Double(parts[0]), let h = Double(parts[1]), w > 0, h > 0 {
-                options.cell = (w, h)
+            let spec = try value("--cell", args, &i)
+            let parts = spec.split(separator: "x")
+            guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]), w > 0, h > 0 else {
+                throw UsageError("--cell wants <width>x<height> in pixels, got \"\(spec)\"")
             }
-            i += 1
+            options.cell = (w, h)
         case "--demo": options.demo = true
         case "--square": options.square = true
         case "--no-placeholders": options.placeholders = false
         case "--placeholders": options.placeholders = true
         case "--dpr":
-            if let spec = args[safe: i + 1], let value = Double(spec), value > 0, value <= 4 {
-                options.dpr = value
-            }
-            i += 1
+            options.dpr = try doubleValue("--dpr", args, &i,
+                                          wants: "a device-pixel ratio above 0 and at most 4",
+                                          above: 0, atMost: 4)
         case "--format":
-            switch (args[safe: i + 1] ?? "").lowercased() {
+            let spec = try value("--format", args, &i)
+            switch spec.lowercased() {
             case "rgb", "f=24", "24": options.pixelFormat = .rgb
             case "rgba", "f=32", "32": options.pixelFormat = .rgba
-            default: break
+            default: throw UsageError("--format wants rgb or rgba, got \"\(spec)\"")
             }
-            i += 1
         case "--pane":
-            if let spec = args[safe: i + 1], case let parts = spec.split(separator: "x"), parts.count == 2,
-               let c = Int(parts[0]), let r = Int(parts[1]), c > 1, r > 1 {
-                options.pane = (c, r)
+            let spec = try value("--pane", args, &i)
+            let parts = spec.split(separator: "x")
+            guard parts.count == 2, let c = Int(parts[0]), let r = Int(parts[1]), c > 1, r > 1 else {
+                throw UsageError("--pane wants <cols>x<rows> (at least 2x2), got \"\(spec)\"")
             }
-            i += 1
+            options.pane = (c, r)
         case "--full-frame": options.fullFrame = true
         case "--no-input": options.noInput = true
         case "--no-quantise": options.quality = QualityBudget(100); options.qualityPinned = true
         case "--quality":
-            let parsed = parseQualitySpec(args[safe: i + 1])
+            let parsed = try parseQualitySpec(value("--quality", args, &i))
             options.quality = parsed.budget
             options.qualityAuto = parsed.auto
             options.qualityPinned = true
-            i += 1
         // The other `--flag=value` spellings are handled the same way, so this one has to be too:
         // a user who types `--quality=70` means it.
         case let arg where arg.hasPrefix("--quality="):
-            let parsed = parseQualitySpec(String(arg.dropFirst("--quality=".count)))
+            let parsed = try parseQualitySpec(String(arg.dropFirst("--quality=".count)))
             options.quality = parsed.budget
             options.qualityAuto = parsed.auto
             options.qualityPinned = true
@@ -422,60 +486,57 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
         case "--bench": options.bench = true
         case "--json": options.benchJSON = true
         case "--bench-wire":
-            options.benchWire = args[safe: i + 1]
-            i += 1
+            options.benchWire = try value("--bench-wire", args, &i)
         case "--source":
-            if let spec = args[safe: i + 1], let size = parseSize(spec) { options.source = (size.0, size.1) }
-            i += 1
+            let spec = try value("--source", args, &i)
+            guard let size = parseSize(spec) else {
+                throw UsageError("--source wants <width>x<height>, got \"\(spec)\"")
+            }
+            options.source = (size.0, size.1)
         case "--rounds":
-            if let n = Int(args[safe: i + 1] ?? ""), n > 0 { options.rounds = n }
-            i += 1
+            options.rounds = try intValue("--rounds", args, &i,
+                                          wants: "a positive number of rounds", min: 1)
         case "--seconds":
-            if let n = Double(args[safe: i + 1] ?? ""), n > 0 { options.benchSeconds = n }
-            i += 1
+            options.benchSeconds = try doubleValue("--seconds", args, &i,
+                                                   wants: "a positive number of seconds", above: 0)
         case "--no-serial": options.noSerial = true
         case "--record":
-            options.record = args[safe: i + 1]
-            i += 1
+            options.record = try value("--record", args, &i)
         case "--record-frames":
-            if let n = Int(args[safe: i + 1] ?? ""), n > 0 { options.recordFrames = n }
-            i += 1
+            options.recordFrames = try intValue("--record-frames", args, &i,
+                                                wants: "a positive number of frames", min: 1)
         case "--replay":
-            options.replay = args[safe: i + 1]
-            i += 1
+            options.replay = try value("--replay", args, &i)
         case "--stats-json":
-            options.statsJSON = args[safe: i + 1]
-            i += 1
+            options.statsJSON = try value("--stats-json", args, &i)
         case "--log":
-            options.logPath = args[safe: i + 1]
-            i += 1
+            options.logPath = try value("--log", args, &i)
         case "--dry-run": options.dryRun = true
         case "--ime":
-            options.ime = parseIMESpec(args[safe: i + 1] ?? "")
-            i += 1
+            options.ime = try parseIMESpec(value("--ime", args, &i))
         case let arg where arg.hasPrefix("--ime="):
-            options.ime = parseIMESpec(String(arg.dropFirst("--ime=".count)))
+            options.ime = try parseIMESpec(String(arg.dropFirst("--ime=".count)))
         case "--clipboard":
-            options.clipboard = parseClipboardSpec(args[safe: i + 1] ?? "")
-            i += 1
+            options.clipboard = try parseClipboardSpec(value("--clipboard", args, &i))
         case "--clipboard-paste":
-            options.clipboardPaste = args[safe: i + 1]
-            i += 1
+            options.clipboardPaste = try value("--clipboard-paste", args, &i)
         // The `--flag=value` spelling too: people type it, and a flag that silently does nothing
         // when typed the natural way is worse than a usage error.
         case let arg where arg.hasPrefix("--clipboard="):
-            options.clipboard = parseClipboardSpec(String(arg.dropFirst("--clipboard=".count)))
+            options.clipboard = try parseClipboardSpec(String(arg.dropFirst("--clipboard=".count)))
         case let arg where arg.hasPrefix("--clipboard-paste="):
             options.clipboardPaste = String(arg.dropFirst("--clipboard-paste=".count))
         case "--debug": options.debug = true
         case "--dev": options.dev = true
-        case "--dev-panel": options.devPanel = args[safe: i + 1]; i += 1
+        case "--dev-panel": options.devPanel = try value("--dev-panel", args, &i)
         case "--mock": options.mock = true
         case "--mock-size":
-            let spec = args[safe: i + 1] ?? ""
-            i += 1
+            let spec = try value("--mock-size", args, &i)
             let parts = spec.split(separator: "x").compactMap { Int($0) }
-            if parts.count == 2, parts[0] > 8, parts[1] > 8 { options.mockSize = (parts[0], parts[1]) }
+            guard parts.count == 2, parts[0] > 8, parts[1] > 8 else {
+                throw UsageError("--mock-size wants <width>x<height> above 8x8, got \"\(spec)\"")
+            }
+            options.mockSize = (parts[0], parts[1])
         case "--no-chrome": options.noChrome = true
         // The default since phase 4; kept because scripts and muscle memory spell it.
         case "--wall": options.wall = true
@@ -485,24 +546,37 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) -> Options {
         case "--wall-at":
             // `<stage>:<card>`. Parsed by the same function both times, so the wall that hands over
             // and the wall that comes back cannot disagree about the spelling.
-            if let spec = args[safe: i + 1] { options.wallAt = parseWallAt(spec) }
-            i += 1
-        case "--said":
-            // `<exit>` then the child's sentence as its own token: the text has spaces in it.
-            if let code = Int32(args[safe: i + 1] ?? "") {
-                options.said = (code, args[safe: i + 2] ?? "")
+            let spec = try value("--wall-at", args, &i)
+            guard let at = parseWallAt(spec) else {
+                throw UsageError("--wall-at wants <stage>:<card>, got \"\(spec)\"")
             }
+            options.wallAt = at
+        case "--said":
+            // `<exit>` then the child's sentence as its own token: the text has spaces in it, and it
+            // can begin with `--` (the sentence of a refused `--selftest --scale` does), so it is
+            // the one value this parser does not test for "looks like an option".
+            guard i + 2 < args.count, let code = Int32(args[i + 1]) else {
+                throw UsageError("--said needs <exit> <text> (the failed mirror's status and its sentence)")
+            }
+            options.said = (code, args[i + 2])
             i += 2
         case "--symbols":
-            options.symbols = parseSymbolsSpec(args[safe: i + 1] ?? "")
-            i += 1
+            options.symbols = try parseSymbolsSpec(value("--symbols", args, &i))
         // The `--flag=value` spelling too, for the same reason as `--ime=` / `--clipboard=`.
         case let arg where arg.hasPrefix("--symbols="):
-            options.symbols = parseSymbolsSpec(String(arg.dropFirst("--symbols=".count)))
+            options.symbols = try parseSymbolsSpec(String(arg.dropFirst("--symbols=".count)))
         case "--list": options.listOnly = true
         case "-v", "--version": print("krd \(krdVersion)"); exit(0)
         case "-h", "--help": print(usage()); exit(0)
-        default: break
+        default:
+            // Every unknown token used to land here and be dropped (`default: break`): a default
+            // `Options` came back and `krd --nonsense` went on to paint -- and stream -- the
+            // desktop. A typo must not start a capture, so it is a usage error, spelled like the
+            // one `krd ax` already prints.
+            if args[i].hasPrefix("-") {
+                throw UsageError("unknown option \"\(args[i])\" (try `krd --help`)")
+            }
+            throw UsageError("unexpected argument \"\(args[i])\" (try `krd --help`)")
         }
         i += 1
     }
@@ -3453,7 +3527,16 @@ if ProcessInfo.processInfo.environment["KRD_NO_NSAPP"] == nil {
     NSApp.setActivationPolicy(.accessory)
 }
 
-let options = parseArguments()
+// The one place a command line krd refuses becomes a diagnostic and a status: one line on stderr
+// (never stdout, which is the picture stream -- CONTRIBUTING rule 1) and the documented "usage"
+// status, the same pair `krd ax` prints for the same class of mistake.
+let options: Options
+do {
+    options = try parseArguments()
+} catch {
+    FileHandle.standardError.write(Data("krd: \(error)\n".utf8))
+    exit(UsageError.status)
+}
 // Hold the Desk in a variable: run() installs closures that capture it weakly, and a
 // temporary would be a "weak reference will always be nil" trap.
 let desk = Desk(options: options)

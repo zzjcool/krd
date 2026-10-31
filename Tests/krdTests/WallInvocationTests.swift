@@ -25,28 +25,28 @@ final class WallInvocationTests: XCTestCase {
 /// text - the help text is a string, the parser is behaviour.
 final class WallModeDefaultTests: XCTestCase {
     func testPlainKrdStartsOnTheWall() {
-        XCTAssertTrue(parseArguments(["/usr/local/bin/krd"]).wall)
-        XCTAssertTrue(parseArguments(["/Users/me/bin/krd", "--fps", "30"]).wall,
+        XCTAssertTrue(try parseArguments(["/usr/local/bin/krd"]).wall)
+        XCTAssertTrue(try parseArguments(["/Users/me/bin/krd", "--fps", "30"]).wall,
                       "a mirror-only knob does not change which screen krd opens")
-        XCTAssertTrue(parseArguments(["krd", "--wall"]).wall, "--wall still means the wall")
-        XCTAssertTrue(parseArguments(["wall"]).wall)
-        XCTAssertTrue(parseArguments(["/usr/local/bin/wall", "--symbols", "ascii"]).wall)
+        XCTAssertTrue(try parseArguments(["krd", "--wall"]).wall, "--wall still means the wall")
+        XCTAssertTrue(try parseArguments(["wall"]).wall)
+        XCTAssertTrue(try parseArguments(["/usr/local/bin/wall", "--symbols", "ascii"]).wall)
     }
 
     func testMirrorIsOneFlagAway() {
-        XCTAssertFalse(parseArguments(["krd", "--mirror"]).wall)
+        XCTAssertFalse(try parseArguments(["krd", "--mirror"]).wall)
         // The alias cannot out-vote an explicit flag: the flags are read after argv[0].
-        XCTAssertFalse(parseArguments(["wall", "--mirror"]).wall)
+        XCTAssertFalse(try parseArguments(["wall", "--mirror"]).wall)
         // ...and order is ordinary: the last one wins.
-        XCTAssertTrue(parseArguments(["krd", "--mirror", "--wall"]).wall)
+        XCTAssertTrue(try parseArguments(["krd", "--mirror", "--wall"]).wall)
     }
 
-    func testNamingOneWindowImpliesTheMirror() {
-        let options = parseArguments(["krd", "--window", "Safari"])
+    func testNamingOneWindowImpliesTheMirror() throws {
+        let options = try parseArguments(["krd", "--window", "Safari"])
         XCTAssertFalse(options.wall, "--window asks for that window, i.e. for the mirror")
         XCTAssertEqual(options.windowQuery, "Safari")
         // Unless the wall is asked for after it.
-        XCTAssertTrue(parseArguments(["krd", "--window", "Safari", "--wall"]).wall)
+        XCTAssertTrue(try parseArguments(["krd", "--window", "Safari", "--wall"]).wall)
     }
 }
 
@@ -89,43 +89,45 @@ final class WallMirrorChildTests: XCTestCase {
 /// `exec`s the wall again, so the command line it comes back with has to mean exactly what the wall
 /// reads: the same page, and (when it failed) the sentence it failed with.
 final class WallReturnTests: XCTestCase {
-    func testTheCleanWayBackHasNothingToExplain() {
+    func testTheCleanWayBackHasNothingToExplain() throws {
         let arguments = Desk.wallArguments(at: (1, 4))
         XCTAssertEqual(arguments, ["--wall", "--wall-at", "1:4"])
-        let options = parseArguments(["krd"] + arguments)
+        let options = try parseArguments(["krd"] + arguments)
         XCTAssertTrue(options.wall)
         XCTAssertEqual(options.wallAt?.stage, 1)
         XCTAssertEqual(options.wallAt?.card, 4)
         XCTAssertNil(options.said, "a `Ctrl-\\` is not a failure and says nothing in the footer")
     }
 
-    func testAFailedMirrorBringsItsOwnSentence() {
-        let options = parseArguments(["krd"] + Desk.wallArguments(
+    func testAFailedMirrorBringsItsOwnSentence() throws {
+        let options = try parseArguments(["krd"] + Desk.wallArguments(
             at: (0, 2), exit: 1, said: "the window closed before it could be shown"))
         XCTAssertEqual(options.wallAt?.card, 2, "a failure still returns to the shelf it was clicked on")
         XCTAssertEqual(options.said?.exit, 1)
         XCTAssertEqual(options.said?.text, "the window closed before it could be shown")
     }
 
-    func testTheMessageSurvivesItsSpacesAndPunctuation() {
+    func testTheMessageSurvivesItsSpacesAndPunctuation() throws {
         // It is one argv token, but it is a sentence: quotes, dashes and commas are the reason this
         // is not a `key=value` flag.
         let said = "Screen Recording is off for this terminal - grant it in System Settings"
-        let options = parseArguments(["krd"] + Desk.wallArguments(at: nil, exit: 1, said: said))
+        let options = try parseArguments(["krd"] + Desk.wallArguments(at: nil, exit: 1, said: said))
         XCTAssertEqual(options.said?.text, said)
     }
 
-    func testAnEmptySentenceIsStillAFailure() {
+    func testAnEmptySentenceIsStillAFailure() throws {
         // A mirror can fail without a word (a crash inside a framework): the exit status alone has to
         // survive the round trip, or the wall comes back as if nothing happened.
-        let options = parseArguments(["krd"] + Desk.wallArguments(at: (0, 0), exit: 7, said: nil))
+        let options = try parseArguments(["krd"] + Desk.wallArguments(at: (0, 0), exit: 7, said: nil))
         XCTAssertEqual(options.said?.exit, 7)
         XCTAssertEqual(options.said?.text, "")
     }
 }
 
 /// `<stage>:<card>` is written by krd for krd, so a malformed one is a bug in the hand-over and not a
-/// reader's typo: it is refused rather than clamped, and a missing value means "the fresh wall".
+/// reader's typo: it is refused rather than clamped. `parseArguments` turns that refusal -- and a
+/// missing value -- into a usage error (issue #122), so a broken hand-over fails loudly instead of
+/// quietly landing the reader on a fresh wall.
 final class WallAtParsingTests: XCTestCase {
     func testBothHalvesAreRequired() {
         XCTAssertEqual(parseWallAt("2:1")?.stage, 2)
@@ -141,9 +143,11 @@ final class WallAtParsingTests: XCTestCase {
 
     func testAFlagThatIsNotTheMirrorsLeavesTheWallAlone() {
         // `--wall-at` is bookkeeping, not a mode: it must not flip anything by itself.
-        XCTAssertTrue(parseArguments(["krd", "--wall-at", "1:2"]).wall)
-        XCTAssertFalse(parseArguments(["krd", "--mirror", "--wall-at", "1:2"]).wall)
-        XCTAssertNil(parseArguments(["krd", "--wall-at", "nonsense"]).wallAt)
+        XCTAssertTrue(try parseArguments(["krd", "--wall-at", "1:2"]).wall)
+        XCTAssertFalse(try parseArguments(["krd", "--mirror", "--wall-at", "1:2"]).wall)
+        // A malformed value is a usage error now, like every other flag's (issue #122): it used to
+        // come back as a silent nil, i.e. a hand-over that quietly landed on a fresh wall.
+        XCTAssertThrowsError(try parseArguments(["krd", "--wall-at", "nonsense"]))
     }
 }
 
@@ -198,22 +202,22 @@ final class DeskSetupFailureTests: XCTestCase {
 /// a reader can "shrink back"), and off for a mirror someone typed by hand - where a status bar on top
 /// of a picture would be a new thing to explain rather than a familiar one.
 final class MirrorBarDefaultTests: XCTestCase {
-    func testAWindowEnteredFromTheWallWearsTheBar() {
-        let options = parseArguments(["krd", "--window", "42", "--wall-at", "0:1"])
+    func testAWindowEnteredFromTheWallWearsTheBar() throws {
+        let options = try parseArguments(["krd", "--window", "42", "--wall-at", "0:1"])
         XCTAssertEqual(options.bar, nil, "unset, i.e. decided by where the pane came from")
         XCTAssertNotNil(options.wallAt)
     }
 
-    func testABareMirrorStaysBare() {
-        let options = parseArguments(["krd", "--mirror"])
+    func testABareMirrorStaysBare() throws {
+        let options = try parseArguments(["krd", "--mirror"])
         XCTAssertNil(options.bar)
         XCTAssertNil(options.wallAt)
     }
 
     func testBothSpellingsWinInTheirOwnDirection() {
-        XCTAssertEqual(parseArguments(["krd", "--mirror", "--bar"]).bar, true)
-        XCTAssertEqual(parseArguments(["krd", "--window", "1", "--bar", "--no-bar"]).bar, false)
-        XCTAssertEqual(parseArguments(["krd", "--window", "1", "--wall-at", "0:0", "--no-bar"]).bar, false,
+        XCTAssertEqual(try parseArguments(["krd", "--mirror", "--bar"]).bar, true)
+        XCTAssertEqual(try parseArguments(["krd", "--window", "1", "--bar", "--no-bar"]).bar, false)
+        XCTAssertEqual(try parseArguments(["krd", "--window", "1", "--wall-at", "0:0", "--no-bar"]).bar, false,
                        "--no-bar overrides the wall's default")
     }
 }
@@ -222,12 +226,12 @@ final class MirrorBarDefaultTests: XCTestCase {
 /// default again. `--scale` and `--quality` are exactly the flags a reader sets *because* the link is
 /// slow, and the page that streams at 20 fps (the display mirror) used to forget both of them.
 final class StickyArgumentTests: XCTestCase {
-    private func options(_ arguments: [String]) -> Options {
-        parseArguments(["/usr/local/bin/krd"] + arguments)
+    private func options(_ arguments: [String]) throws -> Options {
+        try parseArguments(["/usr/local/bin/krd"] + arguments)
     }
 
-    func testCheapSettingsSurviveBothDirections() {
-        let typed = options(["--scale", "0.8", "--quality", "70", "--fps", "10",
+    func testCheapSettingsSurviveBothDirections() throws {
+        let typed = try options(["--scale", "0.8", "--quality", "70", "--fps", "10",
                              "--cell", "17x33", "--dpr", "1", "--square", "--cursor"])
         let sticky = Desk.stickyArguments(typed)
         XCTAssertEqual(sticky, ["--cell", "17x33", "--scale", "0.8", "--quality", "70",
@@ -237,7 +241,7 @@ final class StickyArgumentTests: XCTestCase {
         // the same answer: a flag that means something else in the other mode is worse than none.
         for arguments in [Desk.wallArguments(at: (1, 2), sticky: sticky),
                           Desk.mirrorArguments(windowID: nil, cell: nil, at: (1, 2), sticky: sticky)] {
-            let again = options(arguments)
+            let again = try options(arguments)
             XCTAssertEqual(again.scale, 0.8, "\(arguments)")
             XCTAssertTrue(again.scalePinned)
             XCTAssertEqual(again.quality.value, 70)
@@ -257,18 +261,20 @@ final class StickyArgumentTests: XCTestCase {
         XCTAssertEqual(Desk.wallArguments(at: (0, 0)), ["--wall", "--wall-at", "0:0"])
     }
 
-    func testForcedTransportAndQualityAutoAreCarried() {
-        let sticky = Desk.stickyArguments(options(["--no-placeholders", "--quality", "auto"]))
+    func testForcedTransportAndQualityAutoAreCarried() throws {
+        let sticky = Desk.stickyArguments(try options(["--no-placeholders", "--quality", "auto"]))
         XCTAssertEqual(sticky, ["--quality", "auto", "--no-placeholders"])
-        let again = options(["krd"] + Desk.wallArguments(at: nil, sticky: sticky))
+        // `options` already supplies argv[0]; the extra "krd" here used to be a stray positional
+        // that the old `default: break` swallowed -- the new parser refuses it (issue #122).
+        let again = try options(Desk.wallArguments(at: nil, sticky: sticky))
         XCTAssertEqual(again.placeholders, false)
         XCTAssertTrue(again.qualityAuto)
     }
 
-    func testOnePageFlagsAreNotCarried() {
+    func testOnePageFlagsAreNotCarried() throws {
         // `--zoom` and `--demo` mean nothing to the wall (or the opposite of something), so they stay
         // where they were typed rather than following the reader around.
-        let sticky = Desk.stickyArguments(options(["--zoom", "2", "--demo", "--dev"]))
+        let sticky = Desk.stickyArguments(try options(["--zoom", "2", "--demo", "--dev"]))
         XCTAssertEqual(sticky, [])
     }
 }
@@ -276,9 +282,9 @@ final class StickyArgumentTests: XCTestCase {
 extension StickyArgumentTests {
     /// Diagnostics follow their file, never the picture: a mirror that inherits `--debug` but not
     /// `--log` writes its `frame ... px` line *onto the reader's screen*, which is also the picture.
-    func testDebugIsCarriedOnlyWithALogFile() {
-        XCTAssertEqual(Desk.stickyArguments(options(["--debug"])), [])
-        XCTAssertEqual(Desk.stickyArguments(options(["--debug", "--log", "/tmp/krd.log"])),
+    func testDebugIsCarriedOnlyWithALogFile() throws {
+        XCTAssertEqual(try Desk.stickyArguments(options(["--debug"])), [])
+        XCTAssertEqual(try Desk.stickyArguments(options(["--debug", "--log", "/tmp/krd.log"])),
                        ["--log", "/tmp/krd.log", "--debug"])
     }
 }
