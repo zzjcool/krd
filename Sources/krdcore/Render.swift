@@ -38,6 +38,11 @@ public struct CompressTiming {
 public final class ScreenWriter {
     /// q=2 silences every protocol reply; KRD_Q=0 reveals them while debugging.
     private let quiet = ProcessInfo.processInfo.environment["KRD_Q"] ?? "2"
+    /// Wrap every kitty-graphics APC in tmux's DCS passthrough envelope (`--passthrough`, issue
+    /// #107). Off by default and set once, before the first byte: with it off the stream is
+    /// byte-identical to what krd has always sent, which is the contract the golden dumps check.
+    /// See `TmuxPassthrough` for why a multiplexer needs it at all.
+    public var passthrough = false
     /// Pixel format on the wire: the desktop is opaque, so RGB (`f=24`) is ~17 % smaller than
     /// RGBA (`f=32`) and also compresses faster. `KRD_FORMAT=rgba` is the documented fallback
     /// for a terminal that does not implement `f=24`.
@@ -65,7 +70,7 @@ public final class ScreenWriter {
     /// `a=d,d=a` + `ESC[2J`: the pair docs/PROTOCOL.md §4 licenses at a resize/clear (and at
     /// teardown, through `clear`). Written from two places -- `clear` itself and the deferred commit
     /// in `endFrame` -- so the pair is written down once.
-    private static let clearBytes = Array("\u{1B}_Ga=d,d=a\u{1B}\\\u{1B}[2J".utf8)
+    private var clearBytes: [UInt8] { Array((apcOpen + "Ga=d,d=a" + apcClose + "\u{1B}[2J").utf8) }
     /// Chrome text arrives on the main queue while tiles are assembled on the capture queue.
     /// One lock around "append + flush" means a text write can never land inside a base64
     /// payload, and the picture never waits for a UI tick (it is one uncontended lock).
@@ -283,7 +288,7 @@ public final class ScreenWriter {
         // writer's, so no future caller can reach the delete mid-frame.
         guard !batchOpen else { return false }
         sinceReap = 0
-        append("\u{1B}_Ga=d,d=a\u{1B}\\")   // no flush: goes out with the repaint below
+        appendAPC("Ga=d,d=a")   // no flush: goes out with the repaint below
         return true
     }
 
@@ -322,7 +327,7 @@ public final class ScreenWriter {
         // be one frame too early for it (its `previousFrame` reset can land before the next dirty
         // pass). Asking unconditionally is what makes the hole impossible, not the caller's care.
         needsFullRepaint = true
-        out.append(contentsOf: Self.clearBytes)
+        out.append(contentsOf: clearBytes)
         flushLocked()
     }
 
@@ -369,7 +374,7 @@ public final class ScreenWriter {
         if pendingClear {
             pendingClear = false
             needsFullRepaint = true
-            out.append(contentsOf: Self.clearBytes)
+            out.append(contentsOf: clearBytes)
             flushLocked()
         }
         recordWrite(lastWriteMs)
@@ -674,7 +679,7 @@ public final class ScreenWriter {
         appendTransmit(id: id, payload: payload, width: width, height: height,
                        compressed: true, channels: panelFormat.protocolChannels)
         // 2. The virtual placement: the cell rectangle the picture should fill.
-        append("\u{1B}_Gi=\(id),p=\(placementID),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)\u{1B}\\")
+        appendAPC("Gi=\(id),p=\(placementID),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)")
         // 3. The placeholder cells, clipped so this never writes the final cell of the final row (a
         //    pending wrap there scrolls the grid and takes every placement on it one row up).
         let r = (id >> 16) & 0xFF, g = (id >> 8) & 0xFF, b = id & 0xFF
@@ -728,7 +733,7 @@ public final class ScreenWriter {
         appendTransmit(id: iid, payload: tile.payload, width: rect.w, height: rect.h,
                        compressed: tile.isCompressed)
         // 2. The virtual placement on this tile's cells.
-        append("\u{1B}_Gi=\(iid),p=\(pid),a=p,U=1,q=\(quiet),c=\(rect.cols),r=\(rect.rows)\u{1B}\\")
+        appendAPC("Gi=\(iid),p=\(pid),a=p,U=1,q=\(quiet),c=\(rect.cols),r=\(rect.rows)")
         // 3. The invisible grid. The image id travels in the foreground colour and one diacritic per
         //    row is enough (a cell inherits "left cell, column + 1").
         appendPlaceholderGrid(id: iid, row: rect.row, col: rect.col,
@@ -751,10 +756,7 @@ public final class ScreenWriter {
         while i < chars.count {
             let end = min(i + 4096, chars.count)
             let more = end == chars.count ? 0 : 1
-            append("\u{1B}_")
-            append(first ? "\(control),m=\(more);" : "Gm=\(more);")
-            out.append(contentsOf: chars[i..<end])
-            append("\u{1B}\\")
+            appendTransmitChunk(first ? "\(control),m=\(more);" : "Gm=\(more);", chars[i..<end])
             i = end
             first = false
         }
@@ -821,14 +823,11 @@ public final class ScreenWriter {
         while i < chars.count {
             let end = min(i + 4096, chars.count)
             let more = end == chars.count ? 0 : 1
-            append("\u{1B}_")
-            append(first ? "\(control),m=\(more);" : "Gm=\(more);")
-            out.append(contentsOf: chars[i..<end])
-            append("\u{1B}\\")
+            appendTransmitChunk(first ? "\(control),m=\(more);" : "Gm=\(more);", chars[i..<end])
             i = end
             first = false
         }
-        append("\u{1B}_Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)\u{1B}\\")
+        appendAPC("Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)")
         if sync { append("\u{1B}[?2026l") }
         if let timing { timing.pointee.assembleMs += benchNowMs() - mark }
     }
@@ -853,19 +852,15 @@ public final class ScreenWriter {
         while i < b64.count {
             let end = min(i + 4096, b64.count)
             let more = end == b64.count ? 0 : 1
-            append("\u{1B}_")
-            if first {
-                append("Gf=32,s=\(width),v=\(height),a=\(transmitAction),o=z,q=\(quiet),\(idPart)C=1,c=\(cols),r=\(rows),m=\(more);")
-            } else {
-                append("Gm=\(more);")
-            }
-            out.append(contentsOf: b64[i..<end])
-            append("\u{1B}\\")
+            let header = first
+                ? "Gf=32,s=\(width),v=\(height),a=\(transmitAction),o=z,q=\(quiet),\(idPart)C=1,c=\(cols),r=\(rows),m=\(more);"
+                : "Gm=\(more);"
+            appendTransmitChunk(header, b64[i..<end])
             i = end
             first = false
         }
         if variant == 2 {
-            append("\u{1B}_Gi=\(id),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)\u{1B}\\")
+            appendAPC("Gi=\(id),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)")
         }
         if sync { append("\u{1B}[?2026l") }
         flush()
@@ -895,16 +890,14 @@ public final class ScreenWriter {
         while i < chars.count {
             let end = min(i + 4096, chars.count)
             let more = end == chars.count ? 0 : 1
-            append("\u{1B}_")
-            append(first
-                   ? "Gf=\(format.protocolChannels),s=\(width),v=\(height),a=t,o=z,q=\(quiet),i=\(newID),m=\(more);"
-                   : "Gm=\(more);")
-            out.append(contentsOf: chars[i..<end])
-            append("\u{1B}\\")
+            let header = first
+                ? "Gf=\(format.protocolChannels),s=\(width),v=\(height),a=t,o=z,q=\(quiet),i=\(newID),m=\(more);"
+                : "Gm=\(more);"
+            appendTransmitChunk(header, chars[i..<end])
             i = end
             first = false
         }
-        append("\u{1B}_Gi=\(newID),p=\(placementID),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)\u{1B}\\")
+        appendAPC("Gi=\(newID),p=\(placementID),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)")
     }
 
     // MARK: plumbing
@@ -914,6 +907,38 @@ public final class ScreenWriter {
         defer { writeLock.unlock() }
         append(text)
         flushLocked()
+    }
+
+    /// One kitty-graphics APC: `ESC _ G<body> ESC \`, inside tmux's passthrough envelope when it is
+    /// on (`--passthrough`, issue #107).
+    ///
+    /// Every body krd emits is ESC-free -- a comma-separated control list and, for a transmit,
+    /// base64 -- so the envelope only has to double the introducer and the terminator: 3 bytes of
+    /// prefix and 4 extra ESCs per APC, never a copy of the payload. `TmuxPassthroughTests` pins
+    /// that fast path against the pure `TmuxPassthrough.wrap`.
+    @inline(__always)
+    private var apcOpen: String { passthrough ? TmuxPassthrough.open : "\u{1B}_" }
+
+    @inline(__always)
+    private var apcClose: String { passthrough ? TmuxPassthrough.close : "\u{1B}\\" }
+
+    @inline(__always)
+    func appendAPC(_ body: String) {
+        append(apcOpen)
+        append(body)
+        append(apcClose)
+    }
+
+    /// One transmit APC, `m=` chunking included: `ESC _ G<header>;<base64 up to 4096> ESC \`.
+    ///
+    /// The payload goes straight from the base64 slice into the frame buffer: a multiplexer wraps
+    /// 4096 characters, it does not re-encode a megabyte of picture.
+    @inline(__always)
+    func appendTransmitChunk(_ header: String, _ payload: ArraySlice<UInt8>) {
+        append(apcOpen)
+        append(header)
+        out.append(contentsOf: payload)
+        append(apcClose)
     }
 
     private func append(_ text: String) {

@@ -41,6 +41,25 @@ KRD_DUMP=/tmp/d.bin krd …        # 把发出的每个字节存下来，离线�
 **对策。** `krd --format rgba`（或 `KRD_FORMAT=rgba`）可以把载荷逐字节退回旧格式。如果这样就好了，
 那是终端的 bug，值得上游报，不是 krd 的。
 
+### 1c. 在 tmux 里 pane 是一格格豆腐
+
+**根因。** 画面区域铺满一排排缺字方框、没有图，是因为 tmux 夹在 krd 和你真正在看的终端之间，
+转义流是它自己解析的：一条 APC —— 也就是携带 kitty 图像的 `ESC _ G … ESC \` —— 没被程序包进
+tmux 的 DCS passthrough 就停在 tmux 里，图像数据永远到不了外层终端。占位格是普通文字，它们
+**确实**穿过去了，于是外层终端把 `U+10EEEE`（它没有这个字形）画在整块图的格子矩形上。
+**对策。** `krd --passthrough on`（`KRD_PASSTHROUGH=on` 是同一个开关；默认 `auto` 在 `TERM` 以
+`tmux` 或 `screen` 开头时已经会套 —— `on` 是给它看不见的那种情况准备的：服务端在会话里强行
+`TERM=xterm`）。套信封是 krd 这边的事，转发是 tmux 那边的事，而它需要 **tmux ≥ 3.3**（`tmux -V`）
+加上那条默认关着的选项：
+
+```bash
+tmux set -g allow-passthrough on        # 然后开一个新的 pane 或会话
+```
+
+**限制。** `allow-passthrough` 默认是关的，所以在终端里本来好好的画面，在 tmux 里可以一直是豆腐，
+直到跑了上面那行。只能嵌一层：DCS 里再套 DCS 不转发。而且 tmux < 3.7 自己没有 `?2026`，外层
+终端收到这张图时没有同步块 —— 不会冻住，但 resize 时可能撕裂。
+
 ### 2. 黑屏，而且任何地方都没有报错
 
 **根因。** `q=2` 会吞掉所有协议回复，包括错误。这是正确的默认值（否则回复会从 stdin 回来被打进桌面），

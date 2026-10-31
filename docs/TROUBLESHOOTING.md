@@ -44,6 +44,28 @@ RGB path can still get it wrong, and with `q=2` it fails silently.
 **Fix.** `krd --format rgba` (or `KRD_FORMAT=rgba`) restores the old payload byte for byte. If that
 fixes it, it is a terminal bug worth reporting upstream, not a krd bug.
 
+### 1c. Inside tmux the pane is a grid of tofu
+
+**Cause.** tmux sits between krd and the terminal you are looking at, and it parses the escape
+stream itself: an APC — the `ESC _ G … ESC \` that carries a kitty image — ends at tmux unless the
+program wraps it in tmux's DCS passthrough, so the image data never reaches the outer terminal. The
+placeholder cells are ordinary text and do get through, so the outer terminal paints `U+10EEEE` — a
+codepoint it has no glyph for — over the picture's whole cell rectangle: rows of missing-glyph
+boxes, no picture.
+**Fix.** `krd --passthrough on` (`KRD_PASSTHROUGH=on` is the same switch; the default `auto` already
+wraps when `TERM` starts with `tmux` or `screen` — `on` is for the case it cannot see, a server that
+forces `TERM=xterm` inside a session). The wrapping side is krd's; the forwarding side is tmux's, and
+it needs **tmux ≥ 3.3** (`tmux -V`) plus the option, which is off by default:
+
+```bash
+tmux set -g allow-passthrough on        # then open a new pane or session
+```
+
+**Limits.** `allow-passthrough` is off by default, so a picture that works in your terminal can
+still be tofu in tmux until that line runs. One nesting level only: a DCS inside a DCS is not
+forwarded. And tmux < 3.7 has no `?2026` of its own, so the outer terminal receives the picture
+without a synchronized block — it never freezes, but a resize can tear it.
+
 ### 2. Black pane and no error anywhere
 
 **Cause.** `q=2` suppresses every protocol reply, including errors. This is the right default
