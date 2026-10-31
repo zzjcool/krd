@@ -32,11 +32,13 @@ public struct TileGrid {
     /// The source's own size in points, before any fitting (0 when the caller did not say).
     public let sourceW: Double
     public let sourceH: Double
-    /// The largest cell rectangle with the source's aspect that fits the pane, in pixels.
+    /// The largest cell rectangle with the source's aspect that fits the pane, in pixels. A function
+    /// of the pane, the cell and the aspect only - never of the tile size (issue #143).
     public let boxW: Int
     public let boxH: Int
     /// ...and in cells. The picture is placed in `paneCols x paneRows` of these; whatever the aspect
-    /// leaves over belongs to the terminal.
+    /// leaves over belongs to the terminal. `boxCols <= paneCols` and `boxRows <= paneRows` hold by
+    /// construction: a box bigger than the pane cannot be the pane's own aspect.
     public let boxCols: Int
     public let boxRows: Int
     /// The on-screen size at `scale == 1`, i.e. the source x `fit` (may be larger than the source).
@@ -107,8 +109,24 @@ public struct TileGrid {
             rows = paneRows
             cols = Int((Double(rows) * cellH * aspect / cellW).rounded())
         }
-        cols = max(tileCols, min(paneCols, cols))
-        rows = max(tileRows, min(paneRows, rows))
+        // **The tile size does not enter this arithmetic** (issue #143), and that is the point of
+        // these two lines. They used to clamp the box *up* to at least one whole tile -
+        // `max(tileCols, min(paneCols, cols))`, where the `max` undid the `min` - so whenever the
+        // picture's box was smaller than one tile (a `--tile` bigger than the picture, or a pane
+        // shorter or narrower than the tile) the box handed to `fit`/`boxW`/`boxH` was **bigger than
+        // the pane**: the fit came out larger than the pane can hold and the `ceil` clamp below could
+        // only trim the *cells*, leaving a frame taller than the pane (measured: `--tile 32x16` on a
+        // 40x15 pane fitted into 16 rows of 16 px = 256 px, 6.3 % more than the 240 px the pane has)
+        // and a cell box that was no longer the source's aspect (`--tile 24x20` gave 23x15 cells
+        // instead of 17x15, a 36 % horizontal stretch; `--tile 8x4` on a 40x3 pane was 48 % wide).
+        //
+        // A box smaller than one tile needs nothing special: `rect` already sizes the one tile that
+        // is there to the cells that exist (`min(tileCols, paneCols - tx * tileCols)`), and the frame
+        // follows the final cells either way. `--tile` is how the picture is *cut*, never how big it
+        // is - the aspect, the pane and the cell decide that, which is also what `--tile`'s own
+        // documentation has always said.
+        cols = min(paneCols, max(1, cols))
+        rows = min(paneRows, max(1, rows))
         let boxCols = cols
         let boxRows = rows
         let boxW = max(1, Int((Double(cols) * cellW).rounded()))
