@@ -639,8 +639,10 @@ Restart-path facts already hit once (do not relearn them):
   reports as "the resolution changed" (TROUBLESHOOTING 23d).
 - **P4 done (2026-10-30)**: plain `krd` opens the wall. `--mirror` (or `--window <query>`, which asks for one
   window and so cannot mean the wall) takes the old default back; `wall` stays a symlink and `--wall` still
-  parses, because scripts spell it. `--list`, `--selftest`, `--bench`, `--mock` keep their own paths - they are
-  checked before the wall branch, and `--list` is the one that would otherwise have been swallowed.
+  parses, because scripts spell it. `--list`, `--selftest` and `--bench` keep their own paths - they are checked
+  before the wall branch, and `--list` is the one that would otherwise have been swallowed. `--mock`
+  is the mock mirror unless `--wall` was asked for, in which case it supplies the wall's window list
+  (§10, #114): one flag, two pages, decided by whether the wall was pinned.
 
 ## 13. What would change the answer
 
