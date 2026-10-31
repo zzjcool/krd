@@ -118,7 +118,11 @@ Shared state (`grid`, `viewport`, `previousFrame`, `lastDirtyCount`) is behind o
 `Desk`. `ScreenWriter` is deliberately lock-free: in steady state it has exactly one producer, the
 capture queue. The two exceptions are the `?1003h/?1002h/?1006h/?1016h` write at input start (a direct
 `write(2)` on the static helper, not through the writer) and `writer.clear()` during a resize,
-which can interleave with an in-flight tile; the worst case is one extra full repaint.
+which can interleave with an in-flight tile; the worst case is one extra full repaint. The #203
+focus-change pair (`?1003l` on focus-out, `?1003h` on focus-in) rides the same static path and takes
+`outLock` — the lock `flushLocked` takes — so it cannot split a single `write(2)`. It cannot promise
+more than that: the terminal's logical block is not under this lock, and `flushLocked`'s own comment
+records that a chrome flush from the main queue already lands between an APC's open and its close.
 
 ## 4. Startup
 
@@ -390,11 +394,13 @@ These are not style choices; each one fixed a specific failure. Byte-level detai
    while re-asserting the hidden cursor.
 6. **Heal on entry.** `beginSession()` starts with `ESC \` (closes a dangling APC left by a killed
    predecessor, which would otherwise swallow every later byte) + `?2026l` (closes a dangling
-   sync block) + the four mouse resets `?1016l ?1006l ?1002l ?1003l` (`ScreenWriter.mouseReset`,
-   the enable list of PROTOCOL §7 reversed) + `ESC[0m` + `?25h`, then switches to the alternate
-   screen.
+   sync block) + `ScreenWriter.inputReset` (the four mouse resets `?1016l ?1006l ?1002l ?1003l` —
+   PROTOCOL §7's whole mode list reversed, prefixed by `?1004l` only when the session armed focus
+   reporting at all — unfiltered by the current focus, so `?1003l` goes out even while the pane is
+   unfocused: the mode may have been on a moment ago, #134/#203) + `ESC[0m` + `?25h`, then switches
+   to the alternate screen.
 7. **Explicit teardown.** `endSession()`: `ESC \` + `?2026l`, delete all placements
-   (`a=d,d=a`) + `2J`, then the same `mouseReset` + `?25h ?1049l`.
+   (`a=d,d=a`) + `2J`, then the same unfiltered `inputReset` + `?25h ?1049l`.
 
 ## 8. Resize and shutdown
 

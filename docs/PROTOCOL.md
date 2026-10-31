@@ -28,6 +28,9 @@ ESC [ ? 25 l                         #   hide cursor for the whole session
 
                                      # once stdin is known to be a tty (InputReader.start)
 ESC [ ? 1003 h                       #   any-motion tracking: report motion even without a button
+                                     #   focus-gated in the mirror (#203): ?1003l while the pane is
+                                     #   unfocused, ?1003h on focus-in, one escape per real transition;
+                                     #   the wall keeps it on unconditionally (§7)
 ESC [ ? 1002 h                       #   button-event tracking: press / drag / release
 ESC [ ? 1006 h                       #   SGR encoding (unbounded coordinates)
 ESC [ ? 1016 h                       #   SGR *pixels*: coordinates in device pixels, not cells
@@ -39,13 +42,15 @@ The leading escapes are a *heal*: a pane whose parser is waiting for an `ST` sho
 (not even text) until it gets one, which is what a `kill -9` mid-`write()` leaves behind, and
 `?2026l` closes the synchronized-update block a killed predecessor may have left open. The
 input-mode resets (`?1004l ?1016l ?1006l ?1002l ?1003l`) are `ScreenWriter.inputReset` — the §7
-enable list reversed — and they are the same list `writeInputModes(false)` sends when input stops and
-the teardown sends at the end (§4), so no mode can be enabled without the same list turning it off in
-all three places; `?1004l` is in that list only when the session asked for focus reporting at all
-(§7). Re-running krd fixes such a pane automatically; by hand it is
+mode list reversed, *not* the focus-filtered enable list — and they are the same list
+`writeInputModes(false)` sends when input stops and the teardown sends at the end (§4), so no mode
+can be enabled without the same list turning it off in all three places; `?1003l` is in it
+whatever the pane's current focus is, because the mode may have been on a moment ago (#134,
+#203); `?1004l` is in that list only when the session asked for focus reporting at all (§7).
+Re-running krd fixes such a pane automatically; by hand it is
 `printf '\033\\\033[?2026l\033[?25h'`.
 
-`?2027h` is conditional and it is the only conditional line here. 2027 is DEC's grapheme
+`?2027h` is conditional, and it is the only line here armed on a **probe**. 2027 is DEC's grapheme
 clustering: with it set the *terminal* decides where a cluster ends (VS16, ZWJ, skin tones,
 regional-indicator flags), so `☰` and a flag occupy the cells their glyph does; with it reset every
 code point is laid out alone and a flag is two letters. Ghostty 1.4.0 starts with it **set**
@@ -161,14 +166,21 @@ end of session (ScreenWriter.endSession):
     ESC [ ? 1049 l                               # leave the alternate screen
 ```
 
-The input-mode resets are `ScreenWriter.inputReset` — the §7 enable list reversed — the same list
+The input-mode resets are `ScreenWriter.inputReset` — the §7 mode list reversed — the same list
 the heal sends on the way in (§1) and `writeInputModes(false)` sends when input stops: a mode can
 no longer be enabled without all three resetting it (`?1004l` is on the list only when focus
-reporting is on; §7).
+reporting is on; §7). `?1003l` is on it even while the pane is unfocused: only the enable side
+follows the focus, so a session that ends unfocused still has to hand the mode back — filtering it
+out here is #134's bug class, which is why the reset is derived from the whole list and not from
+the enabled one (#203). `endSession()` also latches the session closed, and the enable path checks
+that latch before it writes, so the enable window is closed as early as the reader's own check allows —
+a report that has already passed the check can still put one escape on the wire while it waits for the
+write lock, and that needs a signal-driven shutdown to start inside the gap (nothing stops the reader) —
+while the resets are unaffected.
 
 `?2027l` comes **before** `?1049l` on purpose: the shell gets a screen whose mode is already the one
 it started with, so its first frame is laid out the way it expects. It is also the only line here
-that is conditional (§1) — a terminal that had 2027 on when krd started never sees this sequence, in
+armed on a probe (§1) — a terminal that had 2027 on when krd started never sees this sequence, in
 either direction.
 
 `a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames. With
@@ -327,7 +339,7 @@ reports onto the picture).
 
 | Mode | Meaning | What krd uses it for |
 |---|---|---|
-| `?1003h` | any-motion tracking | pointer movement without a button → `mouseMoved` (hover, cursor following) |
+| `?1003h` | any-motion tracking | pointer movement without a button → `mouseMoved` (hover, cursor following). **In the mirror it is armed only while the pane has focus** (#203): `?1003l` while unfocused, `?1003h` again on focus-in, nothing at all when the focus state did not change; the wall keeps it on unconditionally (below) |
 | `?1002h` | button-event tracking | press, release, **and motion while a button is down** (dragging) |
 | `?1006h` | SGR encoding | `<Cb;Cx;CyM` / `…m` instead of the 8-bit legacy encoding |
 | `?1016h` | SGR-Pixels (kitty extension) | coordinates in device pixels instead of cells |
@@ -351,10 +363,33 @@ click into a Control-click — macOS shows that as a right click, and nothing dr
 `?1004` is the one row above that is not the mouse. A terminal that does not implement it — or tmux
 without `set -g focus-events on`, a server option that is off by default — sends neither `CSI I` nor
 `CSI O`, so krd stays in the state it started in and the picture costs exactly what it did before
-the flag existed. It is also the one mode krd arms *conditionally*: a pane with no reader is never
-put into a mode whose whole point is to send bytes to that reader. Any real input counts as focus-in
+the flag existed. What it is conditional on is a property of the *session* — a pane with no reader
+is never put into a mode whose whole point is to send bytes to that reader — where `?1003` (since
+#203, below) is conditional on the mirror's pane having focus right now. Neither condition reaches
+the wall: it arms no `?1004`, and its `?1003` never follows focus. Any real input counts as focus-in
 too (a key, a click, the wheel), so a picture frozen by `--unfocused-fps 0` comes back on the first
 thing you type or click, `CSI I` or no `CSI I`.
+
+**`?1003` is the one mode that follows the mirror's focus (#203).** `noteFocus` writes exactly one
+escape per *real* change of the want — `?1003l` when the pane loses focus, `?1003h` when it gets it back
+(the mirror starts focused, so §1's own `?1003h` is the first of them) — and nothing at all when the
+report says what krd already knew: the setter owns the want and writes only when it moves, so a repeated
+`CSI I`, or the keystroke that counts as focus-in, is free. The other three are never gated: a click, a
+drag or a wheel event that lands in an unfocused pane still has to work, so motion is the only report
+given up. The escape is gated on `ScreenWriter.focusReporting` — the same predicate that decides who
+arms `?1004` (`!noInput && !wall`) — and that gate is what exempts the wall: its reader installs
+`onFocus` like every session's and hands `CSI I`/`CSI O` *and* every key, click and wheel to `noteFocus`
+(that is #110: the wall's `focused` still flips, and the log line says so), but a focus report cannot
+take `?1003` away from a wall — the write it triggers sits behind the same condition as `?1004`, and a
+real terminal never sends a wall one anyway, since the wall never arms `?1004`. Nor would the gate buy
+anything there: after #200 the wall's own chrome hovers, so gating `?1003` would undo the hover repaint
+#200 added. What the gate saves is *upstream* traffic, not ours: motion reports are bytes the
+**terminal** sends, ~13 B each in SGR-pixel mode, i.e. 0.8–1.6 KB/s at 60–120 Hz on a moving pointer.
+That is arithmetic, not a measurement — it comes from the UI v2 plan (§2.2/§4.1, which quotes ~10 B
+per report), and krd cannot observe what the terminal would have sent. The first version of this
+issue — `?1003` "only while something can be hovered" — was dropped as circular: learning that the
+pointer is over the picture takes a motion report, and `?1003` is exactly what buys motion reports —
+drop to `?1002` there and no report brings it back; after #200 the mirror's chrome hovers too.
 
 **`CSI 5n` is the one query here with two callers, and both send it on a tick.** A mirror asks it from
 the 1 Hz diagnostics tick, at most once every 2 s (`probeRoundTrip()`, `main.swift`); `--wall` asks it

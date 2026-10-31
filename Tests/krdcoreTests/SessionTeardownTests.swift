@@ -43,10 +43,12 @@ final class SessionTeardownTests: XCTestCase {
     override func setUp() {
         super.setUp()
         ScreenWriter.focusReporting = false
+        ScreenWriter.motionReporting = true
     }
 
     override func tearDown() {
         ScreenWriter.focusReporting = false
+        ScreenWriter.motionReporting = true
         super.tearDown()
     }
 

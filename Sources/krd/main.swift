@@ -1071,6 +1071,15 @@ final class Desk {
         // never asks for a mode whose whole purpose is sending bytes to a reader that does not
         // exist -- and `--selftest`'s sha256 is a byte contract that depends on it.
         ScreenWriter.focusReporting = !options.noInput && !options.wall
+        // `?1003` is the one mouse mode whose enable follows the focus (#203). The mirror starts
+        // focused (`focused` starts true), so it starts with the whole list -- and this is the
+        // per-session decision point (`beginSession` puts the want back to true for the same reason).
+        // The wall keeps the whole list too, but *not* because it could never learn about a focus
+        // change -- it reads input and its reader routes `CSI I`/`CSI O` to `noteFocus` like any
+        // other, which still flips `focused` (and the log line says so) though nothing in wall mode
+        // reads it. It is exempt by the `focusReporting` gate there -- false for a wall and for
+        // `--no-input`, as computed just above -- and by never arming `?1004` on top of that.
+        ScreenWriter.motionReporting = true
         // The pins the menu put on this device, read back from the command line a hand-over wrote:
         // the value alone would let the governor take it away again (issue #87).
         fpsPinned = options.fpsPinned
@@ -3526,6 +3535,28 @@ final class Desk {
     /// some do on every resize, and every keystroke arrives here too -- must neither fill the log
     /// nor reset the gate, so the early return is the common path and costs no log and no bump.
     private func noteFocus(_ on: Bool) {
+        // The wire has exactly one gate, and it is this one: a motion report nobody can see is
+        // traffic the terminal pays for and the mirrored desktop never acts on, so `?1003` follows
+        // the pane -- one escape per real change of *want* (#203). `setMotionReporting` is called on
+        // **every** report, including the ones that are not transitions: the terminal repeating its
+        // `CSI I` on a resize, and every keystroke, click and wheel, which the reader treats as
+        // focus-in because anybody typing is here (I5). The setter's own guard knows what the pane
+        // currently holds, so those are free -- and that guard is the rule this method must not
+        // re-implement, or the instrument that watches the pane would be watching a copy.
+        //
+        // The `on == focused` early return below is a *different* rule and stays exactly as it is:
+        // #110's log/rate rule -- one line per real transition, and no gate reset per keystroke. The
+        // wire and the log/rate each have their own gate, and neither one is the other.
+        //
+        // Written before the lock and outside it -- `writeRaw` takes `outLock`, and the capture
+        // queue wants `stateLock` -- and gated on `focusReporting`, exactly "this session reads
+        // input and is not the wall", so a `--no-input` session and the wall write neither escape
+        // (`--selftest`'s sha is a byte contract, issue #110).
+        if ScreenWriter.focusReporting, ScreenWriter.setMotionReporting(on) {
+            // A mouse-mode toggle is one of the things both terminals reset the pointer shape with
+            // (#202), and this writes nothing: the next paint re-asks.
+            writer.forgetPointerShape()
+        }
         stateLock.lock()
         if on == focused { stateLock.unlock(); return }
         focused = on

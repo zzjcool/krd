@@ -182,14 +182,24 @@ public final class ScreenWriter {
     /// Heal a pane whose parser was left mid-sequence by a killed predecessor:
     /// ST closes a dangling APC (which would otherwise swallow every later byte),
     /// and 2026l closes a dangling synchronized-update block (which would freeze drawing).
-    /// The input-mode resets are the enable list reversed, so a killed predecessor's pixel
-    /// mode is repaired here too -- and so is its focus reporting, for a session whose list has
-    /// 1004 on it (see `inputModes`).
+    /// The input-mode resets are the ownership list reversed (`resetModes`, deliberately *not* the
+    /// focus-filtered enable list, #203), so a killed predecessor's pixel mode is repaired here too
+    /// -- and so is its focus reporting, for a session whose list has 1004 on it -- and so is its
+    /// `?1003`, even from a session whose pane is unfocused at the moment it heals.
     private var healSequence: String {
         "\u{1B}\\\u{1B}[?2026l" + Self.inputReset + "\u{1B}[0m\u{1B}[?25h"
     }
 
     public func beginSession() {
+        // A new session owns the pane again, so both halves of the previous one go: the teardown's
+        // latch, because a focus report from here on may put `?1003` back on the wire, and the want
+        // itself, because a session always starts focused (`Desk.focused` starts `true`, and the desk
+        // sets this same want before the heal). Without the second line a session started in-process
+        // after an *unfocused* teardown would enable the filtered list to a pane the desk believes is
+        // focused -- `resumeWall()` after a failed `exec` is that shape. `endSession` closes the
+        // window; this is the invariant's other end.
+        Self.sessionClosed = false
+        Self.motionReporting = true
         // Alternate screen: keeps scrollback clean and makes the terminal hand us wheel
         // events instead of scrolling itself.
         // Mouse reporting is enabled later, by InputReader, once it knows stdin is readable.
@@ -348,8 +358,9 @@ public final class ScreenWriter {
     /// Two lists, one derivation (issue #110): this list is unconditional -- every session resets
     /// what a killed predecessor may have left on -- while `focusModes` below is conditional on
     /// `focusReporting`, because 1004 is not a mouse mode and only a session that reads input may
-    /// ask for it. `inputModes` joins them, `inputEnable` is that list forwards and the reset the
-    /// heal and the teardown send is **that joined list reversed**. So `healSequence` and
+    /// ask for it. `resetModes` joins them and is the whole of what the heal and the teardown give
+    /// back, **reversed**; `inputModes` is that same list minus `?1003` while the pane is unfocused
+    /// (#203, `motionReporting`), and `inputEnable` is `inputModes` forwards. So `healSequence` and
     /// `endSession` own 1004 by construction the moment a session has input, never by a
     /// hand-written `?1004l`.
     static let mouseModes = [1003, 1002, 1006, 1016]
@@ -371,22 +382,100 @@ public final class ScreenWriter {
     /// so a single `?1004h` (or `l`) in it would move the sha (issue #110).
     public static var focusReporting = false
 
-    /// The two lists joined: what *this* session turns on.
+    /// The one mouse mode whose enable follows the pane's focus (issue #203).
     ///
-    /// Two lists, one derivation. `mouseModes` is unconditional -- whatever the session does, the
-    /// pane it is handed may have been left with mouse reporting on by a killed process, so every
-    /// session resets those four -- while `focusModes` is conditional on `focusReporting` (above),
-    /// because 1004 is not a mouse mode and is only ever enabled by a session that has input. The
-    /// derivation is #134's, applied to the joined list: `inputEnable` is the list forwards and
-    /// `inputReset` is **the concatenated list reversed**. So `healSequence` and `endSession` own
-    /// 1004 by construction: the moment 1004 is on the list a session enables, it is on the list
-    /// that same session's heal and teardown send, ahead of the mouse resets, with no hand-written
-    /// `?1004l` anywhere in the file.
-    static var inputModes: [Int] { mouseModes + (focusReporting ? focusModes : []) }
-    /// `?<mode>h` in order, and `?<mode>l` in reverse: the enable set and the reset set are
-    /// complementary by construction, never by hand.
+    /// Any-motion tracking is the only mode in the list whose whole purpose is a continuous stream
+    /// of *upstream* traffic: a terminal that reports every motion sends one report per pointer
+    /// movement, at its own rate, whether or not anything on this pane can act on it. While nobody
+    /// is looking at the pane that traffic buys nothing -- the chrome's hover (#200) wants a motion
+    /// report only when a reader is there to see the result -- so this is the one mode that is
+    /// allowed to follow the focus. The other three are not: a click that lands on an unfocused
+    /// pane still has to arrive as a button event (`?1002`/`?1006`/`?1016`).
+    static let motionMode = 1003
+
+    /// Whether this session currently wants `?1003` on the wire.
+    ///
+    /// Static, like `focusReporting` and for the same reason: it is a per-session decision the two
+    /// lists below are derived from, not a property of one writer. It defaults to `true` -- the
+    /// behaviour before #203 -- and is set by the desk once, before the heal, and put back to `true`
+    /// by every `beginSession()` (a session always starts focused); inside a session only
+    /// `noteFocus` moves it. So a session whose `focusReporting` is false keeps the whole list
+    /// unconditionally and `--selftest`'s sha256, a byte contract, does not move.
+    ///
+    /// Those are two different reasons, and the wall's is *not* "it could never learn about a focus
+    /// change": a `--no-input` session has no reader at all, so nothing can report focus to it,
+    /// while the wall **does** read input and its reader routes `CSI I`/`CSI O` -- and every human
+    /// input event -- to `noteFocus` exactly like the mirror's: it still flips `focused` (and the log
+    /// line says so), though nothing in wall mode reads it, because a wall has no capture loop to
+    /// rate. What makes the wall exempt is the `focusReporting` gate at that call site plus never
+    /// arming `?1004`: `setMotionReporting` is never called there, so no `?1003` byte can follow a
+    /// focus report on a wall.
+    ///
+    /// Written by `noteFocus` on the reader's thread and by `beginSession()` before that thread
+    /// exists, and read by the lists at session start, so there is nothing to lock here; the escape
+    /// the setter emits takes `outLock` on its own.
+    public static var motionReporting = true
+
+    /// One `?1003h`/`?1003l` per real focus change; nothing when the want did not change, and
+    /// nothing at all once the session is over (`sessionClosed` below).
+    ///
+    /// Deliberately *not* `writeInputModes(true)`: a focus change owns `?1003` and nothing else, so
+    /// a click or a wheel on an unfocused pane keeps working -- and the reset list a teardown sends
+    /// is derived from `resetModes` below, never from this, so the ownership set cannot be filtered
+    /// by a state that changes at runtime (#134's bug class).
+    ///
+    /// The escape goes through `writeRaw`, which takes `outLock` -- the same lock the frame flush
+    /// holds across its `write(2)` -- so it cannot split a *single* write of a tile's APC or of a
+    /// `?2026` block. That is all the lock buys: it serialises `write(2)` calls, not the terminal's
+    /// logical block, and a flush already lands between an APC's open and its close (`writeChrome`
+    /// from the main queue does exactly that, see `flushLocked`). An escape that does land inside an
+    /// open block is harmless: the block's `?2026l` still commits, and a DEC private mode set is
+    /// processed where it stands.
+    ///
+    /// Returns whether it wrote, so the caller can also tell the terminal to forget the pointer
+    /// shape: the mouse-mode toggles are one of the things both terminals reset it with (#202).
+    @discardableResult
+    public static func setMotionReporting(_ on: Bool) -> Bool {
+        // A closed session may reset, never enable: the reader thread outlives the teardown (see
+        // `sessionClosed`), and `?1003h` on a pane that already belongs to the shell is a mode
+        // nobody gives back. Checked before the want, so the latch does not record a state the
+        // want never reached.
+        guard !sessionClosed else { return false }
+        guard on != motionReporting else { return false }
+        motionReporting = on
+        writeRaw(on ? "\u{1B}[?\(motionMode)h" : "\u{1B}[?\(motionMode)l")
+        return true
+    }
+
+    /// The whole ownership list: every mode this session may have to give back, focus state
+    /// **included**.
+    ///
+    /// This -- never the state-filtered `inputModes` below -- is what `inputReset` is derived from
+    /// (#203), because `?1003` has to go back in the heal *and* in the teardown even when the pane
+    /// is unfocused at that moment: the mode was on a moment ago, and a session that ends unfocused
+    /// is the normal case rather than a corner. A reset list filtered by the current focus state
+    /// leaves a pane reporting motion for whatever program gets it next, which is exactly #134's
+    /// bug class (a sticky mode nobody took back).
+    static var resetModes: [Int] { mouseModes + (focusReporting ? focusModes : []) }
+
+    /// What *this* session turns on: the same one list, minus `?1003` while nobody is looking.
+    ///
+    /// A filter of `resetModes`, never a second list, so a mode added there is enabled here by
+    /// construction (#134's derivation, kept whole for 1003 too). Its one runtime caller is
+    /// `InputReader.start()`'s `writeInputModes(true)` -- a session starts focused, so that is the
+    /// whole list in one write -- and a later focus change is one escape (`setMotionReporting`),
+    /// never an enable-list round trip.
+    static var inputModes: [Int] { resetModes.filter { motionReporting || $0 != motionMode } }
+
+    /// `?<mode>h` in order, and `?<mode>l` in reverse: the enable set is a **subset** of the reset
+    /// set, never a complementary set of its own.
+    ///
+    /// Both come from the one list, `resetModes`: `inputEnable` is that list through `inputModes`
+    /// (which drops the modes nobody is looking at, #203) and `inputReset` is that same list
+    /// reversed. So a mode can never be enabled without the same list turning it off again -- which
+    /// is the whole reason there is one list and not two.
     static var inputEnable: String { inputModes.map { "\u{1B}[?\($0)h" }.joined() }
-    static var inputReset: String { inputModes.reversed().map { "\u{1B}[?\($0)l" }.joined() }
+    static var inputReset: String { resetModes.reversed().map { "\u{1B}[?\($0)l" }.joined() }
 
     public static func writeInputModes(_ on: Bool) {
         writeRaw(on ? inputEnable : inputReset)
@@ -407,6 +496,25 @@ public final class ScreenWriter {
     /// `--replay` call `endSession` without ever starting input, and a pop there would take a push
     /// that belongs to the shell (or the terminal's own UI).
     private static var keyboardPushed = false
+
+    /// True from `endSession()` until the next `beginSession()`: the pane is the shell's again.
+    ///
+    /// Set at the very top of `endSession()` -- before the reset bytes go out, so the window is
+    /// closed as early as it possibly can be -- and cleared at the top of `beginSession()`. While it
+    /// is set, `setMotionReporting` writes nothing and returns false.
+    ///
+    /// The reason it exists is that the teardown is not the last word the reader has: every writer
+    /// in this file was a *reset* until #203, and a reset after `endSession()` is harmless, while an
+    /// enable is not. `Desk.shutdown()` only calls `input?.restore()`, so the reader thread is still
+    /// parsing stdin when the reset bytes go out; a `CSI I` (or a keystroke, I5) that lands a moment
+    /// later would arm `?1003` on a pane that already belongs to the shell -- a sticky mode nobody
+    /// takes back, #134's bug class with a new writer in it.
+    ///
+    /// It gates **only** the `?1003` enable: `writeInputModes(false)`, `inputReset`, `healSequence`
+    /// and the rest of the teardown are resets and stay allowed unconditionally -- resets are exactly
+    /// how the pane is given back. `writeInputModes(true)` is an enable too and is deliberately not
+    /// gated: its only caller is `InputReader.start()`, on a reader that exists before any teardown.
+    static var sessionClosed = false
 
     /// One lock for everything that reaches the terminal. The frame path flushes a whole frame
     /// through several `write(2)` calls, so a concurrent OSC 52 (clipboard) or mouse-mode sequence
@@ -441,6 +549,13 @@ public final class ScreenWriter {
     }
 
     public func endSession() {
+        // First of all, close the enable window: this session is over. The reader thread outlives
+        // the teardown (`Desk.shutdown()` only restores the input modes), so a `CSI I` -- or any
+        // keystroke, which the reader counts as focus-in -- can still be parsed a moment later and
+        // would put `?1003h` on a pane that already belongs to the shell. Set before the reset
+        // bytes go out, so the window is closed as early as it can be; the resets themselves are
+        // unaffected, and they are how the pane is given back.
+        Self.sessionClosed = true
         // Terminate any half-written APC *first*, then retire the screen. The keyboard push goes
         // with it: a pop after the alternate screen is gone is still our business, not the shell's.
         write("\u{1B}\\\u{1B}[?2026l")
