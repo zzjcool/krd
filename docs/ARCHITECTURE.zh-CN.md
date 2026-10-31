@@ -210,11 +210,20 @@ cols = geometry.cols
 rows = round(cols * cellW / aspect / cellH)        // aspect = sourceRect.width / height
 if rows > geometry.rows { rows = geometry.rows
                           cols = round(rows * cellH * aspect / cellW) }
-cols = clamp(cols, tileCols, geometry.cols)        // 至少容得下一块瓦片
-rows = clamp(rows, tileRows, geometry.rows)
+cols = min(max(1, cols), geometry.cols)            // 画面的格子框：只看 pane 和宽高比，
+rows = min(max(1, rows), geometry.rows)            //   永远不看瓦片大小（issue #143）
 pixelW = max(2, round(cols * cellW * scale))       // SCStream 的输出尺寸
 pixelH = max(2, round(rows * cellH * scale))
 ```
+
+这个格子框只由 pane、格子尺寸和源的宽高比决定，**`--tile` 不参与**（issue #143）。这里以前会在算
+fit 之前把框至少抬到一整块瓦片，于是当 pane 比瓦片矮/窄（或画面本身就比一块瓦片小）时，交给 fit 的框
+**比 pane 还大**：fit 算出来超过 pane 能容纳的大小，后面的 clamp 只能修剪*格子*，于是画面留下一个
+宽高比不对的帧。实测 40x15 的 pane、1440x2560 的源：`--tile 32x16` 画出 18 格而宽高比说是 17 格，
+`--tile 24x20` 把画面横向拉宽 36%，而 `--tile 8x4` 在 40x3 的 pane 上（一个旗标都不用）是 48%。
+比一块瓦片还小的框不需要任何特殊处理——`rect` 会把唯一那块瓦片按实际的格子尺寸算。由此得到两条
+不变量：`boxCols <= paneCols`、`boxRows <= paneRows`；瓦片下限把两条都破了，而鼠标映射和瓦片网格
+都默认它们成立。
 
 `TileGrid.rect(tx, ty)` 同时给出瓦片的像素矩形和它的放置占位：
 
@@ -291,9 +300,9 @@ pane    137 × 73 格               单元格 17 × 33 px
 边缘    tile (8,5)：列 129..137（9 格），行 41..44（4 格）→ 153 × 132 px
 ```
 
-`--tile c x r` 只改切法，不改画面：同一张 2329×1452 px 的帧被切得不一样而已。瓦片更小意味着每次
-更新要发更多转义（每块瓦片固定约 120 字节控制字 + 一次 flush），单次变化的最坏延迟更小；瓦片更大
-意味着更少、更大的更新。
+`--tile c x r` 只改切法，不改画面：同一张 2329×1452 px 的帧被切得不一样而已，它背后的格子框和 fit
+也不会随瓦片大小移动（#143）。瓦片更小意味着每次更新要发更多转义（每块瓦片固定约 120 字节控制字
++ 一次 flush），单次变化的最坏延迟更小；瓦片更大意味着更少、更大的更新。
 
 ## 7. 渲染不变量
 
