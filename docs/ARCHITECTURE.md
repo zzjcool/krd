@@ -437,6 +437,27 @@ it claims `complete` but has no pixels), `write max`/`over5` are the worst `writ
 second and how many frames exceeded 5 ms, and `late` counts frames the loop declined because
 `--quality auto` had lowered the target rate.
 
+**The frame-rate gate (`FrameGate`).** A rung below `--fps` is enforced by declining frames: the
+capture keeps arriving at `--fps` and the loop drops the ones it does not need, before anything is
+encoded. Which ones is arithmetic that has to produce a *rate*, so the gate carries an **owed-frame
+deadline** — advance it one period per drawn frame, draw the frame that arrives on or after it —
+rather than a last-draw mark. A mark quantises every rung down to a whole number of capture periods
+(`ceil(due / capturePeriod)`), which cannot be `due`: the 15 fps rung out of a 20 fps capture drew
+every second frame, 10 fps, and the governor spent the rest of its ladder on a link that was never
+behind (issue #140). With the deadline, out of a 20 fps capture:
+
+| rung | interval | delivered | gaps |
+|-----:|---------:|----------:|------|
+| 20 fps | 50.00 ms | 20.0 fps | 50 ms |
+| 15 fps | 66.67 ms | 15.0 fps | 50/100 ms, mean 66.67 |
+| 10 fps | 100.00 ms | 10.0 fps | 100 ms |
+
+So a rung is a **target, not a floor**: the interval out of a slower-ticking source is sometimes short
+and sometimes long, and what the rung promises is the mean. That is why the `--dev` bar and `--stats`
+print `delivered/target` (`15.0/15 fps`) instead of just the target — a rung the link cannot hold
+reads as `11.2/15 fps` rather than as a number nobody measured. `Tests/krdcoreTests/FrameGateTests`
+pins the three rungs against 20/30/60 fps captures and prints that table.
+
 `cap` and `pipe` are the split that answers "was it the capture or the write":
 
 - `cap = ScreenCaptureKit callback − PTS`: how old the frame's *content* already was when it reached
