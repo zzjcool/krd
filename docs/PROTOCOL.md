@@ -17,7 +17,8 @@ several APC commands.
                                      # start of session (ScreenWriter.beginSession)
 ESC \                                #   ST: close an APC a killed predecessor left open
 ESC [ ? 2026 l                       #   close a dangling synchronized-update block
-ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l   #   mouse reporting off (in case it was left on)
+ESC [ ? 1004 l  ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l   #   input modes off (in case they were left on)
+                                     #   (?1004l is in that list only when focus reporting is on: §7)
 ESC [ 0 m                            #   SGR reset
 ESC [ ? 25 h                         #   cursor visible during setup
 ESC [ ? 1049 h                       #   alternate screen (no scrollback, wheel events come to us)
@@ -29,15 +30,18 @@ ESC [ ? 1003 h                       #   any-motion tracking: report motion even
 ESC [ ? 1002 h                       #   button-event tracking: press / drag / release
 ESC [ ? 1006 h                       #   SGR encoding (unbounded coordinates)
 ESC [ ? 1016 h                       #   SGR *pixels*: coordinates in device pixels, not cells
+ESC [ ? 1004 h                       #   focus reporting (CSI I in / CSI O out): sessions that read
+                                     #   input only — --no-input, --selftest, --bench, --replay, the wall: never (§7)
 ```
 
 The leading escapes are a *heal*: a pane whose parser is waiting for an `ST` shows nothing at all
 (not even text) until it gets one, which is what a `kill -9` mid-`write()` leaves behind, and
-`?2026l` closes the synchronized-update block a killed predecessor may have left open. The four
-mouse resets (`?1016l ?1006l ?1002l ?1003l`) are `ScreenWriter.mouseReset` — the §7 enable list
-reversed — and they are the same list `writeMouseReporting(false)` sends when input stops and the
-teardown sends at the end (§4), so no mode can be enabled without the same list turning it off in
-all three places. Re-running krd fixes such a pane automatically; by hand it is
+`?2026l` closes the synchronized-update block a killed predecessor may have left open. The
+input-mode resets (`?1004l ?1016l ?1006l ?1002l ?1003l`) are `ScreenWriter.inputReset` — the §7
+enable list reversed — and they are the same list `writeInputModes(false)` sends when input stops and
+the teardown sends at the end (§4), so no mode can be enabled without the same list turning it off in
+all three places; `?1004l` is in that list only when the session asked for focus reporting at all
+(§7). Re-running krd fixes such a pane automatically; by hand it is
 `printf '\033\\\033[?2026l\033[?25h'`.
 
 None of these is a kitty graphics APC — the leading `ESC \` is a bare `ST`, not an envelope — so
@@ -121,17 +125,18 @@ end of session (ScreenWriter.endSession):
     ESC \                                        # terminate a half-written APC first
     ESC [ ? 2026 l
     ESC _ G a=d,d=a ESC \  ESC [ 2 J             # delete every placement, clear the screen
-    ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l
+    ESC [ ? 1004 l  ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l
     ESC [ ? 25 h
     ESC [ ? 1049 l                               # leave the alternate screen
 ```
 
-The four mouse resets are `ScreenWriter.mouseReset` — the §7 enable list reversed — the same list
-the heal sends on the way in (§1) and `writeMouseReporting(false)` sends when input stops: a mode can
-no longer be enabled without all three resetting it.
+The input-mode resets are `ScreenWriter.inputReset` — the §7 enable list reversed — the same list
+the heal sends on the way in (§1) and `writeInputModes(false)` sends when input stops: a mode can
+no longer be enabled without all three resetting it (`?1004l` is on the list only when focus
+reporting is on; §7).
 
 `a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames. With
-passthrough on it is wrapped like every other APC (§6.6); `?2026l`, `2J` and the four mouse resets
+passthrough on it is wrapped like every other APC (§6.6); `?2026l`, `2J` and the input-mode resets
 are not.
 
 ## 5. What krd deliberately never sends
@@ -267,6 +272,7 @@ reports onto the picture).
 | `?1002h` | button-event tracking | press, release, **and motion while a button is down** (dragging) |
 | `?1006h` | SGR encoding | `<Cb;Cx;CyM` / `…m` instead of the 8-bit legacy encoding |
 | `?1016h` | SGR-Pixels (kitty extension) | coordinates in device pixels instead of cells |
+| `?1004h` | focus reporting (DECSET 1004): `CSI I` focus in, `CSI O` focus out | the picture drops to `--unfocused-fps` (default 1, `0` = freeze) while the pane is unfocused. **Only while a session reads input** — never with `--no-input`/`--selftest`/`--bench`/`--replay`, and never by the wall — and reset by the heal (§1) and by the teardown (§4), like the mouse modes above |
 
 Reports arrive as `ESC [ < Cb;Cx;Cy M` (press/motion) and `ESC [ < Cb;Cx;Cy m` (release),
 1-based. `Cb` bits:
@@ -282,6 +288,14 @@ Every injected mouse event sets `flags` explicitly (from the bits above, empty f
 Do not let it default: `CGEvent(mouseEventSource: nil, …)` inherits the *session's* modifier state,
 and `postKey()` posts `.maskControl` on Ctrl combinations, so a stale Control would turn every later
 click into a Control-click — macOS shows that as a right click, and nothing drags.
+
+`?1004` is the one row above that is not the mouse. A terminal that does not implement it — or tmux
+without `set -g focus-events on`, a server option that is off by default — sends neither `CSI I` nor
+`CSI O`, so krd stays in the state it started in and the picture costs exactly what it did before
+the flag existed. It is also the one mode krd arms *conditionally*: a pane with no reader is never
+put into a mode whose whole point is to send bytes to that reader. Any real input counts as focus-in
+too (a key, a click, the wheel), so a picture frozen by `--unfocused-fps 0` comes back on the first
+thing you type or click, `CSI I` or no `CSI I`.
 
 ### 7.1 Cell vs pixel coordinates, and the downgrade rule
 

@@ -31,3 +31,5 @@ text U+4E2D mods=0
 graphicReply G i=31 p=- ok 8 B
 graphicReply G i=137 p=7 error 39 B
 graphicReply G i=- p=- unparsed 6 B
+focus 0
+focus 1

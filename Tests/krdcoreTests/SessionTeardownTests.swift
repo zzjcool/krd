@@ -16,10 +16,10 @@ import Foundation
 ///   a killed predecessor ("Re-running krd fixes such a pane automatically"), and
 /// - PROTOCOL.md §4 documents `endSession()` as "end of session", i.e. the teardown.
 ///
-/// Both reset every mode the session turned on, from the one list `ScreenWriter.mouseReset` (the
+/// Both reset every mode the session turned on, from the one list `ScreenWriter.inputReset` (the
 /// enable list reversed) - that is the contract this file pins. Before #134 each of the three was
 /// written out by hand, mode by mode, and both session-level ones were missing `?1016`: a `kill -9`
-/// mid-session skips `InputReader.loop`'s own `writeMouseReporting(false)` entirely, so the heal and
+/// mid-session skips `InputReader.loop`'s own `writeInputModes(false)` entirely, so the heal and
 /// the teardown are the only two safety nets there are, and a mode either one forgets is left on for
 /// the lifetime of the pane.
 ///
@@ -28,9 +28,27 @@ import Foundation
 /// again. That is the only shape of the test that cannot go stale the next time a mode is added.
 ///
 /// The sink is `ScreenWriter.sink` (the in-memory seam from issue #21), so no real terminal is
-/// touched; the two `writeMouseReporting` calls are static and write straight to fd 1, so they are
+/// touched; the two `writeInputModes` calls are static and write straight to fd 1, so they are
 /// captured by temporarily pointing fd 1 at a temp file. Both halves end up in one ordered byte array.
+///
+/// One mode in the table is not like the others (#110): `?1004` (focus reporting) is enabled only by
+/// a session that reads input, so it is conditional on `ScreenWriter.focusReporting`. The two #110
+/// tests at the bottom pin both halves: nothing at all with it off (the `--selftest` dump contract),
+/// reset in the heal *and* the teardown with it on.
 final class SessionTeardownTests: XCTestCase {
+
+    /// Every case starts and ends with the shipped default: `focusReporting` is the one piece of
+    /// `ScreenWriter` state a desk sets for a whole session, and a leaked `true` here would make the
+    /// "no input, no 1004" test below pass or fail depending on test *order*.
+    override func setUp() {
+        super.setUp()
+        ScreenWriter.focusReporting = false
+    }
+
+    override func tearDown() {
+        ScreenWriter.focusReporting = false
+        super.tearDown()
+    }
 
     // MARK: - the modes, and what "on" means for each
 
@@ -43,6 +61,7 @@ final class SessionTeardownTests: XCTestCase {
         25: "cursor hidden",
         1002: "button-event mouse tracking",
         1003: "any-motion mouse tracking",
+        1004: "focus reporting (DECSET 1004)",
         1006: "SGR mouse encoding",
         1016: "SGR-PIXEL mouse coordinates (kitty extension)",
         1049: "alternate screen",
@@ -101,7 +120,7 @@ final class SessionTeardownTests: XCTestCase {
 
     /// Runs `body` with fd 1 redirected into a temp file and returns the bytes krd wrote there.
     ///
-    /// `ScreenWriter.writeMouseReporting` (and `writeKeyboardProtocol`) are `static` and go straight
+    /// `ScreenWriter.writeInputModes` (and `writeKeyboardProtocol`) are `static` and go straight
     /// to the tty by design - they must not queue behind a frame - so the sink seam cannot see them.
     /// The window is one `write(2)` per call and XCTest runs the cases of a class on one thread, so
     /// nothing of the runner's own output can slip in between.
@@ -149,7 +168,7 @@ final class SessionTeardownTests: XCTestCase {
         // A realistic session, in the order the process produces it.
         writer.beginSession()                                    // heal + alt screen + ?25l
         session.append(contentsOf: captureFd1 {                  // InputReader.start()
-            ScreenWriter.writeMouseReporting(true)
+            ScreenWriter.writeInputModes(true)
         })
         for frame in 0..<2 {                                     // a couple of frames
             writer.beginFrame()
@@ -157,7 +176,7 @@ final class SessionTeardownTests: XCTestCase {
             writer.endFrame()
         }
         session.append(contentsOf: captureFd1 {                  // InputReader.stop()
-            ScreenWriter.writeMouseReporting(false)
+            ScreenWriter.writeInputModes(false)
         })
         let teardownStart = session.count                        // everything from here is endSession()
         writer.endSession()
@@ -170,7 +189,7 @@ final class SessionTeardownTests: XCTestCase {
                       "the instrument must see the four mouse modes the session turns on; saw \(describe(enabled))")
 
         // (a) The whole session, as a whole, is balanced. Green on HEAD because `InputReader.loop`
-        // sends `writeMouseReporting(false)` in its defer - which is exactly what `kill -9`, a
+        // sends `writeInputModes(false)` in its defer - which is exactly what `kill -9`, a
         // crash, or a `--no-input` path that never started the reader does **not** run.
         let leftover = finalStates(modeEvents(in: wholeSession)).filter { $0.value }.keys
         XCTAssertTrue(leftover.isEmpty,
@@ -178,8 +197,8 @@ final class SessionTeardownTests: XCTestCase {
 
         // (b) The teardown alone must cover everything the session turned on. This is the assertion
         // that fails on HEAD: PROTOCOL.md §4 lists the teardown as `?1003l ?1002l ?1006l`, i.e. the
-        // three modes `writeMouseReporting(false)` handles _plus one fewer than it handles_ - 1016 is
-        // missing from the teardown although the enable path (Render.swift writeMouseReporting(true))
+        // three modes `writeInputModes(false)` handles _plus one fewer than it handles_ - 1016 is
+        // missing from the teardown although the enable path (Render.swift writeInputModes(true))
         // and the disable path (`false`) both mention it. The terminal keeps reporting in device
         // pixels for the rest of the pane's life.
         let turnedOffByTeardown = setOff(modeEvents(in: teardown))
@@ -204,7 +223,7 @@ final class SessionTeardownTests: XCTestCase {
 
     // MARK: - 2. the heal must repair what a kill -9 leaves behind
 
-    /// `kill -9` between `writeMouseReporting(true)` and the next prompt leaves the pane with mouse
+    /// `kill -9` between `writeInputModes(true)` and the next prompt leaves the pane with mouse
     /// reporting on, possibly mid-frame (`?2026h` open), hidden cursor and an APC that may never have
     /// been terminated. PROTOCOL.md §1 calls the prefix of `beginSession()` the repair for exactly
     /// that pane and promises re-running krd fixes it. So the heal has to reset every mode that a
@@ -236,7 +255,7 @@ final class SessionTeardownTests: XCTestCase {
                 so a pane whose previous krd was kill -9'd keeps that mode for the rest of its life.
                 PROTOCOL.md §1 says the heal is what repairs such a pane ("Re-running krd fixes such a \
                 pane automatically"), so it has to reset every mode a killed session can leave on, out \
-                of `ScreenWriter.mouseReset` - all four of them, not the three that happened to be \
+                of `ScreenWriter.inputReset` - all four of them, not the three that happened to be \
                 there before #134. A ?1016h left by the killed process survives the repair, and the \
                 *next* program in the pane gets device pixels from a terminal it never asked for them \
                 from.
@@ -356,18 +375,22 @@ final class SessionTeardownTests: XCTestCase {
     /// The property issue #134 asks for by name: "add a unit test that the enable set and the reset
     /// set are complementary".
     ///
-    /// Both strings are derived from `ScreenWriter.mouseModes` (the reset is that list reversed), so
+    /// Both strings are derived from `ScreenWriter.inputModes` (the reset is that list reversed), so
     /// this test is the lock on the derivation, not on a particular mode: same mode set, opposite
     /// polarity, and the reset is exactly the enable order backwards. A mode added to the list shows
-    /// up on both sides here; a mode added by hand to *one* string fails.
+    /// up on both sides here; a mode added by hand to *one* string fails. Issue #110 leans on
+    /// exactly this: 1004 joins `inputModes`, so it joins the enable set and the reset set at once.
     func testTheEnableSetAndTheResetSetAreComplementary() {
-        let enable = modeEvents(in: ScreenWriter.mouseEnable)
-        let reset = modeEvents(in: ScreenWriter.mouseReset)
+        let enable = modeEvents(in: ScreenWriter.inputEnable)
+        let reset = modeEvents(in: ScreenWriter.inputReset)
 
-        XCTAssertEqual(enable.map { $0.mode }, ScreenWriter.mouseModes,
-                       "mouseEnable must carry exactly the documented list, in its order")
-        XCTAssertTrue(enable.allSatisfy { $0.on }, "every escape in mouseEnable must set its mode")
-        XCTAssertTrue(reset.allSatisfy { !$0.on }, "every escape in mouseReset must reset its mode")
+        XCTAssertEqual(enable.map { $0.mode }, ScreenWriter.inputModes,
+                       "inputEnable must carry exactly the documented list, in its order")
+        XCTAssertEqual(ScreenWriter.inputModes, ScreenWriter.mouseModes,
+                       "with focus reporting off - the shipped default - the input-mode set *is* "
+                       + "the mouse set; 1004 is conditional and has no business here")
+        XCTAssertTrue(enable.allSatisfy { $0.on }, "every escape in inputEnable must set its mode")
+        XCTAssertTrue(reset.allSatisfy { !$0.on }, "every escape in inputReset must reset its mode")
 
         XCTAssertEqual(Set(enable.map { $0.mode }), Set(reset.map { $0.mode }),
                        "the same modes are enabled and reset; enable \(enable.map { $0.mode }), "
@@ -418,7 +441,7 @@ final class SessionTeardownTests: XCTestCase {
 
         for mode in [1003, 1002, 1006, 1016] {
             XCTAssertFalse(text.contains("\u{1B}[?\(mode)h"),
-                           "a session that never calls writeMouseReporting(true) sent ?\(mode)h")
+                           "a session that never calls writeInputModes(true) sent ?\(mode)h")
             XCTAssertFalse(events.contains { $0.mode == mode && $0.on },
                            "?\(mode) (\(Self.modeNames[mode] ?? "unknown")) is on in a stream that "
                            + "never enabled it")
@@ -431,6 +454,98 @@ final class SessionTeardownTests: XCTestCase {
             block, the four mouse modes, 25 cursor, 1049 alternate screen) - a mode that appears \
             here without an owner is a reset for something the session never turned on, and a mode \
             that goes missing is one a killed predecessor keeps.
+            """)
+    }
+
+    // MARK: - 6. DECSET 1004 is conditional (issue #110)
+
+    /// The half of #110 that must not move: with `focusReporting` off (the shipped default) a whole
+    /// session -- heal, frames, teardown -- carries no 1004 byte at all.
+    ///
+    /// "Balanced" would not be enough, and neither would "reset before it matters": `--no-input`,
+    /// `--selftest`, `--bench`, `--replay` and the wall never read stdin, so 1004 would only ever
+    /// send bytes to a reader that does not exist -- and the `--selftest` dump is a byte-exact
+    /// contract whose sha a single `?1004h`/`?1004l` would move. So the assertion is absence. It is
+    /// also the one thing `testASessionThatNeverEnablesMouseGainsNoModeBytes` cannot say: that test
+    /// pins a reset *set*, which keeps passing with 1004 in it as long as the set is edited too.
+    func testASessionWithoutInputEmitsNoFocusReportingByte() {
+        XCTAssertFalse(ScreenWriter.focusReporting,
+                       "the shipped default is `false`, and #110's byte contract depends on it")
+
+        let writer = ScreenWriter()
+        var bytes: [UInt8] = []
+        writer.sink = { bytes.append(contentsOf: $0) }
+        writer.beginSession()
+        for frame in 0..<2 {
+            writer.beginFrame()
+            writer.emit(tile(index: frame), sync: writer.perTileSync)
+            writer.endFrame()
+        }
+        writer.endSession()
+
+        let text = String(decoding: bytes, as: UTF8.self)
+        XCTAssertFalse(text.contains("?1004"), """
+            a session that never reads input sent a ?1004 sequence. The mode's whole purpose is to \
+            send `CSI I`/`CSI O` to a reader, and a `--no-input` / `--selftest` / `--bench` / \
+            `--replay` / wall session has none - and the `--selftest` dump is byte-exact, so this \
+            is a sha change too (issue #110). Such a session emits nothing for 1004.
+            stream = \(text.debugDescription)
+            """)
+        XCTAssertFalse(modeEvents(in: text).contains { $0.mode == 1004 },
+                       "not a single `CSI ? 1004 h|l` in a session with no input reader")
+    }
+
+    /// The other half: `focusReporting` on. 1004 joins the one input-mode list, so #134's single
+    /// derivation turns it on for input (`writeInputModes(true)`) and off in *both* session-level
+    /// sequences - the heal that repairs a killed predecessor's pane, and the teardown. Each half is
+    /// asserted where it lives, and the total is counted, so a mode reset in only one of the two
+    /// places cannot pass.
+    func testASessionWithInputResetsFocusReportingInTheHealAndTheTeardown() {
+        let previous = ScreenWriter.focusReporting
+        ScreenWriter.focusReporting = true
+        defer { ScreenWriter.focusReporting = previous }
+
+        // The list itself, before a byte is written: the mouse modes, then focus.
+        XCTAssertEqual(ScreenWriter.inputModes, ScreenWriter.mouseModes + [1004])
+        XCTAssertTrue(ScreenWriter.inputReset.hasPrefix("\u{1B}[?1004l"), """
+            the reset is the concatenated list reversed, so 1004 - last on the enable list - is the \
+            *first* reset. Got \(ScreenWriter.inputReset.debugDescription).
+            """)
+
+        let enableBytes = captureFd1 { ScreenWriter.writeInputModes(true) }
+        let enable = String(decoding: enableBytes, as: UTF8.self)
+        XCTAssertEqual(modeEvents(in: enable).map { $0.mode }, ScreenWriter.inputModes,
+                       "the enable path sends exactly `inputModes`, 1004 included")
+        XCTAssertTrue(enable.contains("\u{1B}[?1004h"),
+                      "`focusReporting = true` did not enable 1004")
+
+        let writer = ScreenWriter()
+        var bytes: [UInt8] = []
+        writer.sink = { bytes.append(contentsOf: $0) }
+        writer.beginSession()                      // the heal is the first thing a session writes
+        let teardownStart = bytes.count
+        writer.endSession()
+
+        let whole = String(decoding: bytes, as: UTF8.self)
+        let heal = whole.components(separatedBy: "\u{1B}[?1049h").first ?? ""
+        let teardown = String(decoding: bytes[teardownStart...], as: UTF8.self)
+        let resets = whole.components(separatedBy: "\u{1B}[?1004l").count - 1
+
+        XCTAssertTrue(heal.contains("\u{1B}[?1004l"), """
+            beginSession()'s heal does not reset ?1004: a pane whose previous krd was killed while \
+            focus reporting was on keeps sending `CSI I`/`CSI O` to the next program, and \
+            PROTOCOL.md §1 promises the heal repairs such a pane.
+            heal = \(heal.debugDescription)
+            """)
+        XCTAssertTrue(teardown.contains("\u{1B}[?1004l"), """
+            endSession() does not reset ?1004, so the mode outlives krd in the pane the shell gets \
+            back (PROTOCOL.md §4 - the teardown).
+            teardown = \(teardown.debugDescription)
+            """)
+        XCTAssertGreaterThanOrEqual(resets, 2, """
+            a beginSession/endSession round trip reset ?1004 \(resets) time(s): the heal and the \
+            teardown each own one, both out of `ScreenWriter.inputReset`.
+            stream = \(whole.debugDescription)
             """)
     }
 }

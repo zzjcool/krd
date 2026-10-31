@@ -58,6 +58,9 @@ krd --scale 1                # never adapt: always the pane's own pixels
 krd --scale 0.5              # capture half the pixels per side and let the terminal upscale:
                              # 4x fewer bytes on colour-heavy content, visibly softer text
 krd --display 1 --fps 30
+krd --unfocused-fps 1        # while the pane has no focus the picture drops to this rate (the
+                             # terminal reports focus with DECSET 1004: CSI I in, CSI O out):
+                             # 1 fps by default, 0 freezes it — a key or a click brings it back
 krd --no-input               # watch only
 krd --quality 70            # how much colour the picture may lose: 100 = lossless, 80 (default) =
                             # 5-6-5 on incompressible tiles, 70 = 5-5-5, 50 = 4-4-4 everywhere

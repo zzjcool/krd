@@ -54,6 +54,9 @@ krd --zoom 2 --zoom-follow   # ……指针碰到画面边缘时平移
 krd --scale 1                # 永不自适应：始终用 pane 自己的像素
 krd --scale 0.5              # 每边只采一半像素，交给终端放大：彩色重内容少 4 倍字节，文字明显变糊
 krd --display 1 --fps 30
+krd --unfocused-fps 1        # pane 没焦点时画面降到这个帧率（终端用 DECSET 1004 上报焦点：
+                             # CSI I 是获得焦点、CSI O 是失去焦点），默认 1 fps，0 就彻底冻住，
+                             # 敲一下键或点一下鼠标画面就回来
 krd --no-input               # 只看不动
 krd --no-quantise           # 保持严格无损（照片类画面字节数约 2.3 倍）——这是镜像的无损，
                             # 落地屏要无损是 --wall-quality 100
