@@ -75,7 +75,7 @@ Read the report, not the PNG. It prints one line per picture:
 
 ```
 frames=2  pane=2482x1518 px  pictures=4  misfits=0
-picture 1  cells=[29, 2, 87, 28] native=[1479, 924] fit=exact
+picture 1  cells=[29, 2, 87, 28] native=[2958, 1848] fit=2x
 ...
 placeholder cells rows 2..29 cols 29..115 (87x28)
 ```

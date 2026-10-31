@@ -19,6 +19,10 @@ agent/
 
 Nothing here is part of the product. It is build tooling that happens to need a Mac to run.
 
+Every verb writes into `artifacts/<run>/`, and `--run` defaults to `latest` — so a second run
+overwrites the first one's frames. Give a run a name when its evidence has to survive
+(`--run before`), and `kagent trace` reads the transcript of whichever one you name.
+
 ## The two machines
 
 | target | what it is | use it for |
