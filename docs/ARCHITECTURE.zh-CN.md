@@ -367,7 +367,8 @@ ScreenCaptureKit 帧，按 sample attachments 里的 status 区分（`idle` = �
 - `cap = ScreenCaptureKit 回调 − PTS`，在 sample handler 最前面测（`CMSampleBufferGetPresentationTimeStamp`
   和 `benchNowMs()` 同一个时钟基准）。10 fps 下它本身就有约 50 ms，所以「画面卡」通常不是编码器的锅。
 - `pipe = 回调 → 最后一个字节写出`，即我们对这一帧做的全部事情。
-- `e2e = cap + pipe`，就是状态栏上那个 `frame`。
+- `e2e = cap + pipe`，就是状态栏上那个 `frame`；`cap` 为 `—` 时状态栏叫它 `pipe`：没有采集那一半可加，
+  这个和就是 pipe 本身。
 
 `--mock` / `--replay` 没有 PTS，`cap` 显示 `—`（JSON 里是 `-1`）而不是 0：0 会被读成「采集极快」，
 而不是「没测」。
