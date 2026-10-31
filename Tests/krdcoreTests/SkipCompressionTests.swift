@@ -120,4 +120,85 @@ final class SkipCompressionTests: XCTestCase {
         policy.observe(index: 0, ratio: 0.96)
         XCTAssertGreaterThan(policy.level(for: 0), 0)
     }
+
+    // MARK: the fast scan (issue #94)
+
+    /// The pre-#94 predictor, verbatim: every byte of the tile, straight loop, `Int` deltas. Kept
+    /// here (not in the library) because it is the baseline the fast scan has to agree with, not the
+    /// product.
+    private func exhaustive(_ pixels: [UInt8], w: Int, h: Int) -> Bool {
+        guard w > 1, h > 0, pixels.count >= w * h else { return true }
+        let bpp = max(1, pixels.count / (w * h))
+        let rowBytes = w * bpp
+        var smooth = 0, compared = 0
+        for y in 0..<h {
+            let row = y * rowBytes
+            for i in row..<(row + rowBytes) {
+                let reference = y > 0 ? i - rowBytes : (i - bpp >= row ? i - bpp : -1)
+                guard reference >= 0 else { continue }
+                compared += 1
+                if abs(Int(pixels[i]) - Int(pixels[reference])) <= 4 { smooth += 1 }
+            }
+        }
+        guard compared > 0 else { return true }
+        return Double(smooth) / Double(compared) > 0.5
+    }
+
+    /// "Cheaper" must not become "different" (issue #94): the fast scan exits early, drops the
+    /// widen-to-`Int`, and uses a wrapping `UInt8` delta, so pin the agreement with the
+    /// straightforward loop on the fixtures — at the suite's 16x16 and at the benchmark's 136x132
+    /// tile, where the early exit actually fires.
+    func testFastPredictorAgreesWithTheStraightforwardOne() {
+        func gradientTile(_ w: Int, _ h: Int, bpp: Int) -> [UInt8] {
+            var out = [UInt8](repeating: 0, count: w * h * bpp)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let v = UInt8(min(255, x * 8)), o = (y * w + x) * bpp
+                    out[o] = v; if bpp > 1 { out[o + 1] = v }; if bpp > 2 { out[o + 2] = v }
+                }
+            }
+            return out
+        }
+        func noiseTile(_ w: Int, _ h: Int, bpp: Int) -> [UInt8] {
+            // The class's own deterministic xorshift, sized like a tile.
+            var x = UInt32(0x1234_5678)
+            var out = [UInt8](repeating: 0, count: w * h * bpp)
+            for i in 0..<out.count {
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5
+                out[i] = UInt8(truncatingIfNeeded: x)
+            }
+            return out
+        }
+        func textTile(_ w: Int, _ h: Int, bpp: Int) -> [UInt8] {
+            // The `text` content from Sources/krd/Bench.swift: glyph strokes on a flat page.
+            var out = [UInt8](repeating: 0, count: w * h * bpp)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let glyph = (x % 23 < 3 || y % 41 < 2) ? UInt8(20) : UInt8(245)
+                    let o = (y * w + x) * bpp
+                    out[o] = glyph; if bpp > 1 { out[o + 1] = glyph }
+                    if bpp > 2 { out[o + 2] = y % 97 < 2 ? 0 : glyph }
+                }
+            }
+            return out
+        }
+
+        let shapes = [(w: 16, h: 16), (w: 136, h: 132), (w: 8, h: 4), (w: 3, h: 5)]
+        let generators: [(String, (Int, Int, Int) -> [UInt8])] = [
+            ("text", textTile), ("noise", noiseTile), ("gradient", gradientTile),
+            ("flat", { w, h, bpp in [UInt8](repeating: 200, count: w * h * bpp) }),
+        ]
+        for (name, make) in generators {
+            for bpp in [3, 4] {
+                for shape in shapes {
+                    let pixels = make(shape.w, shape.h, bpp)
+                    let rect: TileRect = (x: 0, y: 0, w: shape.w, h: shape.h, col: 1, row: 1,
+                                          cols: shape.w, rows: shape.h)
+                    XCTAssertEqual(ScreenWriter.looksCompressible(pixels, rect: rect),
+                                   exhaustive(pixels, w: shape.w, h: shape.h),
+                                   "\(name) \(shape.w)x\(shape.h) bpp \(bpp): the sample changed the verdict")
+                }
+            }
+        }
+    }
 }

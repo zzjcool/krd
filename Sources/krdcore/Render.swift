@@ -499,28 +499,56 @@ public final class ScreenWriter {
         return compressible
     }
 
-    /// Would zlib find anything here? One pass, comparing every byte with the same channel of the
-    /// pixel above (or to its left, on the first row): zlib cannot win on content that changes every
-    /// pixel (hash noise, a video frame), and wins hugely on content where neighbouring pixels are
-    /// close — flat UI, text, and gradients, where the delta is 1 per pixel and the ratio is still
-    /// 45×. Measured fractions: hash noise ~3 %, text ~90 %, gradient 100 %.
+    /// Would zlib find anything here? Compare every byte with the same channel of the pixel above
+    /// (or to its left, on the first row): zlib cannot win on content that changes every pixel
+    /// (hash noise, a video frame), and wins hugely on content where neighbouring pixels are close —
+    /// flat UI, text, and gradients, where the delta is 1 per pixel and the ratio is still 45×.
+    /// Measured fractions: hash noise ~3 %, text ~90 %, gradient 100 %.
+    ///
+    /// The answer is a *majority* vote (`> 0.5` of `|delta| ≤ 4`), and a majority can be settled
+    /// before the last byte — with a proof, not an estimate. `total` (the number of comparisons the
+    /// tile has) is known before the first one, so once `2·smooth > total` no remaining byte can
+    /// change the answer, and once `2·(smooth + unread) <= total` it is already lost. On hash noise
+    /// (3 % smooth) and on text (90 %) that fires halfway through the tile; the pass that cost
+    /// 9.85 ms/frame on the pinned 2329x1452 layout (issue #94) costs about a third of that, and the
+    /// **verdicts are identical by construction**: same integer counters, same threshold, just an
+    /// earlier exit and `UInt8` arithmetic instead of `Int` conversions.
+    ///
+    /// Sampling is what issue #94 proposed, and it is *not* what this does. A 1-in-4 sample of the
+    /// first channel moves a tile that genuinely sits on the cut: the `photoReal` bench case (a
+    /// photograph's structure plus grain, so ~half of its deltas are within 4) changed 0.24 % of its
+    /// payload bytes under the sample — the byte gate in `bench/incompressible-sample-probe.swift`
+    /// and `krd --bench` catch that, a verdict-count claim on two content classes did not.
     static func looksCompressible(_ pixels: [UInt8], rect: TileRect) -> Bool {
         let w = rect.w, h = rect.h
         guard w > 1, h > 0, pixels.count >= w * h else { return true }
         let bpp = max(1, pixels.count / (w * h))
         let rowBytes = w * bpp
+        // Every byte but the first pixel of the first row has a reference to compare against.
+        let total = h * rowBytes - bpp
+        guard total > 0 else { return true }
         var smooth = 0, compared = 0
-        for y in 0..<h {
-            let row = y * rowBytes
-            for i in row..<(row + rowBytes) {
-                let reference = y > 0 ? i - rowBytes : (i - bpp >= row ? i - bpp : -1)
-                guard reference >= 0 else { continue }
-                compared += 1
-                if abs(Int(pixels[i]) - Int(pixels[reference])) <= 4 { smooth += 1 }
+        var decided: Bool?
+        pixels.withUnsafeBufferPointer { p in
+            for y in 0..<h {
+                let row = y * rowBytes
+                let start = y == 0 ? row + bpp : row
+                var i = start
+                while i < row + rowBytes {
+                    // Wrapping `UInt8` difference: `|a - b| <= 4` is `d <= 4 || d >= 252`, which
+                    // avoids a widen-to-Int per byte and is why this loop is not bound by the
+                    // conversion.
+                    let d = p[i] &- p[y == 0 ? i - bpp : i - rowBytes]
+                    if d <= 4 || d >= 252 { smooth += 1 }
+                    i += 1
+                }
+                compared += row + rowBytes - start
+                if 2 * smooth > total { decided = true; return }
+                if 2 * (smooth + (total - compared)) <= total { decided = false; return }
             }
         }
-        guard compared > 0 else { return true }
-        return Double(smooth) / Double(compared) > 0.5
+        if let decided { return decided }
+        return 2 * smooth > total
     }
 
     /// 5-6-5 colour with bit replication, still 3 bytes per pixel (issue #59).
