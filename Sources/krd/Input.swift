@@ -85,6 +85,15 @@ final class InputReader {
     /// for the mirrored Mac before the chrome was ever asked.
     var onChromeKey: ((UInt8) -> Bool)?
 
+    /// The terminal's own focus reports (`CSI I` / `CSI O`, DECSET 1004), and the same thing inferred
+    /// from a human input event (issue #110). `true` = the pane is in front again.
+    ///
+    /// Nothing about this reaches the remote desktop -- focus is about the *picture's* rate, never
+    /// about eating a keystroke -- so it is a notification, not a route. Asked for by the desk only
+    /// for a session that reads input (`ScreenWriter.focusReporting`); a terminal that never reports
+    /// focus simply never calls it, which is every terminal that was fine before this existed.
+    var onFocus: ((Bool) -> Void)?
+
     /// Is the chrome waiting for the second key of its chord (`Ctrl-\` then `s`/`d`/`f`/`l`/`?`/`q`)?
     ///
     /// The prefix state belongs to the chrome (`Desk.chromeKey` is its only writer, on this same
@@ -187,8 +196,9 @@ final class InputReader {
             """)
             return false
         }
-        // Only ask the terminal for mouse reports once we know we can read them back.
-        ScreenWriter.writeMouseReporting(true)
+        // Only ask the terminal for its reports (the mouse modes, plus focus reporting when the desk
+        // asked for it) once we know we can read them back.
+        ScreenWriter.writeInputModes(true)
         // Push the keyboard enhancements and ask which ones took. A terminal that does not know
         // the sequence ignores it and stays on the legacy encoding, so this is safe to send blind.
         ScreenWriter.writeKeyboardProtocol(true)
@@ -248,8 +258,9 @@ final class InputReader {
     private func loop() {
         defer {
             // Whatever made the loop return, the terminal goes back to the shell in a state that
-            // works: mouse reporting off, kitty flags off, termios restored.
-            ScreenWriter.writeMouseReporting(false)
+            // works: input reporting off (`?1004` included, when it was asked for), kitty flags off,
+            // termios restored.
+            ScreenWriter.writeInputModes(false)
             ScreenWriter.writeKeyboardProtocol(false)
             restore()
             stoppedSignal.signal()
@@ -367,6 +378,24 @@ final class InputReader {
     /// What one parsed event means for this machine (issue #45). The parser only says what the
     /// bytes were; the mapping, the IME policy, the click counter and the clipboard all live here.
     private func apply(_ event: Event) {
+        // Focus comes first, and before the chord: a focus report is not a key the chrome could take,
+        // and a human input event says "the person is here" whatever the terminal last reported
+        // (issue #110 I5). Any key, click or wheel counts, because a terminal that loses a `CSI I` --
+        // a multiplexer, a resize, a pane that never got one -- would otherwise leave the picture
+        // throttled until the terminal answered a report it does not send. Terminal *replies*
+        // (`keyboardFlags`, `statusReport`, `graphicReply`, `notice`, `osc`) are not input and must
+        // not count: a 1 Hz probe would then wake the picture forever.
+        switch event {
+        case let .focus(on):
+            onFocus?(on)
+            // Nothing else: no post, no trace line about the desktop. The reader's job for a focus
+            // report is over here (the `.focus` arm of the switch below is the exhaustiveness one).
+            return
+        case .key, .press, .text, .control, .mouse:
+            onFocus?(true)
+        default:
+            break
+        }
         // The chord is the chrome's before it is the desktop's (see `chromeChordByte`).
         if let chord = chromeChordByte(event), onChromeKey?(chord) == true { return }
         switch event {
@@ -394,6 +423,10 @@ final class InputReader {
             handleGraphicReply(reply)
         case let .notice(text):
             if trace { log(text) }
+        case .focus:
+            // Handled above, on the way in: focus is about the picture's rate, never about eating a
+            // keystroke or posting one (issue #110). This arm exists so the switch stays exhaustive.
+            break
         }
     }
 

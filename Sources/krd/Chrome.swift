@@ -139,6 +139,10 @@ struct ChromeMetrics {
     var title = ""
     var fpsTarget = 20
     var fps = 0.0
+    /// Whether the pane has the terminal's focus (`CSI I` / `CSI O`, DECSET 1004, issue #110). False
+    /// means the picture is throttled to `--unfocused-fps` -- 0 fps being a frozen picture -- so the
+    /// panel's `x/y fps` row is a cap being held and not a pipe that cannot keep up.
+    var focused = true
     /// The capture scale in effect, and whether it is allowed to move (issue #73: the default is
     /// adaptive, so a resolution that changes on its own has to be visible).
     var scale = 1.0
@@ -686,7 +690,8 @@ final class Chrome {
             line(next(), "bandwidth", String(format: "%.2f MB/s", m.mbps),
                  "\(m.kbPerFrame) KB last frame · \(m.tilesPerSec) tiles/s")
             line(next(), "frames", String(format: "%.1f / %d fps", m.fps, m.fpsTarget),
-                 String(format: "capture %.1f/s · dirty %d/%d tiles", m.captureFps, m.dirty, m.tilesTotal),
+                 String(format: "capture %.1f/s · dirty %d/%d tiles", m.captureFps, m.dirty, m.tilesTotal)
+                     + (m.focused ? "" : " · unfocused"),
                  m.fpsTarget > 0 && m.fps < Double(m.fpsTarget) * 0.85 ? .warn : .plain)
             // The split that answers "was it the capture or the write" (issue #52).
             let cap = m.capMs < 0 ? "cap — (no PTS)"

@@ -7,6 +7,14 @@ import krdcore
 
 struct Options {
     var fps = 20
+    /// The rate the picture drops to while the terminal reports focus-out (`CSI O`, DECSET 1004): the
+    /// pane is in the background, so nobody is looking at it. `0` freezes the picture instead.
+    ///
+    /// The default is 1 rather than 0 on purpose (issue #110): a focus-in report can be lost (a
+    /// multiplexer that ate it, a terminal that stopped answering), and a rate of 0 would then leave
+    /// the pane dead with no way back but a restart. At 1 fps a lost report costs one frame a second
+    /// until the next keystroke, which is also what wakes it (`InputReader.onFocus`).
+    var unfocusedFps = 1
     var displayIndex: Int? = nil
     var windowQuery: String? = nil
     /// How much the picture is magnified: 2 shows half of the source in each direction, at twice
@@ -188,6 +196,10 @@ func usage() -> String {
 
     usage: krd [options]
       --fps <n>           capture rate cap (default 20)
+      --unfocused-fps <n> the rate the picture drops to while the terminal reports focus-out
+                          (DECSET 1004, default 1): any key, click or wheel brings the full rate
+                          back; 0 freezes the picture instead; terminals that never report focus
+                          (tmux without `set -g focus-events on`) behave exactly as before
       --display <i>       display index from --list (default: the one under the pointer)
       --window <q>        capture a single window: numeric id or title substring
       --zoom <f>          magnify: 2 shows half the source at twice the density, cropped on
@@ -447,6 +459,11 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             // Parseable but out of range keeps the old normalisation (`--fps 0` was 1, not an
             // error); what used to be silent was a value that was not a number at all.
             options.fps = max(1, try intValue("--fps", args, &i, wants: "a whole number"))
+        case "--unfocused-fps":
+            // Unlike `--fps`, 0 is a documented rate here: it means "freeze the picture". Negative
+            // values keep the old shape of normalisation (clamped, not refused) for the same reason.
+            options.unfocusedFps = max(0, try intValue("--unfocused-fps", args, &i,
+                                                       wants: "a whole number"))
         case "--display":
             // Any integer is a parse; out-of-range is a live display set, which `DisplayPick`
             // already explains and falls back from -- not a typo to refuse here.
@@ -722,6 +739,21 @@ final class Desk {
     /// frames rather than a last-draw mark, because a mark quantises every rung down to a multiple
     /// of the capture period: 15 fps out of a 20 fps capture was 10 fps (issue #140).
     private var frameGate = FrameGate(fps: 20)
+    /// Whether the terminal says this pane has the focus (`CSI I` / `CSI O`, DECSET 1004, issue
+    /// #110). Written on the input thread and read on the capture queue, so it lives under
+    /// `stateLock` exactly like `viewport` and `previousFrame` do.
+    ///
+    /// `true` by default, and that is the whole compatibility story: a terminal that never reports
+    /// focus (or a multiplexer that swallows the reports) never moves this flag, so nothing about
+    /// the picture changes.
+    private var focused = true
+    /// Bumped on every real transition, so the capture queue can *notice* one without taking the
+    /// lock on every frame's worth of decisions: a frame that sees a new generation is the first
+    /// frame of the new rate, and it re-arms the gate and drops the previous frame (issue #110
+    /// point 5). Counted, not a timestamp: a transition is an event, not a duration.
+    private var focusGeneration = 0
+    /// The generation the capture queue last acted on. Owned by that queue alone, so no lock.
+    private var lastFocusGeneration = 0
     /// Frames and late frames since the last stats tick, for the `late` column.
     private var framesSinceTick = 0
     private var lateSinceTick = 0
@@ -957,6 +989,13 @@ final class Desk {
         }
         effectiveFps = options.fps
         frameGate = FrameGate(fps: options.fps)
+        // Focus reporting (`?1004`, issue #110) is asked for only by a session that reads input and
+        // has a remote desktop to read it for. Set once, here, before any `beginSession()`: the heal
+        // runs first and has to know whether it owns `?1004`, so a late decision would leave the
+        // pane in a mode the teardown does not reset. A session that reads no input, or the wall,
+        // never asks for a mode whose whole purpose is sending bytes to a reader that does not
+        // exist -- and `--selftest`'s sha256 is a byte contract that depends on it.
+        ScreenWriter.focusReporting = !options.noInput && !options.wall
         if options.qualityAuto {
             qualityGovernor = QualityGovernor(start: .init(quality: options.quality.value,
                                                            fps: options.fps))
@@ -3153,6 +3192,52 @@ final class Desk {
         return viewport
     }
 
+    // MARK: focus (issue #110)
+
+    /// A focus report from the terminal (`CSI O` / `CSI I`, DECSET 1004), called on the input
+    /// thread -- directly by the reader, and again by it for every human input event, because any
+    /// key, click or wheel means the person is here whatever the terminal last reported (I5).
+    ///
+    /// One line per *real* transition and nothing else (I6): a terminal that repeats its report --
+    /// some do on every resize, and every keystroke arrives here too -- must neither fill the log
+    /// nor reset the gate, so the early return is the common path and costs no log and no bump.
+    private func noteFocus(_ on: Bool) {
+        stateLock.lock()
+        if on == focused { stateLock.unlock(); return }
+        focused = on
+        focusGeneration += 1
+        // The rate in the line is the *target*, not a measurement: `--unfocused-fps` already capped
+        // by the rung in force, so `--fps 20 --unfocused-fps 30` says 20 and not the other way
+        // round. Computed under the same lock that saw the transition, so it cannot disagree with
+        // it; written after the unlock, because `Log.write` is I/O and the capture queue wants this
+        // lock.
+        let rate = on ? effectiveFps : min(effectiveFps, options.unfocusedFps)
+        stateLock.unlock()
+        if on {
+            Log.write("krd: pane focused again; the picture is back at \(rate) fps\n")
+        } else {
+            Log.write("krd: pane unfocused; the picture is at \(rate) fps\n")
+        }
+    }
+
+    /// The rate the picture is allowed to run at right now (issue #110).
+    ///
+    /// Focused, that is the rung the governor has taken the loop to (`effectiveFps`, which *is*
+    /// `--fps` unless `--quality auto` stepped down). Unfocused, the cap multiplies it **down** --
+    /// `min`, never a replacement -- so a session already at the 10 fps rung does not speed up to
+    /// `--unfocused-fps` while the pane is in the background. `--unfocused-fps 0` falls out of the
+    /// same expression as a frozen picture. Read under `stateLock`: the input thread writes it.
+    private var targetFps: Int {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return focused ? effectiveFps : min(effectiveFps, options.unfocusedFps)
+    }
+
+    /// `focused` as one reading, for the panel and the JSON (both on the main queue).
+    private var isFocused: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return focused
+    }
+
     // MARK: frame handling
 
     /// The pid events should be posted to, or nil once the target is gone.
@@ -3192,13 +3277,50 @@ final class Desk {
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
         if let card = loading { card.stop(); loading = nil }
         let started = benchNowMs()
-        // A frame-rate step from the governor is enforced here, before anything is encoded: the
-        // capture still delivers at `--fps` (ScreenCaptureKit's cadence is not worth reconfiguring
-        // mid-stream), and the frames the loop declines cost no zlib, no bytes and no `dirty` pass.
-        // `FrameGate.tookFrame` is called *below*, once the frame is known to change something: a
-        // frame that changes nothing must not consume the frame-rate slot (#95).
-        let governed = options.qualityAuto && effectiveFps < options.fps
-        if governed, !frameGate.owesFrame(at: started) { return }
+        // A frame-rate step -- the governor's rung, or the cap a focus-out puts on it -- is enforced
+        // here, before anything is encoded: the capture still delivers at `--fps`
+        // (ScreenCaptureKit's cadence is not worth reconfiguring mid-stream), and the frames the loop
+        // declines cost no zlib, no bytes and no `dirty` pass. `FrameGate.tookFrame` is called
+        // *below*, once the frame is known to change something: a frame that changes nothing must not
+        // consume the frame-rate slot (#95).
+        //
+        // A rung and a focus cap are the **same mechanism** (issue #110): a target rate with an
+        // owed-frame deadline. So the cap goes through this gate and never around it (#140, I3), and
+        // a focus transition is exactly "the target changed", which is what re-arms it.
+        stateLock.lock()
+        let focusChanged = focusGeneration != lastFocusGeneration
+        if focusChanged {
+            lastFocusGeneration = focusGeneration
+            // A new rate means a full repaint: while the pane was throttled or frozen the picture on
+            // screen is a patchwork of skipped changes, and a dirty-tile diff against the last frame
+            // we *did* draw would leave the rest of it stale (issue #110 point 5).
+            previousFrame = []
+        }
+        stateLock.unlock()
+        if focusChanged {
+            // A fresh gate owes a frame at once, so the new rate starts at the next captured frame --
+            // at most one `--fps` period, 50 ms at 20 fps -- instead of waiting out the deadline the
+            // *other* rate set. That is what makes focus-in immediate (issue #110 point 4).
+            frameGate = FrameGate(fps: max(1, targetFps))
+            // The governors are re-armed too: the frames that arrived while the pane was throttled
+            // were judged against a rate nobody was watching, and a resume must not read them as a
+            // pipe that lost ground and spend a rung on them. `settle(at:)` is the public re-arm
+            // they have (it releases the upgrade backoff); the rung itself is untouched, because
+            // focus only ever multiplies the rate down -- `--fps` and `--quality auto` keep the rung
+            // they had.
+            let now = benchNowMs() / 1000.0
+            qualityGovernor.settle(at: now)
+            governor.settle(at: now)
+        }
+        let target = targetFps
+        // `--unfocused-fps 0`: the picture is frozen. Nothing draws, which is the one rate the gate
+        // cannot express -- its period is finite, and a window of infinity is not a deadline. Every
+        // counter below stays where it is, as if no frame had arrived.
+        if target == 0 { return }
+        // `--quality auto` at the top rung is `target == options.fps`, so a fast link still gates
+        // nothing at all; any rate below `--fps`, from whichever of the two sources, is gated.
+        let gated = target < options.fps
+        if gated, !frameGate.owesFrame(at: started) { return }
         // Frames ScreenCaptureKit delivered to us, i.e. what `captureFps` is the rate of -- counted
         // here, before the layout guards, so it stays a different number from `framesHandled`
         // ("drawn") and from `framesSkipped` ("delivered, and changed nothing"), #95.
@@ -3273,7 +3395,7 @@ final class Desk {
         // the panel's `frames x/y fps` row and `framesTotal` all mean "drawn"), so it advances here
         // and not above the identical check — a frame that changed nothing is not handled.
         framesHandled += 1
-        if governed { frameGate.tookFrame(at: started) }
+        if gated { frameGate.tookFrame(at: started) }
 
         // Recording happens before the tile pass, i.e. it captures exactly the frames the
         // pipeline would render (post-dedupe, post-resize).
@@ -3667,7 +3789,16 @@ final class Desk {
         var m = chromeMetrics
         m.version = krdVersion
         m.target = targetLabel
-        m.fpsTarget = options.qualityAuto ? effectiveFps : options.fps
+        // The current target, not the configured one: `x/y fps` is a comparison, and while the pane
+        // is unfocused the picture really is being held at the cap, so showing `--fps` there would
+        // make a deliberate throttle read as a pipe that cannot keep up (issue #110). Focus only
+        // ever multiplies the rate down, so with the focus the row means exactly what it always did:
+        // the governor's rung under `--quality auto`, `--fps` otherwise.
+        let focusedNow = isFocused
+        m.focused = focusedNow
+        m.fpsTarget = focusedNow
+            ? (options.qualityAuto ? effectiveFps : options.fps)
+            : min(options.qualityAuto ? effectiveFps : options.fps, options.unfocusedFps)
         // Rates come from `sampleRates()`, which owns the one definition of what `fps`, `tiles/s`,
         // `MB/s` and the two starvation rates mean (issue #52).
         m.fps = lastRates.fps
@@ -3835,6 +3966,11 @@ final class Desk {
         reader.chromeOwns = { [weak self] row, col in
             self?.chromeOwns(row: row, col: col) ?? false
         }
+        // Focus reports (`CSI I` / `CSI O`, DECSET 1004, issue #110) are about the *picture*, never
+        // about the desktop: the reader hands them straight here, on the reader thread, and
+        // `noteFocus` is the one place that decides what a transition means. It is also called for
+        // every human input event, so a lost `CSI I` still wakes the picture on the next keystroke.
+        reader.onFocus = { [weak self] on in self?.noteFocus(on) }
         reader.trace = options.debug
         reader.ime = options.ime
         if options.debug {
