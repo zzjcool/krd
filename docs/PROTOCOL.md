@@ -392,21 +392,27 @@ krd *does* parse replies (issue #109) — the `APC` the graphics protocol answer
 
 - `APC G … ST` (`ESC _ G … ESC \`) becomes exactly one typed `Event.graphicReply`, is counted as a
   reply, and is never input: no byte of it reaches the mirrored desktop, terminator included.
-- The third byte decides, not a timer. `ESC _` followed by anything but `G` is the Alt-`_` keystroke
-  it always was, and `DCS`/`SOS`/`PM` (`ESC P`, `ESC X`, `ESC ^`) are **not** parsed at all: those
-  three prefixes are how a legacy terminal encodes Alt+P, Alt+X and Alt+^, so a legal key wins over a
-  sequence krd never asked for. They mean exactly what they meant before #109.
-- A reply that stops arriving is discarded together with its tail, never released. `ESC _` (or
-  `ESC ]`, a clipboard answer) sent on its own used to be typed as Alt+`_`, which legitimised the
-  rest: the next `G i=31;OK ST` arrived as keystrokes. A stalled `OSC` is now swallowed to `BEL` or
-  `ST`, a stalled `APC` to `ST`, and no byte up to that terminator becomes input.
-- Half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is the one thing still dropped on a timeout: 500 ms
-  (five idle polls of 100 ms) with no bytes, then it is discarded — not typed. A lone `ESC` is the
-  Esc key, and a complete `ESC x` is Alt+`x`, both immediately.
+- **A reply is `ESC _ G`, not `ESC _`.** The third byte decides: a `G` enters the reply scan, and
+  anything else is the Alt-`_` keystroke it always was. A *bare* `ESC _` — no third byte yet — is
+  the one undecided case: it is held for 600 ms, because a terminal may write the three bytes in
+  two pieces and typing the head would legitimise the tail, and then released as the Alt-`_` key
+  with everything after it typed normally. A keystroke is never held longer than that. `DCS`/`SOS`/
+  `PM` (`ESC P`, `ESC X`, `ESC ^`) are **not** parsed at all: those three prefixes are how a legacy
+  terminal encodes Alt+P, Alt+X and Alt+^, so a legal key wins over a sequence krd never asked for.
+- **A reply that stops arriving is discarded together with its tail** — a stalled `OSC` to `BEL` or
+  `ST`, a stalled `APC` to `ST` — and no byte up to that terminator becomes input. The discard is
+  **bounded** on both sides: 64 KiB (`maxEncodedOSC` for a clipboard reply, whose payload is
+  legitimately megabytes) and 1500 ms *without a byte*. Past either, it is abandoned: the keyboard
+  comes back, the swallowed bytes are gone, and one log line says so. An input path may never wedge.
+- Half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is the one other thing dropped on a timeout: 500 ms
+  with no bytes, then it is discarded — not typed. A lone `ESC` is the Esc key, and a complete
+  `ESC x` is Alt+`x`, both immediately.
 
 The bound this leaves: the bytes are safe, the reply itself can be *lost*. If a terminal writes a
-reply in pieces more than one idle poll (100 ms) apart, the head is discarded and the tail swallowed
-— nothing is typed and nothing is reported. A local pty writes a ~40 B reply in one go.
+reply in pieces more than 600 ms apart, the head is released as Alt-`_` and the rest is typed as
+keys; and a reply that goes quiet for 1500 ms mid-body loses its remaining bytes to the log. A local
+pty writes a ~40 B reply in one go, so neither happens in practice, and both leave a working
+keyboard — which is the property that matters (#109 round 3).
 
 The first refusal per image is logged once, where the log panel already is:
 

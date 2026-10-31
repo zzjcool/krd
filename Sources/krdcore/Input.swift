@@ -143,15 +143,37 @@ public final class InputParser {
     /// `buffer` on purpose: a lone `ESC` there is the Esc key to the read loop, and its `reset()`
     /// would drop the discard state in the middle of the sequence.
     private var discardSawESC = false
+    /// Bytes swallowed since the current discard began. Every discard is *bounded* (issue #109,
+    /// round 3): an input path that can swallow without a limit can swallow the keyboard, and a
+    /// reply is at most a few hundred bytes.
+    private var discarded = 0
+    /// The byte budget this discard may spend (`maxStringSequence`, or `maxEncodedOSC` for a
+    /// clipboard reply, whose payload is legitimately megabytes).
+    private var discardByteCap = maxStringSequence
+    /// When this discard last heard a byte (`benchNowMs`). Silence past
+    /// `replyDiscardIdleMs` — not total elapsed time, so a big OSC that keeps arriving is never
+    /// cut off — abandons it.
+    private var discardHeardAt: Double = 0
+    /// When the current buffer first failed to complete, so a half-arrived sequence can be given a
+    /// deadline. Reset by `feed`: the window runs from the last byte, not from the first.
+    private var stalledSince: Double = 0
+
+    /// True while an unfinished sequence's payload is being swallowed. The read loop logs the idle
+    /// ticks it drives; the parser owns the decision.
+    public var isDiscarding: Bool { discardingOSC || discardingString }
 
     public init() {}
 
     public func feed(_ bytes: [UInt8]) {
+        stalledSince = 0                            // the windows run from the last byte
+        discardHeardAt = 0                          // ... and so does a discard's idle clock
         buffer.append(contentsOf: bytes)
         drain()
     }
 
     public func feed(_ bytes: ArraySlice<UInt8>) {
+        stalledSince = 0
+        discardHeardAt = 0
         buffer.append(contentsOf: bytes)
         drain()
     }
@@ -162,6 +184,10 @@ public final class InputParser {
         discardingOSC = false
         discardingString = false
         discardSawESC = false
+        discarded = 0
+        discardByteCap = Self.maxStringSequence
+        discardHeardAt = 0
+        stalledSince = 0
     }
 
     /// What a buffer that stopped growing turned out to be.
@@ -170,38 +196,115 @@ public final class InputParser {
         case none
         /// One lone `ESC` — the Esc key, exactly as before issue #109.
         case escape
-        /// The head of a sequence that never finished. It is gone, and when the prefix could only
-        /// have been a reply (`OSC`, `APC`) every byte up to its terminator is now swallowed, so the
-        /// rest of that sequence cannot become input either.
+        /// Still undecided: held for one of the windows below, nothing typed and nothing dropped.
+        case pending
+        /// The head of a sequence that was a reply (or half a keystroke). It is gone, and when the
+        /// prefix could only have been a reply (`ESC _ G`, `OSC`) every byte up to its terminator is
+        /// now swallowed, so the rest of that sequence cannot become input either.
         case sequence
+        /// `ESC _` waited out `apcDecideMs` without the `G` that would have made it a reply, so it
+        /// was released as the legal Alt-`_` keystroke it is.
+        case released
+        /// A discard ran out of budget (bytes or silence) and was given up: the keyboard is back and
+        /// the parser has already emitted the `.notice` that says so.
+        case abandoned
     }
 
     /// True for the two prefixes whose tail can only be payload: `OSC` (`ESC ]`, a clipboard
-    /// reply) and the graphics `APC` (`ESC _`). A stalled one must be discarded, never released.
+    /// reply) and the graphics `APC` (`ESC _`). Being this prefix is *necessary* for a reply, never
+    /// sufficient — see `isReplyCandidate` and `resolveStall`.
     public static func isReplyPrefix(_ bytes: [UInt8]) -> Bool {
         bytes.count >= 2 && bytes[0] == 0x1B && (bytes[1] == 0x5D || bytes[1] == 0x5F)
     }
 
-    /// Resolve a sequence that stopped arriving half-way: `krd`'s read loop calls this when its idle
-    /// poll comes back empty and the buffer still holds an unfinished escape sequence (issue #109).
+    /// `ESC _ G`: the only three bytes that begin a reply (issue #109). A bare `ESC _` is **not** a
+    /// candidate. Nothing krd sends produces `ESC _` and then a pause before the `G`, so a bare one
+    /// is the legal Alt-`_` — and treating it as a reply is how a keystroke got swallowed forever.
+    public static func isReplyCandidate(_ bytes: [UInt8]) -> Bool {
+        bytes.count >= 3 && bytes[0] == 0x1B && bytes[1] == 0x5F && bytes[2] == 0x47
+    }
+
+    /// How long a bare `ESC _` is held waiting for the `G` that would make it a reply. A terminal
+    /// writes `ESC _ G` in one go, so this only ever elapses when no reply is coming; 600 ms is
+    /// longer than any terminal's inter-write gap and shorter than a human re-typing.
+    public static let apcDecideMs: Double = 600
+
+    /// How long half a *keystroke* (`ESC O`, `ESC [ 1 ; 5`) is held before it is dropped. This is
+    /// the 500 ms `docs/PROTOCOL.md` §8 quotes.
+    public static let keySequenceGraceMs: Double = 500
+
+    /// How long a discard may go *silent* before it is abandoned and the keyboard released. Counted
+    /// from the last byte, so a reply that keeps arriving is never cut off, while a keyboard that
+    /// stopped producing input cannot be swallowed for longer than this.
+    public static let replyDiscardIdleMs: Double = 1500
+
+    /// Resolve a sequence that stopped arriving: `krd`'s read loop calls this on every idle poll
+    /// (100 ms) and asks the same question each time, so the windows below are the only thing that
+    /// decides when a held buffer is given up (issue #109, round 3).
     ///
-    /// Nothing on the sequence path is typed — *not* the two bytes that used to be released as
-    /// Alt+`_` / Alt+`]`. Those are exactly how a reply starts: a terminal that writes `ESC _`,
-    /// pauses, and then sends `G i=31;OK ST` would have the prefix typed as a keystroke and the tail
-    /// parsed as keys, which is the leak this closes. Only a lone `ESC` has no tail, so it is the
-    /// only stalled buffer released as a key.
+    /// The policy, in full:
     ///
-    /// Same shape as #149's `discardingOSC`: the payload is swallowed by a discard state instead of
-    /// being handed to the ordinary byte loop, and `BEL` ends an `OSC` while an `APC` ends only at
-    /// `ST` (a `BEL` in an `APC` is payload).
-    public func resolveStall() -> StalledBytes {
-        let held = buffer
-        buffer.removeAll(keepingCapacity: true)
-        guard let first = held.first else { return .none }
-        if held.count == 1, first == 0x1B { return .escape }
-        if Self.isReplyPrefix(held) {
-            if held[1] == 0x5D { discardingOSC = true } else { discardingString = true }
+    /// 1. **A reply is `ESC _ G`, not `ESC _`.** A bare `ESC _` is held for `apcDecideMs` waiting
+    ///    for the deciding byte — that hold is what stops a reply split across two reads from being
+    ///    typed — and is then released as the Alt-`_` keystroke it always was, with everything after
+    ///    it typed normally. A third byte that is not `G` releases it at once (`parseEscape`).
+    /// 2. **Every discard is bounded.** A reply's payload is swallowed, but only within a byte
+    ///    budget (`maxStringSequence`, or `maxEncodedOSC` for an OSC) *and* an idle budget
+    ///    (`replyDiscardIdleMs`). Past either, the discard is abandoned, the keyboard comes back and
+    ///    one `.notice` says so. An input path may never wedge.
+    /// 3. **A reply that never terminates still never types its payload** (#127, #109): the bytes
+    ///    up to the abandon are dropped, never handed to the byte loop.
+    ///
+    /// Nothing on the sequence path is typed before the decision. Only a lone `ESC` — which has no
+    /// tail and cannot be anything else — is a key immediately.
+    public func resolveStall(now: Double = benchNowMs()) -> StalledBytes {
+        // A discard is resolved by silence, not by content: its buffer is empty by construction.
+        if isDiscarding {
+            if discardHeardAt == 0 { discardHeardAt = now }
+            let idle = now - discardHeardAt
+            guard idle >= Self.replyDiscardIdleMs else { return .pending }
+            emit(.notice("reply discard abandoned: no byte for \(Int(idle)) ms"
+                         + (discarded > 0 ? ", \(discarded) B dropped" : "")))
+            abandonDiscard()
+            return .abandoned
         }
+
+        let held = buffer
+        guard let first = held.first else {
+            stalledSince = 0
+            return .none
+        }
+        if held.count == 1, first == 0x1B {
+            buffer.removeAll(keepingCapacity: true)
+            stalledSince = 0
+            return .escape
+        }
+        if stalledSince == 0 { stalledSince = now }
+        let waited = now - stalledSince
+
+        // The undecided head. Held (policy 1) — and then, and only then, released as Alt-`_`.
+        if held.count == 2, first == 0x1B, held[1] == 0x5F {
+            guard waited >= Self.apcDecideMs else { return .pending }
+            buffer.removeAll(keepingCapacity: true)
+            stalledSince = 0
+            emit(.text("_", [.maskAlternate]))
+            return .released
+        }
+
+        // A reply, and only a reply, may latch a discard: `ESC ] …` (a clipboard answer) or
+        // `ESC _ G …` (the graphics reply). Both carry a payload that must never be typed.
+        if held.count >= 2, first == 0x1B, held[1] == 0x5D || Self.isReplyCandidate(held) {
+            buffer.removeAll(keepingCapacity: true)
+            stalledSince = 0
+            startDiscard(osc: held[1] == 0x5D, now: now)
+            return .sequence
+        }
+
+        // Half a keystroke: neither a reply nor a key, so it gets the grace and is then dropped.
+        // It latches no discard, so the next key is unaffected.
+        guard waited >= Self.keySequenceGraceMs else { return .pending }
+        buffer.removeAll(keepingCapacity: true)
+        stalledSince = 0
         return .sequence
     }
 
@@ -223,16 +326,19 @@ public final class InputParser {
 
     private func drain() {
         while true {
-            if discardingOSC {
-                guard let used = discardOSC() else { return }
-                buffer.removeFirst(used)
-                discardingOSC = false
-                continue
-            }
-            if discardingString {
-                guard let used = discardString() else { return }
-                buffer.removeFirst(used)
-                discardingString = false
+            if isDiscarding {
+                let before = buffer.count
+                guard let used = discardingOSC ? discardOSC() : discardString() else {
+                    // No terminator in this read: the discard functions have already emptied the
+                    // buffer, so every one of those bytes was payload. Spend it against the budget
+                    // (which may abandon the discard and hand the keyboard back), then wait — there
+                    // is nothing left here to parse.
+                    chargeDiscard(before)
+                    return
+                }
+                // A terminator ended the discard: it is over, whatever it cost.
+                buffer.removeFirst(min(used, buffer.count))
+                endDiscard()
                 continue
             }
             guard let first = buffer.first else { return }
@@ -305,16 +411,17 @@ public final class InputParser {
             if buffer.count > Self.maxOSCSequence {
                 emit(.notice("osc dropped: over cap"))
                 if let used = discardOSC() { return used }
-                discardingOSC = true
+                startDiscard(osc: true, now: benchNowMs())
                 return nil
             }
             return nil
         case 0x5F:                                  // APC: `ESC _ … ST`, of which only `ESC _ G` is ours
-            // `ESC _ G` is the *only* sequence krd ever asks a terminal to send (issue #109), and
-            // the third byte decides: a `G` enters the reply scan, anything else is the Alt-`_`
-            // keystroke this parser has always produced for it. The test is on the byte, not on
-            // a timer, so a keystroke is never held waiting for a terminator a keyboard will not
-            // send.
+            // `ESC _ G` is the *only* sequence krd ever asks a terminal to send (issue #109). A
+            // `G` on the third byte enters the reply scan; anything else is the Alt-`_` keystroke
+            // this parser has always produced for it. A *bare* `ESC _` (no third byte yet) is the
+            // one undecided case, and the read loop holds it for `apcDecideMs` (`resolveStall`) and
+            // then releases it as Alt+`_` — never as an unbounded discard, which would eat every
+            // following keystroke on a terminal whose Alt+`_` is just a keystroke.
             guard buffer.count >= 3 else { return nil }
             guard buffer[2] == 0x47 else { return altText() }
             return parseStringSequence()
@@ -359,7 +466,7 @@ public final class InputParser {
         if buffer.count > Self.maxStringSequence {
             emit(.notice("string sequence dropped: over cap"))
             if let used = discardString() { return used }
-            discardingString = true
+            startDiscard(osc: false, now: benchNowMs())
             return nil
         }
         // Still arriving: the body stays in `buffer` and nothing is emitted, so a reply split
@@ -371,6 +478,51 @@ public final class InputParser {
     /// fact that the sequence arrived: `krd` must never guess these bytes were input.
     private func handleStringSequence(_ body: String) {
         emit(.graphicReply(GraphicsReply(body: body)))
+    }
+
+    /// Open a discard: the payload from here to the terminator is swallowed, within a budget the
+    /// caller cannot forget to set. `OSC` carries a clipboard answer, which is legitimately
+    /// megabytes, so its byte budget is the reply cap rather than a few hundred bytes.
+    private func startDiscard(osc: Bool, now: Double) {
+        discardingOSC = osc
+        discardingString = !osc
+        // `discardSawESC` is deliberately untouched: when this is called from the over-cap path the
+        // discard functions have just scanned the same read and may have parked half an `ST` there.
+        discarded = 0
+        discardByteCap = osc ? Self.maxEncodedOSC : Self.maxStringSequence
+        discardHeardAt = now
+        stalledSince = 0
+    }
+
+    /// The discard ended the way a reply ends: at its terminator. Nothing to report, the budget goes
+    /// back for the next one.
+    private func endDiscard() {
+        discardingOSC = false
+        discardingString = false
+        discardSawESC = false
+        discarded = 0
+        discardByteCap = Self.maxStringSequence
+        discardHeardAt = 0
+    }
+
+    /// Spend `n` payload bytes against the current discard's budget. `false` means the budget is
+    /// gone: the discard is abandoned, the keyboard is back, and one `.notice` is the only trace of
+    /// the bytes that were thrown away (policy 2 of `resolveStall` — no input path may wedge).
+    @discardableResult
+    private func chargeDiscard(_ n: Int) -> Bool {
+        discarded += n
+        guard discarded > discardByteCap else { return true }
+        emit(.notice("reply discard abandoned: over \(discardByteCap) B dropped"))
+        abandonDiscard()
+        return false
+    }
+
+    /// Give up a discard without a terminator: everything buffered is payload and goes too, and the
+    /// next byte is input again. The caller has already said why in a `.notice`.
+    private func abandonDiscard() {
+        buffer.removeAll(keepingCapacity: true)
+        endDiscard()
+        stalledSince = 0
     }
 
     /// Swallow the body of an `APC` up to its `ST`, for the reason `discardOSC` documents — an

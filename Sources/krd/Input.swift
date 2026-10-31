@@ -180,13 +180,9 @@ final class InputReader {
     private let stopLock = NSLock()
     private var stopFlag = false
     private let stoppedSignal = DispatchSemaphore(value: 0)
-    /// 100 ms ticks with no bytes for the escape sequence sitting in `parser.buffer` (see `loop`).
-    private var idleReads = 0
-    /// How long half a *keystroke* is held before it is dropped: five of the 100 ms poll ticks, i.e.
-    /// 500 ms. A reply prefix does not wait at all — see `loop`. This is the number
-    /// `docs/PROTOCOL.md` §8 quotes.
-    private static let stallGraceTicks = 5
-
+    /// 100 ms ticks with no bytes: the only clock the idle decisions run on. The *policy* — how long
+    /// a bare `ESC _` may wait for its `G`, how long a discard may stay silent — lives in
+    /// `InputParser.resolveStall`, so the parser can be tested against a fake clock.
     private func loop() {
         defer {
             // Whatever made the loop return, the terminal goes back to the shell in a state that
@@ -202,17 +198,12 @@ final class InputReader {
             var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 100)
             if ready == 0 {
-                // An escape sequence that stopped arriving. Three things can look like this, and
-                // all three must leave the keyboard working (issue #109):
-                //
-                // - A lone `ESC` is the Esc key, exactly as before this change.
-                // - A *reply* prefix — `ESC ]` (OSC: a clipboard answer) or `ESC _` (the graphics
-                //   `APC` this issue is about) — is data, not input. The head is discarded and the
-                //   parser swallows everything up to the terminator, so the tail can never be
-                //   typed. Resolved on the first idle tick: waiting cannot make a reply more
-                //   likely, it only lets its tail arrive as keystrokes.
-                // - Half a keystroke (`ESC O`, `ESC [ 1 ; 5`) gets the grace below and is then
-                //   dropped, not released: a sequence that stopped is not a key either.
+                // An escape sequence that stopped arriving. `krd` decides *nothing* here any more:
+                // `resolveStall` holds it, releases it, drops it or abandons its discard on its own
+                // deadlines (issue #109, round 3), and the invariant it enforces is that every one
+                // of those ends — a bare `ESC _` becomes the Alt-`_` keystroke it is, and a reply's
+                // discard is bounded in bytes and in silence, so a keystroke is never swallowed
+                // forever.
                 //
                 // Nothing here resets the parser and keeps parsing the remainder: `reset()` drops
                 // the buffered head and the *rest* of the sequence then arrives as input, which is
@@ -220,28 +211,25 @@ final class InputReader {
                 let held = parser.buffer
                 if held.count == 1, held[0] == 0x1B {
                     parser.reset()
-                    idleReads = 0
                     postKey(Keys.esc, [])
                     continue
                 }
-                if held.count > 1 {
-                    let isReply = InputParser.isReplyPrefix(held)
-                    idleReads = isReply ? Self.stallGraceTicks : idleReads + 1
-                    if idleReads >= Self.stallGraceTicks {
-                        if trace {
-                            log(isReply
-                                ? "discarded the rest of a reply that stopped arriving (\(held.count) B)"
-                                : "dropped an unterminated escape sequence (\(held.count) B)")
-                        }
-                        parser.resolveStall()
-                        idleReads = 0
+                let outcome = parser.resolveStall()
+                if trace {
+                    switch outcome {
+                    case .none, .escape, .pending, .abandoned:
+                        break                       // `abandoned` emitted its own `.notice`
+                    case .released:
+                        log("released a stalled `ESC _` as the Alt+_ keystroke")
+                    case .sequence:
+                        // A reply latched a discard; half a keystroke simply went away.
+                        log(held.count >= 2 && (InputParser.isReplyCandidate(held) || held[1] == 0x5D)
+                            ? "discarded the rest of a reply that stopped arriving (\(held.count) B)"
+                            : "dropped an unterminated escape sequence (\(held.count) B)")
                     }
-                    continue
                 }
-                idleReads = 0
                 continue
             }
-            idleReads = 0
             let n = Darwin.read(STDIN_FILENO, &chunk, chunk.count)
             if n <= 0 { return }
             if trace {
