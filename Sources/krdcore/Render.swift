@@ -709,10 +709,35 @@ public final class ScreenWriter {
         // 1. Transmit only - a placeholder image must not carry a placement of its own.
         appendTransmit(id: id, payload: payload, width: width, height: height,
                        compressed: true, channels: panelFormat.protocolChannels)
-        // 2. The virtual placement: the cell rectangle the picture should fill.
+        // 2. The virtual placement and 3. the placeholder cells, exactly as a re-place does them.
+        placePanelAsPlaceholder(id: id, placementID: placementID, row: row, col: col, cols: cols,
+                                rows: rows, paneCols: paneCols, paneRows: paneRows, sync: false)
+        if sync { append("\u{1B}[?2026l") }
+        return payload.count
+    }
+
+    /// The **transport half** of a placeholder picture: the virtual placement plus the invisible
+    /// cells, with no payload on the wire (issue #100).
+    ///
+    /// Why this exists as its own call: with `U=1` the image data and the virtual placement stay in
+    /// the terminal, so a repaint whose picture *and* cell rectangle are unchanged has nothing to
+    /// transmit — but the text grid blanks those cells every frame (`WallCanvas` draws `clear` where
+    /// a picture goes), and a placeholder cell that is not rewritten is a cell the terminal no longer
+    /// associates with the image. So a reused panel is re-placed, never re-sent. The bytes this
+    /// writes must be exactly the tail `emitPanelAsPlaceholder` used to write, which is why that
+    /// function now calls this one instead of holding its own copy.
+    ///
+    /// No byte accounting: nothing here is a payload, and counting the grid as one would make the
+    /// wall's `B payload` line lie about what a skipped panel costs.
+    public func placePanelAsPlaceholder(id: Int, placementID: Int, row: Int, col: Int,
+                                        cols: Int, rows: Int, paneCols: Int, paneRows: Int,
+                                        sync: Bool = true) {
+        guard cols > 0, rows > 0 else { return }
+        if sync { append("\u{1B}[?2026h") }
+        // The virtual placement: the cell rectangle the picture should fill.
         appendAPC("Gi=\(id),p=\(placementID),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)")
-        // 3. The placeholder cells, clipped so this never writes the final cell of the final row (a
-        //    pending wrap there scrolls the grid and takes every placement on it one row up).
+        // The placeholder cells, clipped so this never writes the final cell of the final row (a
+        // pending wrap there scrolls the grid and takes every placement on it one row up).
         let r = (id >> 16) & 0xFF, g = (id >> 8) & 0xFF, b = id & 0xFF
         let colour = "\u{1B}[38;2;\(r);\(g);\(b)m"
         for line in 0..<rows {
@@ -732,7 +757,6 @@ public final class ScreenWriter {
             append("\u{1B}[39m")
         }
         if sync { append("\u{1B}[?2026l") }
-        return payload.count
     }
 
     /// One **tile** as a unicode placeholder - the mirror's transport, the same shape as the wall's

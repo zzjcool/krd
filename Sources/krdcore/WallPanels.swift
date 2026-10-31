@@ -8,7 +8,10 @@ import Foundation
 public struct WallPanel: Equatable {
     /// Where a picture's pixels come from. The ids are the window server's own: a display number,
     /// or a window number (`kCGWindowNumber`).
-    public enum Source: Equatable {
+    ///
+    /// `Hashable` because it is half of a `PanelKey` (issue #100): the picture cache is keyed by
+    /// "photographed what, in what shape".
+    public enum Source: Equatable, Hashable {
         case display(UInt32)
         case window(UInt32)
     }
@@ -16,6 +19,10 @@ public struct WallPanel: Equatable {
     /// 0 is the stage, 1... are the cards of the current page in the layout's order.
     public let slot: Int
     public let source: Source
+    /// What the source's pixels depend on beyond its id — its size, and for a window its bounds and
+    /// title. Carried through from `PanelSource` so a repaint can tell "the same picture" from "the
+    /// same window, moved" without asking the window server again (`PanelKey`).
+    public let stamp: PanelSourceStamp
     /// The cells the picture must fill exactly: mask rect == picture rect, so a failing capture
     /// never reflows the wall.
     public let rect: CellRect
@@ -29,6 +36,15 @@ public struct WallPanel: Equatable {
     /// delete is ever needed (and `a=d` drops the whole image set on Herdr and rex — Render.swift).
     public var imageID: Int { 5000 + slot }
     public var placementID: Int { 9000 + slot }
+
+    /// The picture this panel wants, as the cache keys it (issue #100).
+    ///
+    /// `quality` and `rounded` are the process-wide knobs (`WallPictures.quality`/`.square`) rather
+    /// than panel geometry: they change the pixels, so they belong in the key, but the panel is a
+    /// pure layout value and does not know them.
+    public func key(quality: Int, rounded: Bool) -> PanelKey {
+        PanelKey(panel: self, quality: quality, rounded: rounded)
+    }
 }
 
 /// A source, resolved by the caller: the painter knows which display is on stage and which windows
@@ -42,10 +58,17 @@ public struct PanelSource: Equatable {
     public let kind: Kind
     /// Width / height of the source in its own pixels.
     public let aspect: Double
+    /// The source's own shape (size, and a window's bounds and title): the part of a picture's
+    /// identity the layout cannot see (`PanelSourceStamp`). Defaulted so a caller that only has an
+    /// id and an aspect (a test, a mock) still compiles — such a source simply never matches a real
+    /// one in the picture cache, which is the safe direction.
+    public let stamp: PanelSourceStamp
 
-    public init(kind: Kind, aspect: Double) {
+    public init(kind: Kind, aspect: Double,
+                stamp: PanelSourceStamp = PanelSourceStamp(kind: .display(width: 0, height: 0))) {
         self.kind = kind
         self.aspect = aspect
+        self.stamp = stamp
     }
 
     /// A source whose size is not known yet (a display that reports 0): no picture, no crash.
@@ -126,7 +149,7 @@ public enum WallPanels {
         // clip its own left column), so the panel states the offsets it actually has.
         let picture = PanelFit(contentWidth: fit.contentWidth, contentHeight: fit.contentHeight,
                                originX: 0, originY: 0, cellRect: fit.cellRect)
-        return WallPanel(slot: slot, source: id, rect: fit.cellRect,
+        return WallPanel(slot: slot, source: id, stamp: source.stamp, rect: fit.cellRect,
                          pixelWidth: fit.contentWidth, pixelHeight: fit.contentHeight, fit: picture)
     }
 }

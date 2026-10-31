@@ -65,11 +65,110 @@ enum WallPictures {
         return ScreenWriter.quantise(pixels, bits: bits, bytesPerPixel: 4)
     }
 
-    static func capture(_ panels: [WallPanel]) async -> (pictures: [Picture],
-                                                          failures: [Int: PanelCaptureError]) {
+    /// The pictures a wall already has, and what it already put on screen (issue #100).
+    ///
+    /// Two maps, because a repaint asks two different questions:
+    /// - `byKey` — "do I already have this picture?" Keyed by `PanelKey`, i.e. by *what the picture
+    ///   is* (source, the source's own shape, the size asked for, the quality rung, the corner
+    ///   shape), never by where it is placed. A page step changes placement for nothing and identity
+    ///   for the cards, so the stage is never re-photographed and a window that stays on the page
+    ///   keeps its payload.
+    /// - `sent` — "is that same picture already at this slot, in this rectangle?" Keyed by slot,
+    ///   because an image id is per slot: if slot 2 now shows a different window, the payload for
+    ///   it has to go out again even though the picture itself is cached.
+    ///
+    /// Not a stream, not a loop: the wall captures on change, so this is a memo between two paints
+    /// and it is cleared whenever the terminal's images are (`Desk.runWall`, right after the
+    /// `writer.clear()` that drops them).
+    final class PanelCache {
+        /// How many pictures are worth keeping. A picture is RGBA, so 16 of the biggest panel the
+        /// wall can ask for (`WallPictures.maxSide` 4096 on both axes would be 64 MiB each — the real
+        /// ones are a pane's worth) bounds the memo at roughly a desktop's card count plus a page or
+        /// two of history: a two-page back-and-forth stays free, and a model that keeps growing
+        /// cannot grow this cache with it.
+        static let capacity = 16
+
+        private var byKey: [PanelKey: Picture] = [:]
+        /// Least recently used first: a hit or a store moves its key to the end, and the front is
+        /// what `store` drops when the cap is reached.
+        private var order: [PanelKey] = []
+        private var sent: [Int: (key: PanelKey, rect: CellRect)] = [:]
+
+        func picture(for key: PanelKey) -> Picture? {
+            guard let picture = byKey[key] else { return nil }
+            Self.touch(&order, key)
+            return picture
+        }
+
+        func store(_ picture: Picture, _ key: PanelKey) {
+            byKey[key] = picture
+            Self.touch(&order, key)
+            // Eviction forgets the *capture* cache only. `sent` keeps its entry because the terminal
+            // still holds that picture: an evicted key costs one re-capture, and a panel that is
+            // already on screen must never be re-emitted because its pixels fell out of the memo.
+            while order.count > Self.capacity {
+                byKey.removeValue(forKey: order.removeFirst())
+            }
+        }
+
+        private static func touch(_ order: inout [PanelKey], _ key: PanelKey) {
+            if let at = order.firstIndex(of: key) { order.remove(at: at) }
+            order.append(key)
+        }
+
+        /// Is this key's picture already placed on this slot at this exact rectangle? Both halves
+        /// matter: the key alone is "the terminal holds the pixels", the rectangle is "where it
+        /// draws them" — a moved placement must be re-emitted.
+        func isOnScreen(slot: Int, key: PanelKey, rect: CellRect) -> Bool {
+            guard let placed = sent[slot] else { return false }
+            return placed.key == key && placed.rect == rect
+        }
+
+        func didPlace(slot: Int, key: PanelKey, rect: CellRect) {
+            sent[slot] = (key: key, rect: rect)
+        }
+
+        /// This slot no longer shows the picture it recorded — it paints a mask (the capture failed),
+        /// so the text layer has written over those cells.
+        ///
+        /// Without this, `sent` outlives a failed capture and the *next* paint of the same window
+        /// skips the emit ("already on screen") — and the reader keeps the mask on top of a picture
+        /// that is not there. The captured payload stays in `byKey`: the picture is not wrong, it is
+        /// just not on screen any more.
+        func forget(slot: Int) {
+            sent.removeValue(forKey: slot)
+        }
+
+        /// Forget everything: the terminal no longer holds these images (the wall dropped them, or a
+        /// new process is painting a pane that used to hold a mirror's pictures).
+        func reset() {
+            byKey.removeAll()
+            order.removeAll()
+            sent.removeAll()
+        }
+
+        /// How many distinct pictures are cached — the number a test (and the log) can check.
+        var count: Int { byKey.count }
+    }
+
+    static func capture(_ panels: [WallPanel], cache: PanelCache? = nil)
+        async -> (pictures: [Picture], failures: [Int: PanelCaptureError], reused: Set<Int>) {
         var pictures: [Picture] = []
         var failures: [Int: PanelCaptureError] = [:]
+        var reused: Set<Int> = []
         for panel in panels {
+            // What this panel's pixels would be, before spending a capture on finding out.
+            let key = panel.key(quality: Self.quality.value, rounded: !Self.square)
+            if let cached = cache?.picture(for: key) {
+                // The *current* panel with the cached pixels: the picture is what a slot wants drawn,
+                // and a panel that kept its key but moved keeps its payload — not its old rectangle.
+                pictures.append(Picture(panel: panel, pixels: cached.pixels,
+                                        width: cached.width, height: cached.height))
+                reused.insert(panel.slot)
+                Log.write("krd: wall slot \(panel.slot) picture reused "
+                          + "\(cached.width)x\(cached.height) px (\(panel.stamp.label))\n")
+                continue
+            }
             do {
                 // Asked in the *content's* aspect, so ScreenCaptureKit's own scaling produces the
                 // picture at exactly the size it will occupy and nothing is cropped (P0: SCK scales
@@ -94,9 +193,11 @@ enum WallPictures {
                               + "\(width)x\(height) px\n")
                     // The demo takes the same path as a capture, quantisation included: a byte count
                     // measured on the demo is only worth reporting if it is the real encoder's.
-                    pictures.append(Picture(panel: panel,
-                                            pixels: Self.quantised(pixels, quality: Self.quality),
-                                            width: width, height: height))
+                    let picture = Picture(panel: panel,
+                                          pixels: Self.quantised(pixels, quality: Self.quality),
+                                          width: width, height: height)
+                    cache?.store(picture, key)
+                    pictures.append(picture)
                     continue
                 }
                 let image: CGImage
@@ -140,9 +241,11 @@ enum WallPictures {
                 guard canvas.count == raster.width * raster.height * 4 else {
                     throw PanelCaptureError.noPixelBuffer
                 }
-                pictures.append(Picture(panel: panel,
-                                        pixels: Self.quantised(canvas, quality: Self.quality),
-                                        width: raster.width, height: raster.height))
+                let picture = Picture(panel: panel,
+                                      pixels: Self.quantised(canvas, quality: Self.quality),
+                                      width: raster.width, height: raster.height)
+                cache?.store(picture, key)
+                pictures.append(picture)
             } catch {
                 let reason = PanelCapture.classify(error)
                 failures[panel.slot] = reason
@@ -153,6 +256,6 @@ enum WallPictures {
                 Log.write("krd: wall slot \(panel.slot) has no picture: \(reason); \(error)\n")
             }
         }
-        return (pictures, failures)
+        return (pictures, failures, reused)
     }
 }
