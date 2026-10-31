@@ -143,7 +143,7 @@ KRD_Q=0 krd --selftest --no-input      # watch replies in the pane, nothing is t
 
 ## 5. `--bench` — the encoder, without a terminal
 
-`krd --bench` runs the real tile pipeline (dedupe → dirty → extract → zlib → base64 → escapes) on
+`krd --bench` runs the real tile pipeline (dedupe → dirty → extract → compress → base64 → escapes) on
 synthetic frames and prints bytes and milliseconds per case, with p50/p99 over `--rounds` frames. It
 exits by itself and needs no tty, so it is the way to compare two builds:
 

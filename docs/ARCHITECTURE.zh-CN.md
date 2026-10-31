@@ -251,7 +251,10 @@ y0 = round(ty*tileRows * cellH * scale);  y1 = round((ty*tileRows + cy) * cellH 
 `x1 - x0`，而不是按比例切帧）。这正是终端不能原谅的另一半：按“一图素一设备像素”画的终端没办法拉
 伸这个差额，瓦片的图像只要比它的格子少一个像素，就会在那块瓦片的边上露一条背景带（issue #86）。
 `scale` 把矩形和帧按同一比例缩小——而没法把它拉回去的传输路径会通过 `make(fillsCells:)` 直接要
-格子本身的大小。占位符网格就是这种路径，所以 `--scale < 1` 永远不会把一个占位符帧变小。
+格子本身的大小。占位符网格就是这种路径，但**只在按「一图素一设备像素」画图的终端上**：那里
+`--scale < 1` 永远不会把一个占位符帧变小。格子是按**点**报上来的终端会把图按自己的尺寸画、再缩进
+格子框里，那里的 `--scale` 仍然只是带宽，帧就是格子的 `scale`（`--mock --placeholders --scale 0.8
+--pane 137x44` 打出 `frame 877x550 px`，而格子框是 1096x688）。
 
 ### 缩放：少看一点，但按原密度看
 
@@ -263,23 +266,22 @@ pane 的实测值，见 `--debug` 那行）。
 fullRect   = 显示器 bounds，或 --window 的窗口 frame
 focus      = --zoom-at x,y  |  指针（若在 fullRect 内）  |  中心
 sourceRect = Viewport.crop(full: fullRect, scale: zoom, focus: focus)      // 始终 clamp 在 fullRect 内
-pixelW/H   = 裁剪区的点 × min(fit, 1) × --scale   // 源变小，输出也跟着变小
+pixelW/H   = 裁剪区的格子 × cell × --scale   // 源变小，输出就是那些格子
 ```
 
 三个值得知道的后果：
 
-1. **裁剪发生在采集端**（`SCStreamConfiguration.sourceRect`，macOS 14+），所以放大后每帧拷贝的像素
-   比「整屏塞进 pane」更少，没有任何 CPU 放大。
+1. **裁剪发生在采集端**（`SCStreamConfiguration.sourceRect`，macOS 14+），所以放大后向合成器要的是更
+   小的一块桌面，而不是更少的像素（见第 3 条）。
 2. **交互只会更准，而且输入代码一行没改。** `Viewport.point(forCell:)` / `point(forPixel:)` 本来就按
    `sourceRect` 归一化，裁剪区一变，点击就自动落在正确位置：`--zoom 2` 下一个格子覆盖的桌面点少一半。
-3. **输出随裁剪区一起变小。** `pixelW`/`pixelH` 的上界是**裁剪区**的点数，不是窗口的、也不是 pane
-   的格子：`--zoom 2` 下 1024x678 pt 的窗口只采 512x339 pt，于是流就是 512x339 px，由终端把它拉伸
-   到整个 pane。反过来把整帧尺寸喂给布局，就等于向 ScreenCaptureKit 要 1024x678 px 的 512x339 pt
-   裁剪区——2 倍上采样、4 倍字节，且没有任何额外细节（#73 修复，`--debug` 里表现为
-   `source 512x339 pt -> 512x339 px`）。终端如何使用这些像素仍是它自己的选择，所以两种情况下画面
-   都铺满 pane。 「放大后采集尺寸减半」说的是以 pt 计的源矩形；`pixelW`/`pixelH` 是终端
-   能显示的像素数，不会跟着变。Retina 上超过约 2.7x 后，pane 的像素比裁剪区的点还多，画面会被轻微放大
-   —— 真正的 1:1 密度在 `屏幕像素 / pane 像素` 处到达，不在无穷远。
+3. **裁剪改变的是密度，不是帧的大小。** `pixelW`/`pixelH` 是图占的格子 × 格子尺寸（再乘 `--scale`），
+   所以它们**不会**随裁剪区变小：`--zoom 2` 下 1024x678 pt 的窗口通过 512x339 pt 的 `sourceRect` 采进
+   同样多的 pane 像素，于是一个帧像素每边只对应半个桌面点——细节在裁剪里，不在请求里。`--debug` 两半都
+   打（先 `source 512x339 pt`，再打帧）。#73 拿掉的是反过来的错误：把整帧尺寸喂给布局，等于为一个
+   512x339 pt 的裁剪区要四倍的像素，而那点放大流本来就做（#121），多出来的像素里没有细节。
+   Retina 上超过约 2.7x 后，pane 的像素比裁剪区的点还多，画面会被轻微放大——真正的 1:1 密度在
+   `屏幕像素 / pane 像素` 处到达，不在无穷远。
 
 `--zoom-follow` 在指针进入画面外圈 15% 时平移裁剪区，而且只平移到刚好把指针放回那条边上（平移，不是追着
 跑）。平移走的是 `SCStream.updateConfiguration`（`Capturer.updateSource`），不再 stop/start 整条流：

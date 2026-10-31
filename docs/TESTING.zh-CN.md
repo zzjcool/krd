@@ -125,7 +125,7 @@ KRD_Q=0 krd --selftest --no-input      # watch replies in the pane, nothing is t
 
 ## 5. `--bench` —— 不接终端测编码器
 
-`krd --bench` 在合成帧上跑真实的瓦片流水线（提取 → zlib → base64 → 转义序列），逐场景打印字节数和
+`krd --bench` 在合成帧上跑真实的瓦片流水线（提取 → compress → base64 → 转义序列），逐场景打印字节数和
 毫秒数。它自己退出、不需要 tty，所以是横向对比两个构建的办法：
 
 ```sh

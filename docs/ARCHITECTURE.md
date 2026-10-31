@@ -285,7 +285,11 @@ cannot forgive: one that draws an image pixel per device pixel has no way to str
 so a tile image a pixel short of its box shows as a column of background at that tile's edge (issue
 #86). `scale` shrinks the rects and the frame by the same factor - a transport that cannot stretch
 that back asks `make(fillsCells:)` for the cell box itself. A placeholder grid is such a transport,
-so `--scale < 1` never shortens a placeholder frame.
+but only on a terminal that draws one image pixel per device pixel: there `--scale < 1` never
+shortens a placeholder frame. A terminal whose cell arrived in *points* draws the image at its own
+size and scales it into the cell box, so `--scale` stays bandwidth and the frame really is `scale`
+of the box (`--mock --placeholders --scale 0.8 --pane 137x44` prints `frame 877x550 px` underneath a
+1096x688 cell box).
 
 ### Zoom: showing less at full density
 
@@ -297,23 +301,23 @@ instead of 0.67 (measured on a 1512x982 pt display, 1020x792 px pane — see the
 fullRect   = display bounds, or the window frame with --window
 focus      = --zoom-at x,y  |  the pointer if it is inside fullRect  |  the centre
 sourceRect = Viewport.crop(full: fullRect, scale: zoom, focus: focus)      // clamped to fullRect
-pixelW/H   = the crop's points x min(fit, 1) x --scale   // the *source* shrinks, so the output does
+pixelW/H   = the crop's cells x cell x --scale   // the *source* shrinks; the output is the cells
 ```
 
 Three consequences worth knowing:
 
 1. **The crop happens on the capture side** (`SCStreamConfiguration.sourceRect`, macOS 14+), so a
-   zoomed frame copies fewer pixels than a fitted one. Nothing is upscaled on the CPU.
+   zoomed view asks the compositor for a smaller piece of the desktop - not for fewer pixels (§3).
 2. **Interaction improves, and no input code changed.** `Viewport.point(forCell:)` and
    `point(forPixel:)` already normalise against `sourceRect`, so a click maps into the crop as soon
    as the crop is right: at `--zoom 2` a cell covers half the desktop points.
-3. **The output shrinks with the crop.** `pixelW`/`pixelH` are bounded by the *crop's* points, not by
-   the window's and not by the pane's cells: at `--zoom 2` a 1024x678 pt window captures 512x339 pt,
-   so the stream is 512x339 px and the terminal stretches that into the pane. Handing the layout the
-   full frame's size instead asks ScreenCaptureKit for 1024x678 px out of a 512x339 pt crop — a 2x
-   upscale at four times the bytes for no extra detail (fixed in #73, visible in `--debug` as
-   `source 512x339 pt -> 512x339 px`). What the terminal does with those pixels is still its own
-   choice, which is why the picture keeps filling the pane either way.
+3. **The crop changes the density, not the frame's size.** `pixelW`/`pixelH` are the picture's cells
+   x the cell (x `--scale`), so they do *not* shrink with the crop: at `--zoom 2` a 1024x678 pt window
+   is captured through a 512x339 pt `sourceRect` into the same pane's pixels, so a frame pixel now
+   covers half a desktop point per side - the detail is in the crop, not in the request. `--debug`
+   prints both halves (`source 512x339 pt`, then the frame). The mistake #73 removed was the opposite
+   one: handing the layout the whole frame's size for a 512x339 pt crop asks for four times the pixels
+   of an upscale the stream does anyway (#121), with no detail in them.
 
 `--zoom-follow` pans the crop when the pointer enters the outer 15 % band of the picture, and only
 far enough to put it back on that edge (pan, not chase). A pan calls `SCStream.updateConfiguration`
@@ -397,7 +401,7 @@ which is why §7.6 exists.
 | `--zoom-at <x,y>` | `configureSource`: the focus the crop is centred on, in global points |
 | `--zoom-follow` | `followPointerIfNeeded`: pans the crop at the 15 % band, then `Capturer.updateSource` (`updateConfiguration`, no restart) |
 | `--selftest` | `runSelfTest(layout:)`: synthetic frames (in the active `--format`) through the real `handleFrame`/`emit` |
-| `--bench` | `Bench.runStages`: dedupe → dirty → extract → zlib → base64 → escapes, staged timings, `--json` |
+| `--bench` | `Bench.runStages`: dedupe → dirty → extract → heuristic → quantise → deflate → base64 → escapes, staged timings, `--json` (those three are the one `compress` call, each with a column of its own, #96) |
 | `--bench-wire` | `Bench.runWire`: one case at `--fps` through the real `handleFrame`, per-frame JSON on stderr |
 | `--record` | `FrameRecorder` in `handleFrame`: writes raw frames + a manifest header (layout included) |
 | `--replay` | `runReplay`: recorded frames through the real pipeline, at the recorded pace |

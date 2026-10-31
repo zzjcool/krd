@@ -7,10 +7,12 @@ import CoreGraphics
 ///
 /// WHY this needs a test: a terminal that draws an image one image pixel per device pixel (Rex) cannot
 /// stretch a frame into cells that are bigger than it. When the frame was the source's own pixels
-/// (1920x1200) on a cell box of 2006x1254, the proportional tile split handed every tile a rect
-/// ~6 % smaller than its cells, and the uncovered sliver showed the background: the user counted
-/// **nine black lines** across the display page (ten tile rows, nine seams). Nothing else in the
-/// suite notices, because the cells were right and only the pixels were short.
+/// (1920x1200) under this page's 117x38 cells of 17x33 px (1989x1254, not the 2006 px of a 118-column
+/// page), it came up 3.5 % short of the box in width and 4.3 % in height, and a proportional slice of
+/// *that* frame was shorter than the tile's cell box as well: the uncovered sliver showed the
+/// background and the user counted **nine black lines** across the display page (ten tile rows, nine
+/// seams). Nothing else in the suite notices, because the cells were right and only the pixels were
+/// short.
 final class TileFrameTests: XCTestCase {
     /// The user's display page: 117 columns of 17 px and 38 rows of 33 px in front of a 1920x1200
     /// display, which is *larger* than the source - the case that produced the seams.

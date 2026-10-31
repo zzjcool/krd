@@ -24,10 +24,11 @@ public struct TileGrid {
     public let scale: Double
     /// How much the picture is scaled on screen relative to the source's own points:
     /// `min(boxW/srcW, boxH/srcH)`. **May exceed 1**: a window smaller than the pane is drawn larger
-    /// by the terminal, which costs no bytes. It is *not* the capture ratio -- that is
-    /// `min(fit, 1) x scale`: we never ask for more pixels than the source has (asking
-    /// ScreenCaptureKit for more does not upscale, it pads with black, issue #69), and `--scale` only
-    /// takes pixels away (issue #71).
+    /// by the terminal, which costs no bytes. It is *not* the capture ratio: the frame is the
+    /// picture's own cell box, `cols x cellW` by `rows x cellH` times `captureScale` (see `make`), so
+    /// asking for more pixels than the source has is normal there and the stream answers it by
+    /// upscaling - a 1920-px display serves a 2006-px frame (issue #121). Only a *screenshot* pads
+    /// with black instead of upscaling (issue #69), and `--scale` only takes pixels away (issue #71).
     public let fit: Double
     /// The source's own size in points, before any fitting (0 when the caller did not say).
     public let sourceW: Double
@@ -136,8 +137,9 @@ public struct TileGrid {
         //  * how big the picture is *on screen* is `fit`, relative to the source's own points -- as
         //    large as the pane allows, which may mean the terminal draws it larger than the source;
         //  * how many pixels the frame *has* is cells x cell x `captureScale` (below), which is what
-        //    the capturer is asked for -- never the source's own count, because ScreenCaptureKit
-        //    pads instead of upscaling (issue #69) and a display mirror must not grow with the pane.
+        //    the capturer is asked for -- never the source's own count, because a *screenshot* pads a
+        //    request above it instead of upscaling (issue #69) while a display mirror asks for the
+        //    cells themselves (issue #121).
         //
         // So `--scale` buys bandwidth, not screen size: at 0.5 the frame is half as many pixels in
         // the same cells, and a terminal that scales stretches it back.
@@ -166,7 +168,7 @@ public struct TileGrid {
             // frame that is a few percent narrower than its cells into them, and the tile split
             // then leaves that difference behind as a seam at every tile: measured as nine black
             // lines across a 117x38-cell display page (a 1920x1200 frame on a 1989x1254 cell box),
-            // and as 14 vertical ones when the frame was a proportional slice rather than the cells
+            // and as 14 vertical ones when the tile rect was a slice of the frame rather than the cells
             // (issue #86). `fillsCells` makes `--scale` the one remaining way to be short, and only
             // on a transport that scales (a terminal stretches the smaller frame back).
             pixelW: max(2, Int((Double(cols) * cellW * captureScale).rounded())),

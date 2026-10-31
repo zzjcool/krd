@@ -1,7 +1,7 @@
 # Encoding: where the bytes and the milliseconds actually go
 
 Every number here comes from `krd --bench`, which runs the real tile pipeline (dedupe → dirty →
-extract → zlib → base64 → escapes) on synthetic frames and needs no terminal, no screen and no
+extract → compress → base64 → escapes) on synthetic frames and needs no terminal, no screen and no
 permissions. Re-run it after any change to `Render.swift`, `Tiles.swift` or `Tile.swift`:
 
 ```sh
@@ -45,7 +45,7 @@ produces is zero.
 
 Per stage, from the single-threaded reference run (3 attempts, best) against the live parallel path:
 
-| case | extract | zlib | base64 | assemble | serial total | parallel | speedup |
+| case | extract | compress | base64 | assemble | serial total | parallel | speedup |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | one character | 0.00 | 0.35 | 0.01 | 0.00 | 0.35 | 0.35 | 1.0× |
 | one text line | 0.06 | 5.08 | 0.01 | 0.02 | 5.14 | 1.00 | 5.1× |
@@ -53,10 +53,17 @@ Per stage, from the single-threaded reference run (3 attempts, best) against the
 | photo repaint | 1.32 | 140.0 | 5.04 | 1.30 | 141.3 | 17.6 | 8.0× |
 | 600×400 drag | 0.14 | 16.7 | 0.48 | 0.14 | 16.8 | 3.1 | 5.5× |
 
-The split is unambiguous: **zlib is 97–99 % of the encoder**, extraction is a handful of `memcpy`,
-base64 is 5 % of a photo and noise on text, escape assembly is free. One core cannot carry a full
-repaint at 20 fps (141 ms against a 50 ms frame); all ten can, with 3× margin on a photo and 6× on
-text. That is the whole reason `handleFrame` compresses with `concurrentPerform`.
+The split is unambiguous: **`compress` is 97–99 % of the encoder**, extraction is a handful of `memcpy`,
+base64 is 5 % of a photo and noise on text, escape assembly is free. `compress` is not one stage any
+more (#96): inside it `looksCompressible` is `heuristic`, the 5-6-5 quantise is `quantise`, and what is
+left is deflate, which `--bench` still prints under `zlib` - **~80 % of the call** on a `photo`:
+167.45 ms of a 211.29 ms `compress` (heuristic 16.09, quantise 25.71), re-measured on the same laptop
+at 164.68 of 205.79 (15.83 and 25.21), where the three add up to the call to within 0.1 ms. The table
+above is an older run, and `budget.json`'s laptop reads 112.40 of 137.3 with 9.85 and 15.09: the split
+follows the machine, the fifth of the call does not. So a regression in `heuristic` or `quantise` no
+longer reads as one in zlib, and each has a column of its own in [BENCHMARK](BENCHMARK.md) §5. One core cannot
+carry a full repaint at 20 fps (141 ms against a 50 ms frame); all ten can, with 3× margin on a photo
+and 6× on text. That is the whole reason `handleFrame` compresses with `concurrentPerform`.
 
 ### Tile size and pixel format
 
@@ -224,7 +231,7 @@ referenced by construction, so the conversion writes in place.
 and 0.02 ms on a typed character. A faster base64 would be invisible; the numbers above say so, and
 that is the point of measuring it.
 
-## The capture size comes from the source, not the pane (issue #69)
+## The placement box comes from the source, not the pane (issue #69)
 
 `--window` used to size the capture from the pane's box (`cols × cellW × rows × cellH`) whatever the
 source was. ScreenCaptureKit does not upscale a window into a box larger than the window: it draws the
@@ -236,10 +243,9 @@ window felt unoperable.
 The rule now:
 
 - `f = min(boxW / srcW, boxH / srcH)` — the picture is as large as the pane allows (see the next
-  section for why `f` is not clamped at 1) while the *capture* stays `min(f, 1)`, because asking for
-  more pixels than the source has is what gets padded;
-- the frame is `src × min(f, 1)`, which has the source's aspect by construction, so there is nothing
-  to pad;
+  section for why `f` is not clamped at 1), and the **placement box** is the fitted source's cells;
+- the frame is those cells (`TileGrid.make`), which have the source's aspect by construction - so a
+  *screenshot* has nothing to pad, and a *stream* upscales to them (issue #121);
 - the placement box is `c = ceil(pxW / cellW)`, `r = ceil(pxH / cellH)`, anchored at the pane's
   top-left; the cells it does not reach are left to the terminal's background (krd does not paint
   them);
@@ -247,11 +253,12 @@ The rule now:
   pane — so a click in the leftover cells is outside the picture and is dropped, not guessed.
 
 A source larger than the box is still downscaled into it, so this changes nothing for a full-screen
-capture; `--scale` multiplies the fitted size, and `--display` follows the same rule (a pane wider than
-the display no longer asks for pixels the display does not have).
+capture; `--scale` multiplies the frame where the transport stretches, and `--display` follows the
+same rule (a pane wider than the display no longer asks for pixels the display does not have).
 
-Measured (macOS 26.6, `--window 530` = a 1024×678 Safari window, share of black pixels in the first
-recorded frame):
+Measured on the pre-#121 build (macOS 26.6, `--window 530` = a 1024×678 Safari window, share of black
+pixels in the first recorded frame; the `after: frame` column is the source-sized frame of that build -
+the frame is the cells now, and a device-pixel terminal stretches the rounding):
 
 | pane | before: frame | before: black | after: frame | after: black |
 |---|---|---:|---|---:|
@@ -283,10 +290,12 @@ Two independent decisions, one each:
 - **`fit = min(boxW/srcW, boxH/srcH)`** is how large the picture is *on screen*, relative to the
   source's own points. It **may exceed 1**: a 1024x678 window in an 88x30 pane (1496x990 px) is drawn
   at 1.46x and fills the pane. That enlargement costs no bytes — the terminal does it.
-- **captured pixels = `srcW × min(fit, 1) × --scale`** is how many pixels we *send*. Never more than
-  the source has (ScreenCaptureKit pads a box that is too large instead of upscaling it, #69, and a
-  display mirror must not start capturing more because the pane grew), and `--scale` only ever takes
-  pixels away.
+- **captured pixels = the picture's cell box × `--scale`** is how many pixels we *send*: `cols x cellW`
+  by `rows x cellH` from the fit (`TileGrid.make`), which on a placeholder grid on a terminal that
+  draws one image pixel per device pixel is the box itself and nothing else (#121). More than the source has is normal - a
+  1920-px display in a 2006-px page asks for 2006 and the *stream* upscales to it; only a *screenshot*
+  is capped at the source, because a too-large request comes back padded with black (#69). `--scale`
+  only ever takes pixels away.
 
 So `--scale` buys bandwidth and nothing else. At `--scale 0.5` the frame is half as wide *in the same
 cells* — measured 512x339 px in 61x21 cells, with the placement bytes identical to scale 1 — and the
@@ -306,7 +315,7 @@ into the window.
 ## Capture scale: `--scale` (issue #60)
 
 `--scale 0.5` asks the capturer for half as many pixels in each direction (`SCStreamConfiguration.
-width/height` = the source × `min(fit, 1)` × the scale) and lets the terminal upscale the image back
+width/height` = the picture's cell box × the scale) and lets the terminal upscale the image back
 into the same cell box. Nothing else moves:
 
 - the **crop** (`sourceRect`) is unchanged — this is not zoom;
