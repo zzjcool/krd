@@ -2053,6 +2053,19 @@ final class Desk {
         }
     }
 
+    /// A replay that cannot honour the recording, said where a reader can see it -- the log (so
+    /// `--log` explains itself), stderr (so a terminal and a CI job both read it) -- and `exit(1)`.
+    ///
+    /// Not a `throw`: a thrown `DeskError` reaches only the log (measured on `cd9ac5d`: `--selftest
+    /// --scale 0.5` exits 1 with nothing on stdout or stderr), which main.swift already notes next to
+    /// the `--quality` refusal. A replay that stops without a word is the failure this module exists
+    /// to refuse, so every refusal in `runReplay` leaves through here.
+    private func failReplay(_ message: String) -> Never {
+        Log.write("krd: \(message)\n")
+        FileHandle.standardError.write(Data("krd: \(message)\n".utf8))
+        exit(1)
+    }
+
     // MARK: replay
 
     /// Feed recorded frames through the real pipeline. With `--bench` the output is discarded
@@ -2060,7 +2073,7 @@ final class Desk {
     /// the recorded pace, which is how a "it stutters when I scroll" report gets reproduced.
     private func runReplay(dir: String, discard: Bool) async throws {
         guard let replay = FrameReplay.open(dir), let header = replay.header else {
-            throw DeskError.message("no usable manifest.jsonl in \(dir) (record one with --record <dir>)")
+            failReplay("no usable manifest.jsonl in \(dir) (record one with --record <dir>)")
         }
         TermGeometry.fallbackCell = header.cell
         var geometry = TermGeometry.read()
@@ -2070,18 +2083,27 @@ final class Desk {
         geometry.pixelHeight = 0
         useLiteralSource(CGRect(x: 0, y: 0, width: header.source.w, height: header.source.h))
         applyLayout(geometry: geometry)
-        guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
-        guard layout.pixelW == replay.width, layout.pixelH == replay.height else {
-            throw DeskError.message("replay is \(replay.width)x\(replay.height) px but the header layout "
-                                    + "computes \(layout.pixelW)x\(layout.pixelH) (tile \(header.tile.cols)x\(header.tile.rows))")
-        }
+        guard let layout = currentGrid() else { failReplay("could not compute a tile layout") }
         // A bpp mismatch would read past the end of every frame buffer (`extract` uses the
         // grid's bpp), so it has to be refused before the first frame, not diagnosed after a
         // crash deep inside memcpy.
         guard layout.bpp == replay.bpp else {
-            throw DeskError.message("replay frames are \(replay.bpp) bpp but this build renders \(layout.bpp) bpp "
-                                    + "(the recording was made with --format \(header.format)); replay with "
-                                    + (replay.bpp == 4 ? "--format rgba" : "--format rgb"))
+            failReplay("replay frames are \(replay.bpp) bpp but this build renders \(layout.bpp) bpp "
+                        + "(the recording was made with --format \(header.format)); replay with "
+                        + (replay.bpp == 4 ? "--format rgba" : "--format rgb"))
+        }
+        // Every manifest line declares its own frame (issue #133), so the size check is per entry
+        // rather than per recording, and it subsumes the "header layout vs frame size" guard that
+        // used to live here -- with the difference that this sentence names the frame, the size its
+        // own line declares and the size the header renders, where that one could only compare two
+        // numbers. A missing file, a short file, or a frame from another layout is one sentence on
+        // stderr and exit 1, before anything is painted. Until this existed the loop below answered
+        // `nil` with one log line and a `break`, then printed the ordinary summary -- counting the
+        // *declared* frames -- and exited 0: measured on cd9ac5d, a valid two-frame recording painted
+        // nothing, reported "2 frames" with `bytes 0`, and said nothing at all.
+        if let refusal = replay.refusal(layoutWidth: layout.pixelW, layoutHeight: layout.pixelH,
+                                        bpp: layout.bpp) {
+            failReplay(refusal)
         }
         writer.resize(tiles: layout.count)
         writer.discardOutput = discard
@@ -2091,11 +2113,14 @@ final class Desk {
         var wire: [Double] = [], wall: [Double] = []
         for i in 0..<replay.entries.count {
             guard let pixels = replay.frame(i) else {
-                Log.write("replay: frame \(i) is missing or truncated, stopping\n")
-                break
+                // Unreachable after the pre-flight unless a file changed underneath us; the session
+                // is live here, so hand the terminal back before saying why.
+                writer.endSession()
+                failReplay(replay.refusal(i, layoutWidth: layout.pixelW, layoutHeight: layout.pixelH,
+                                          bpp: layout.bpp) ?? "replay: frame \(i) is missing or truncated")
             }
             let t0 = benchNowMs()
-            handleFrame(pixels: pixels, width: replay.width, height: replay.height)
+            handleFrame(pixels: pixels, width: layout.pixelW, height: layout.pixelH)
             wall.append(benchNowMs() - t0)
             payload.append(Double(writer.lastFrameBytes))
             wire.append(Double(writer.lastWireBytes))
@@ -2111,7 +2136,7 @@ final class Desk {
         let bytes = payload.reduce(0, +)
         let wireBytes = wire.reduce(0, +)
         let wallSeconds = wall.reduce(0, +) / 1000
-        var text = "krd: replay \(dir) — \(replay.entries.count) frames, \(replay.width)x\(replay.height) px, "
+        var text = "krd: replay \(dir) — \(replay.entries.count) frames, \(layout.pixelW)x\(layout.pixelH) px, "
             + "\(layout.tilesX)x\(layout.tilesY) tiles\n"
         // `%s` needs a C string; a Swift `String` passed to it is an NSString and
         // strlen() on an object header is a segfault. Bench.pad does the same job safely.

@@ -75,13 +75,30 @@ final class FrameRecorder {
 
 /// A recorded set, opened for replay.
 struct FrameReplay {
+    /// One manifest line. The frame size lives here, per line, because that is how the recorder
+    /// writes it (`FrameRecorder.record`) -- and because one size for the whole recording made an
+    /// intact frame look truncated (issue #133).
     struct Entry {
         let path: String
         let tMs: Double
+        let width: Int
+        let height: Int
+        let bpp: Int
+
+        var byteCount: Int { width * height * bpp }
+
+        /// What this line declares, in the terms `ls -l` reports it: `4x3 px, 3 bpp = 36 B`.
+        var declaredSize: String { "\(width)x\(height) px, \(bpp) bpp = \(byteCount) B" }
+
+        var name: String { (path as NSString).lastPathComponent }
     }
 
     let dir: String
     let entries: [Entry]
+    /// The *first* frame's size. For a recording that agrees with itself -- every recording
+    /// `--record` writes in one go -- that is the recording's size. A manifest whose lines disagree
+    /// is carried per entry and refused by `refusal(...)` before a frame is painted, because one grid
+    /// can only render one layout.
     let width: Int
     let height: Int
     let bpp: Int
@@ -95,7 +112,6 @@ struct FrameReplay {
             return nil
         }
         var entries: [Entry] = []
-        var width = 0, height = 0, bpp = 0
         var header: ReplayHeader?
         for line in text.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
@@ -113,19 +129,65 @@ struct FrameReplay {
             }
             guard let n = object["n"] as? Int, let w = object["w"] as? Int,
                   let h = object["h"] as? Int, let b = object["bpp"] as? Int else { continue }
-            width = w; height = h; bpp = b
             let t = (object["t_ms"] as? Double) ?? Double(object["t_ms"] as? Int ?? 0)
-            entries.append(Entry(path: String(format: "%@/%06d.raw", dir, n), tMs: t))
+            entries.append(Entry(path: String(format: "%@/%06d.raw", dir, n), tMs: t,
+                                 width: w, height: h, bpp: b))
         }
-        guard !entries.isEmpty, width > 0, height > 0, bpp >= 3 else { return nil }
-        return FrameReplay(dir: dir, entries: entries, width: width, height: height, bpp: bpp, header: header)
+        // Every line, not just the last one, has to be a frame someone could render.
+        guard let first = entries.first,
+              entries.allSatisfy({ $0.width > 0 && $0.height > 0 && $0.bpp >= 3 })
+        else { return nil }
+        return FrameReplay(dir: dir, entries: entries, width: first.width, height: first.height,
+                           bpp: first.bpp, header: header)
     }
 
     func frame(_ index: Int) -> [UInt8]? {
         guard index >= 0, index < entries.count,
               let data = FileManager.default.contents(atPath: entries[index].path),
-              data.count == width * height * bpp else { return nil }
+              data.count == entries[index].byteCount else { return nil }
         return [UInt8](data)
+    }
+
+    /// The first entry this layout cannot replay, in one sentence that names it: which frame, what
+    /// its own manifest line declares, what is on disk, and what this build would render instead.
+    ///
+    /// The silence this replaces was the defect: `frame(_:)` answering `nil` became one log line, a
+    /// `break`, the ordinary summary and `exit(0)`, and `handleFrame` drops a frame whose size misses
+    /// the grid without a word. So the mismatch is refused before the first frame is painted, in the
+    /// terms `docs/BENCHMARK.md` §5 L4 asks for ("a mismatch is a clear error, not a blank screen").
+    func refusal(layoutWidth: Int, layoutHeight: Int, bpp: Int) -> String? {
+        for i in entries.indices {
+            if let why = refusal(i, layoutWidth: layoutWidth, layoutHeight: layoutHeight, bpp: bpp) {
+                return why
+            }
+        }
+        return nil
+    }
+
+    /// One entry's version, for the replay loop's belt and braces: the files sat still for the
+    /// pre-flight above, but a recording that changed underneath the replay is not a reason to
+    /// report success.
+    func refusal(_ index: Int, layoutWidth: Int, layoutHeight: Int, bpp: Int) -> String? {
+        guard entries.indices.contains(index) else {
+            return "replay: frame \(index) does not exist (the manifest declares \(entries.count))"
+        }
+        let entry = entries[index]
+        // `stat`, not `read`: a 1 GB recording must not be pulled through memory to learn that
+        // frame 40 is short.
+        guard let onDisk = (try? FileManager.default.attributesOfItem(atPath: entry.path))?[.size] as? Int else {
+            return "replay: frame \(index) (\(entry.name)) is missing; "
+                + "its manifest line declares \(entry.declaredSize)"
+        }
+        guard onDisk == entry.byteCount else {
+            return "replay: frame \(index) (\(entry.name)) is \(onDisk) B "
+                + "but its manifest line declares \(entry.declaredSize)"
+        }
+        guard entry.width == layoutWidth, entry.height == layoutHeight, entry.bpp == bpp else {
+            return "replay: frame \(index) (\(entry.name)) is \(entry.width)x\(entry.height) px, \(entry.bpp) bpp "
+                + "but this replay renders \(layoutWidth)x\(layoutHeight) px, \(bpp) bpp (from the manifest header); "
+                + "a recording's header and its frame lines have to describe the same layout"
+        }
+        return nil
     }
 
     /// Delay between two frames, as recorded, clamped so a paused screen does not make the
