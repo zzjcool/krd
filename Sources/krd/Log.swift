@@ -26,6 +26,20 @@ enum Log {
         }
     }
 
+    /// The last `lines` lines of `text`, newest last -- the log panel's window onto the file.
+    ///
+    /// A log file ends in a newline, and that newline does not start a line: keeping the empty string
+    /// after it made the tail one entry longer than the file has, so a panel anchored at the newest
+    /// line spent one of its rows on a blank (#118). Blank lines *between* lines are kept -- a log
+    /// with a gap in it is telling the reader something.
+    ///
+    /// Pure so the rule can be tested without a file on disk: see `LogTailTests`.
+    static func tail(of text: String, lines: Int) -> [String] {
+        var all = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if all.last?.isEmpty == true { all.removeLast() }
+        return Array(all.suffix(max(0, lines)))
+    }
+
     static func write(_ text: String) {
         handle.write(Data(text.utf8))
         lock.lock()

@@ -2569,13 +2569,12 @@ final class Desk {
         // the same coordinate space.
         // The rows the mirror's own bar owns at the top of the pane, and the rest: the picture may
         // use what is left after the bar and the chrome, and its block is centred in that area
-        // (design §6.7). Slice of the same subtraction whether or not either is on.
+        // (design §6.7). Slice of the same subtraction whether or not either is on. Who gives up the
+        // room -- the panel or the picture -- is `Chrome.pictureRows`' decision, one function away,
+        // because it is the number the tests can ask about (#118).
         let barRows = barEnabled ? 1 : 0
-        var pictureRows = max(1, geometry.rows - barRows)
-        if chromeEnabled, pictureRows > 4 {
-            let panelRows = chromeState.panel?.height ?? 0
-            pictureRows = max(3, pictureRows - 1 - min(panelRows, pictureRows - 4))
-        }
+        let pictureRows = Chrome.pictureRows(paneRows: geometry.rows, bar: barRows > 0,
+                                             panel: chromeState.panel, chrome: chromeEnabled)
         // The cell is the *terminal's* (issue #146), so `geometry` reaches the grid unmodified: the rows
         // the bar and the panels own go in as the picture's box (`rows:`), never folded into a copy of
         // the geometry. Dividing the pty's pixel height by `pictureRows` is what built a 33.46 px cell
@@ -3034,6 +3033,9 @@ final class Desk {
             let all = ChromePanel.allCases
             let index = all.firstIndex(of: self.chromeState.panel ?? .stats) ?? 0
             self.chromeState.panel = all[(index + 1) % all.count]
+            // Same rule as `openPanel`: a different panel starts at its own end, not at the window
+            // the previous one was left scrolled to (#118).
+            self.chromeState.panelOffset = nil
             self.chromeDirty = true
             self.drawChrome()
         }
@@ -3423,7 +3425,7 @@ final class Desk {
             return self?.chromeKey(byte) ?? false
         }
         reader.onChromeClick = { [weak self] row, col, wheel in
-            self?.chromeClick(row: row, col: col, isWheel: wheel)
+            self?.chromeClick(row: row, col: col, wheel: wheel)
         }
         reader.trace = options.debug
         reader.ime = options.ime
@@ -3463,9 +3465,10 @@ final class Desk {
         return active.map { "\($0)=\(env[$0] ?? "")" }.joined(separator: " ")
     }
 
+    /// The last `lines` lines of the log, newest last: what the log panel shows.
     private func readLogTail(_ lines: Int = 12) -> [String] {
         guard let path = Log.path, let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
-        return Array(text.split(separator: "\n", omittingEmptySubsequences: false).suffix(lines)).map(String.init)
+        return Log.tail(of: text, lines: lines)
     }
 
     /// Draw and write, on the main queue. `ScreenWriter.writeChrome` is serialized against the
@@ -3483,16 +3486,15 @@ final class Desk {
         if chromeState.prefix {
             chromeState.prefix = false
             switch byte {
-            case 0x1C: chromeState.panel = nil
+            case 0x1C: openPanel(nil)
             case UInt8(ascii: "q"): shutdown()
-            case UInt8(ascii: "?"), UInt8(ascii: "h"): chromeState.panel = .help
-            case UInt8(ascii: "s"): chromeState.panel = .stats
-            case UInt8(ascii: "f"): chromeState.panel = .settings
-            case UInt8(ascii: "d"): chromeState.panel = .devices
-            case UInt8(ascii: "l"): chromeState.panel = .log
+            case UInt8(ascii: "?"), UInt8(ascii: "h"): openPanel(.help)
+            case UInt8(ascii: "s"): openPanel(.stats)
+            case UInt8(ascii: "f"): openPanel(.settings)
+            case UInt8(ascii: "d"): openPanel(.devices)
+            case UInt8(ascii: "l"): openPanel(.log)
             default: break
             }
-            applyPanel()
             return true
         }
         if byte == 0x1C {
@@ -3501,18 +3503,27 @@ final class Desk {
             return true
         }
         if byte == 0x1B, chromeState.panel != nil {
-            chromeState.panel = nil
-            applyPanel()
+            openPanel(nil)
             return true
         }
         return false
+    }
+
+    /// Show `panel` (nil closes). Opening, switching or closing a panel starts its scroll at the
+    /// panel's own end: a reader who reopens the stats panel expects its first row, not the window
+    /// they left behind -- and a log that has been scrolled back to the top would otherwise stay
+    /// pinned to old lines forever (#118).
+    private func openPanel(_ panel: ChromePanel?) {
+        chromeState.panel = panel
+        chromeState.panelOffset = nil
+        applyPanel()
     }
 
     /// The wall consumes every click on the pane: the whole pane is text, so "outside the picture"
     /// is the normal case there, and a cell the wall does not know is swallowed rather than
     /// forwarded to the remote desktop (design §8: the route decision is "inside the picture
     /// rect", and the wall has no picture at all).
-    private func chromeClick(row: Int, col: Int, isWheel: Bool) {
+    private func chromeClick(row: Int, col: Int, wheel: Int) {
         if wallMode {
             // A wheel report is not a click: it scrolls the shelf it is over instead of entering
             // the card under the cursor (a two-finger scroll used to enter a window by accident).
@@ -3521,7 +3532,6 @@ final class Desk {
             // queue. Mutating `wallState` and repainting from here would race that tick on the
             // canvas's previous-cell grid and on the shelf offsets, so the wall branch only hops:
             // after this line everything the wall owns is touched by exactly one thread.
-            let wheel = isWheel ? 1 : 0
             DispatchQueue.main.async { [weak self] in
                 self?.wallClick(row: row, col: col, wheel: wheel)
             }
@@ -3530,6 +3540,10 @@ final class Desk {
         guard chromeAvailable, let geometry = chromeGeometry else { return }
         switch chrome.hitTest(row: row, col: col, geometry: geometry) {
         case .statusSegment(let id):
+            // A notch is not a click, even when it lands on a segment: a two-finger scroll over the
+            // bar used to take whatever the segment does, and one of them shrinks the mirror back
+            // into the wall (#118).
+            guard wheel == 0 else { return }
             // The bar's one control: a click on `[ - ]` (or on the traffic lights, which is what a
             // red one does) shrinks this window back into the wall. Same path as `Ctrl-\`, so the
             // two ways out cannot drift.
@@ -3538,18 +3552,46 @@ final class Desk {
                 return
             }
             switch id {
-            case "stats": chromeState.panel = .stats
-            case "help": chromeState.panel = .help
-            case "fps": chromeState.panel = .settings
-            case "target": chromeState.panel = .devices
+            case "stats": openPanel(.stats)
+            case "help": openPanel(.help)
+            case "fps": openPanel(.settings)
+            case "target": openPanel(.devices)
             default: break
             }
-            applyPanel()
         case .insidePanel:
-            break                                   // clicks inside a panel are not forwarded
+            // The wheel over a panel is how the rows its box cannot hold are reached (#118): one
+            // notch is one row, clamped at both ends. A click inside a panel is still not forwarded
+            // anywhere -- it is not a picture cell and there is no control under it.
+            guard wheel != 0 else { return }
+            // …and the hop is the wall's, for the same reason: this closure runs on the *reader*
+            // thread, while the window arithmetic reads `chromeMetrics` and the repaint writes the
+            // pty, both of which the main queue owns.
+            DispatchQueue.main.async { [weak self] in
+                self?.scrollPanel(by: wheel < 0 ? -1 : 1)
+            }
         case .outside:
             break
         }
+    }
+
+    /// One wheel notch inside an open panel, on the main queue: move the window a row and repaint
+    /// now. The clamp is `Chrome.panelWindow`'s, the same call the drawer makes, so the last notch
+    /// lands on the panel's last row rather than on an empty window. The box does not change size,
+    /// so there is no relayout -- but the repaint cannot wait for the 1 Hz chrome tick either: a
+    /// scroll that arrives up to a second late reads as a dropped notch.
+    private func scrollPanel(by rows: Int) {
+        guard let panel = chromeState.panel, let geometry = chromeGeometry else { return }
+        let inside = geometry.panelInsideRows
+        let (current, total, last) = Chrome.panelWindow(panel, chromeMetrics, inside: inside,
+                                                        requested: chromeState.panelOffset)
+        let wanted = min(max(0, current + rows), last)
+        // A log scrolled back onto its last line is at the end again, and the stored `nil` is what
+        // keeps it there: the tail is re-read every second, so a window pinned to the old last row
+        // would stop showing the newest line -- in the panel whose job is to show it. `nil` means
+        // "wherever this panel is read from", which for a log is the end (#118).
+        chromeState.panelOffset = (panel.readsFromTheEnd && wanted == last) ? nil : wanted
+        chromeDirty = true
+        drawChrome()
     }
 
     /// The wall half of `chromeClick`, on the main queue — the same queue as the 1 s tick, so the

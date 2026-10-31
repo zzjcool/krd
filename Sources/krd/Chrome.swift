@@ -42,6 +42,12 @@ struct ChromeGeometry: Equatable {
     var devStatus: Bool = true
 
     var chromeTop: Int { imageRows }
+
+    /// Rows a panel's box has inside its two borders: what `drawPanel` writes into, and what the
+    /// wheel's clamp is measured against. The box deliberately stops above the pane's final row
+    /// (writing its last cell arms the terminal's pending-wrap, see the file's invariant 3), so the
+    /// clamp lives here once instead of in the drawer and in the input path.
+    var panelInsideRows: Int { max(0, min(panelHeight, rows - 1 - panelTop) - 2) }
 }
 
 enum ChromePanel: String, CaseIterable {
@@ -59,6 +65,31 @@ enum ChromePanel: String, CaseIterable {
         case .help: return 13
         }
     }
+
+    /// Rows of content this panel has, before the box decides how many of them it can hold.
+    ///
+    /// Two numbers, not one: `height` is how much of the pane the panel asks for (borders
+    /// included, and it is a wish the layout may overrule), while this is the length of the
+    /// column of rows the panel has to show. The badge on the border and the wheel's clamp both
+    /// read *this*, so the count a reader sees (`1-10/16`) and the row the last notch stops on
+    /// are the same number -- two independent copies would drift the moment a row is added
+    /// (#118). `ChromeTests` pins each panel's count and its last row (see
+    /// `testEveryPanelCanReachItsLastRowAndCountsTheRowsItHas`), so a row appended here has to
+    /// bring its count with it or its panel's last row stops being reachable.
+    func contentRows(_ m: ChromeMetrics) -> Int {
+        switch self {
+        case .stats: return 16
+        case .settings: return 10                  // eight switches, a gap, the hot/cold hint
+        case .devices: return max(1, m.devices.count)      // the "none" row when the list is empty
+        case .log: return max(1, m.logTail.count)
+        case .help: return 11
+        }
+    }
+
+    /// Which end of its content the panel is read from. The log's answer is its newest line:
+    /// `readLogTail` hands back the last twelve lines, and a reader opening the panel after a
+    /// failure wants the last one of those, not the first (#118).
+    var readsFromTheEnd: Bool { self == .log }
 }
 
 struct ChromeState {
@@ -67,6 +98,11 @@ struct ChromeState {
     var prefix = false
     /// A short-lived hint, right-aligned on the status line.
     var toast: String? = nil
+    /// First content row the panel's box shows. `nil` is "wherever this panel is read from" --
+    /// the top, or the end for the log -- which is also what opening a panel starts at. The wheel
+    /// moves it; the drawer clamps it with the same window arithmetic the wheel uses, so a scroll
+    /// past the end cannot leave a panel blank.
+    var panelOffset: Int? = nil
 }
 
 extension ChromeMetrics {
@@ -238,9 +274,14 @@ final class Chrome {
     // MARK: layout
 
     /// `imageRows`/`imageCols` come from `TileGrid`: the chrome never guesses where the picture
-    /// ends. A panel sits under the status line when it fits, and otherwise takes the screen and
-    /// hides the picture — squeezing a 12-row panel into a picture that has no slack is worse
-    /// than not showing the picture while the panel is open.
+    /// ends, and `panelHeight` is whatever `applyLayout` left under the status line.
+    ///
+    /// A panel that fits sits under the status line and costs the picture nothing. A panel that
+    /// does not fit gets what the pane has and the *picture* gives up the room, down to a one-row
+    /// strip -- squeezing a twelve-row panel into a picture that has no slack is worse than showing
+    /// a strip of picture beside a panel that says how many of its rows are above or below the
+    /// window (`Chrome.panelWindow`, issue #118). The box is never drawn over the picture: this
+    /// function only does arithmetic on rows the caller has already given up.
     static func layout(paneCols: Int, paneRows: Int, imageCols: Int, imageRows: Int,
                        bar: Bool = false, dev: Bool = true, panel: ChromePanel?) -> ChromeGeometry {
         let cols = max(2, paneCols)
@@ -262,6 +303,28 @@ final class Chrome {
         return geo
     }
 
+    /// How many rows the picture keeps when a panel is open, in a pane of `paneRows` with `bar`
+    /// rows of furniture on top. `0` when the chrome is off or no panel is open.
+    ///
+    /// This is the one number that decides who is squeezed, so it lives here as arithmetic rather
+    /// than inside the Desk's fitting step: the panel takes what it asks for and the picture keeps
+    /// at least one row (a strip of the picture still says what is being mirrored, and the panel's
+    /// border says which of its rows the box is not showing). The exception is a pane so short that
+    /// not even a box would be drawn in it -- two borders and a row, and the drawer keeps off the
+    /// pane's final row -- where the picture keeps its three rows instead of feeding a box that
+    /// would never appear (#118).
+    static func pictureRows(paneRows: Int, bar: Bool, panel: ChromePanel?, chrome: Bool) -> Int {
+        let barRows = bar ? 1 : 0
+        var rows = max(1, paneRows - barRows)
+        guard chrome, rows > 4 else { return rows }
+        let panelRows = panel?.height ?? 0
+        // What the panel would get with a one-row picture: -1 picture, -1 status line.
+        let forPanel = min(panelRows, rows - 2)
+        let pictureFloor = forPanel - 1 >= 3 ? 1 : 3
+        rows = max(pictureFloor, rows - 1 - min(panelRows, rows - pictureFloor - 1))
+        return rows
+    }
+
     // MARK: drawing
 
     func draw(geometry: ChromeGeometry, metrics m: ChromeMetrics, state: ChromeState) -> [UInt8] {
@@ -274,7 +337,9 @@ final class Chrome {
         }
         if geometry.devStatus {
             drawStatus(geometry: geometry, m: m, state: state)
-            if let panel = state.panel { drawPanel(panel, geometry: geometry, m: m) }
+            if let panel = state.panel {
+                drawPanel(panel, geometry: geometry, m: m, requested: state.panelOffset)
+            }
         }
         return render(from: min(geometry.chromeTop, geometry.barRow ?? Int.max))
     }
@@ -378,7 +443,23 @@ final class Chrome {
         }
     }
 
-    private func box(_ x: Int, _ y: Int, _ w: Int, _ h: Int, title: String) {
+    /// A box with the panel's title at the left of the top border and its two ways out at the
+    /// right. `badge` is the row window (`1-10/16 ↕`) and is drawn between them, only when the panel
+    /// has more rows than the box holds -- the marker that replaces silently dropping them (#118).
+    /// The row window as it fits between the title and the two ways out: `1-10/16 ↕` where there is
+    /// room for the window, `10/16 ↕` where there is only room for the count, and no marker at all
+    /// on a box narrower than that -- a twenty-column pane has no space between `─ stats ─` and
+    /// ` ^\ q/esc ` for anything else. Narrowing the marker is what keeps "a squeezed panel says
+    /// so" true down to ~26 columns instead of ~30 (#118).
+    private func panelBadge(offset: Int, inside: Int, total: Int, room: Int) -> String {
+        guard total > inside, room > 0 else { return "" }
+        let full = " \(offset + 1)-\(offset + inside)/\(total) ↕ "
+        if DisplayWidth.of(full) <= room { return full }
+        let counted = " \(offset + inside)/\(total) ↕ "
+        return DisplayWidth.of(counted) <= room ? counted : ""
+    }
+
+    private func box(_ x: Int, _ y: Int, _ w: Int, _ h: Int, title: String, badge: String = "") {
         guard w > 4, h > 2 else { return }
         text(x, y, "╭" + String(repeating: "─", count: w - 2) + "╮", .dim)
         for yy in (y + 1)..<(y + h - 1) {
@@ -388,6 +469,15 @@ final class Chrome {
         }
         text(x, y + h - 1, "╰" + String(repeating: "─", count: w - 2) + "╯", .dim)
         text(x + 2, y, " \(title) ", .bright)
+        // Right-aligned, ending one cell before ` ^\ q/esc `: at a narrow pane it would otherwise
+        // sit on top of the title, and two pieces of chrome text sharing a cell is the bug this
+        // whole file's row arithmetic exists to avoid. Where there is no room between them the
+        // badge is dropped -- the box is too narrow for a count and a way out at once.
+        let badgeCells = DisplayWidth.of(badge)
+        let titleEnd = x + 2 + DisplayWidth.of(" \(title) ")
+        if badgeCells > 0, x + w - 9 - badgeCells > titleEnd {
+            text(x + w - 9 - badgeCells, y, badge, .accent)
+        }
         text(x + w - 9, y, " ^\\ q/esc ", .dim)
     }
 
@@ -452,26 +542,75 @@ final class Chrome {
 
     // MARK: panels
 
-    private func drawPanel(_ panel: ChromePanel, geometry: ChromeGeometry, m: ChromeMetrics) {
+    /// The window a panel's box shows: which content row is at its top, and how many rows the panel
+    /// has in total. `requested` is where the wheel has moved the window to, or `nil` for "wherever
+    /// this panel is read from" -- the top, and the end for the log.
+    ///
+    /// The drawer and the input path both call this, so the count in the border badge and the row
+    /// the last notch stops on are one number, and a request past either end lands on that end
+    /// rather than scrolling into blank rows (#118).
+    /// `last` is the furthest the window can start and still be full; the input path stores its
+    /// clamped answer, so a notch that lands on either end leaves the state on that end instead of
+    /// one row past it.
+    static func panelWindow(_ panel: ChromePanel, _ m: ChromeMetrics, inside: Int,
+                            requested: Int?) -> (offset: Int, total: Int, last: Int) {
+        let total = panel.contentRows(m)
+        let last = max(0, total - inside)
+        let start = requested ?? (panel.readsFromTheEnd ? last : 0)
+        return (min(max(0, start), last), total, last)
+    }
+
+    private func drawPanel(_ panel: ChromePanel, geometry: ChromeGeometry, m: ChromeMetrics,
+                           requested: Int?) {
         let y = geometry.panelTop
-        let h = min(geometry.panelHeight, rows - 1 - y)     // never the final row: autowrap
-        guard h > 2, cols > 8 else { return }
+        let inside = geometry.panelInsideRows          // h - 2, and never the final row: autowrap
+        guard inside > 0, cols > 8 else { return }
         let w = cols
-        box(0, y, w, h, title: panel.title)
-        let inside = h - 2
-        func line(_ i: Int, _ label: String, _ value: String, _ note: String = "", _ style: Style = .plain) {
-            guard i < inside else { return }
-            text(2, y + 1 + i, DisplayWidth.pad(label, to: 14), .dim)
-            text(17, y + 1 + i, DisplayWidth.truncate(value, to: max(0, w - 20)), style)
+        let (offset, total, _) = Chrome.panelWindow(panel, m, inside: inside, requested: requested)
+        // A marker, not silence: a panel with more rows than its box holds says which rows it is
+        // showing and how many there are, so half a panel cannot be read as the whole one. The wheel
+        // moves `offset` (`chromeClick`). The badge sits on the border because that is the row a
+        // squeezed box has to spare -- the content rows are what the reader came for (#118).
+        // The cells strictly between the title and ` ^\ q/esc `, which is where the marker has to fit.
+        let badgeRoom = w - 9 - (2 + DisplayWidth.of(" \(panel.title) "))
+        let badge = panelBadge(offset: offset, inside: inside, total: total, room: badgeRoom)
+        box(0, y, w, inside + 2, title: panel.title, badge: badge)
+        /// Where content row `i` lands inside the box, or nil when the window does not hold it.
+        /// Every panel walks its rows through this, so a row is either drawn at its own row or not
+        /// drawn at all: the count in the badge is true by construction, and a panel that grows a
+        /// row cannot push another one off the bottom without the badge saying so.
+        func slot(_ i: Int) -> Int? {
+            let r = i - offset
+            return (r >= 0 && r < inside) ? r : nil
+        }
+        // The panel's three columns, in 0-based cells, named once because the budgets below are
+        // derived from them: a value that could reach past the note column would paint over another
+        // row's note, which is the #117 collision one axis over.
+        let valueCol = 17, noteCol = 38
+        func line(_ i: Int, _ label: String, _ value: String, _ note: String = "",
+                  _ style: Style = .plain) {
+            guard let r = slot(i) else { return }
+            // A row with a note owns two columns, so its value stops one cell short of the note's. A
+            // row without one keeps the full width -- that is why the `cursor`, `recording`, `log`
+            // and `env` values are not cut at the note column. At a pane narrower than the note
+            // column `w - 40` is 0 and that column does not exist; the value keeps its own budget
+            // instead of being squeezed into it. Both cuts go through `DisplayWidth.truncate`, the
+            // cell- and grapheme-aware one (#128): a cut is always an `…`, never half a glyph.
+            let valueCells = note.isEmpty ? max(0, w - 20)
+                : min(max(0, w - 20), max(0, noteCol - 1 - valueCol))
+            text(2, y + 1 + r, DisplayWidth.pad(label, to: 14), .dim)
+            text(valueCol, y + 1 + r, DisplayWidth.truncate(value, to: valueCells), style)
             if !note.isEmpty {
-                text(38, y + 1 + i, DisplayWidth.truncate(note, to: max(0, w - 40)), .dim)
+                text(noteCol, y + 1 + r, DisplayWidth.truncate(note, to: max(0, w - 40)), .dim)
             }
         }
         switch panel {
         case .stats:
             // Rows are counted, not written out by hand: the sparklines used to be positioned with
             // `y + 9`, which is the `pty buffer` row, so their label painted over that row's name
-            // while its value and note survived (#117). A row appended now cannot land on another.
+            // while its value and note survived (#117). A row appended now cannot land on another,
+            // and `slot` puts the window on top of that: `contentRows` for this panel is the number
+            // of `next()` calls below (16), and a test asks the last of them by name.
             var row = 0
             func next() -> Int { defer { row += 1 }; return row }
             line(next(), "bandwidth", String(format: "%.2f MB/s", m.mbps),
@@ -534,24 +673,30 @@ final class Chrome {
                 ("--log", m.logPath, .dim),
             ]
             for (i, item) in items.enumerated() { line(i, item.0, item.1, "", item.2) }
-            if inside > items.count + 1 {
-                text(2, y + 2 + items.count, "bold = hot (no restart) · dim = cold (restart the stream)", .dim)
+            if let r = slot(items.count + 1) {
+                text(2, y + 1 + r, "bold = hot (no restart) · dim = cold (restart the stream)", .dim)
             }
         case .devices:
-            if m.devices.isEmpty {
-                text(2, y + 1, "no ScreenCaptureKit content (needs screen-recording permission)", .dim)
+            if m.devices.isEmpty, let r = slot(0) {
+                text(2, y + 1 + r, "no ScreenCaptureKit content (needs screen-recording permission)", .dim)
             }
-            for (i, row) in m.devices.enumerated() where i < inside {
+            for (i, row) in m.devices.enumerated() {
+                guard let r = slot(i) else { continue }
                 let active = row.hasPrefix("*")
-                text(2, y + 1 + i, DisplayWidth.truncate(String(row.dropFirst()), to: max(0, w - 4)),
+                text(2, y + 1 + r, DisplayWidth.truncate(String(row.dropFirst()), to: max(0, w - 4)),
                      active ? .accent : .plain)
             }
         case .log:
-            if m.logTail.isEmpty {
-                text(2, y + 1, "no log yet — pass --log <path> or --debug", .dim)
+            if m.logTail.isEmpty, let r = slot(0) {
+                text(2, y + 1 + r, "no log yet — pass --log <path> or --debug", .dim)
             }
-            for (i, row) in m.logTail.enumerated() where i < inside {
-                text(2, y + 1 + i, DisplayWidth.truncate(row, to: max(8, w - 4)), .dim)
+            // The window, not the head. `panelWindow` starts a log at its end, so the newest line is
+            // on screen the moment the panel opens: a reader who opens this after a failure is
+            // looking for the last line, and paging to it is the bug (#118). One notch up is what
+            // reaches the older lines, which is the direction a log is read backwards in.
+            for (i, row) in m.logTail.enumerated() {
+                guard let r = slot(i) else { continue }
+                text(2, y + 1 + r, DisplayWidth.truncate(row, to: max(8, w - 4)), .dim)
             }
         case .help:
             let help: [(String, String)] = [
@@ -562,14 +707,18 @@ final class Chrome {
                 ("^\\ then l", "tail the log"),
                 ("^\\ then ?", "this list"),
                 ("click", "a status segment"),
-                ("", ""),
+                // The wheel takes the separator's row rather than adding one: the help panel's box
+                // holds ten of its rows at 137x44, and an extra row would push `--dev` out of a
+                // window that used to show it (#118).
+                ("wheel", "scroll a squeezed panel"),
                 ("clock", "compare it with your own: that is the real delay"),
                 ("--dev", "this layer on"),
                 ("--no-chrome", "force it off (scripts, CI)"),
             ]
-            for (i, item) in help.enumerated() where i < inside {
-                text(2, y + 1 + i, DisplayWidth.pad(item.0, to: 12), .bright)
-                text(15, y + 1 + i, item.1, .plain)
+            for (i, item) in help.enumerated() {
+                guard let r = slot(i) else { continue }
+                text(2, y + 1 + r, DisplayWidth.pad(item.0, to: 12), .bright)
+                text(15, y + 1 + r, item.1, .plain)
             }
         }
     }
@@ -602,7 +751,18 @@ final class Chrome {
                     if prev != nil, prev!.count == cells.count, prev![i2] == cells[i2] { break }
                     end += 1
                 }
-                while end > x, cells[y * cols + end - 1].ch == " ", !cells[y * cols + end - 1].continuation {
+                // Trailing blanks are not written -- the terminal already has them -- *unless* that
+                // cell carried text in the previous frame: then this write is the only one that can
+                // erase it. Trimming blindly left the last glyph of every value that got shorter on
+                // screen (`0 BB`, `56 tiles/ss`: the row then shows a number the panel never drew,
+                // #118). A cell that was the covered half of a wide glyph counts as text for the
+                // same reason: it leaves a half-glyph behind if nothing overwrites it. With no
+                // previous frame nothing was there to erase, so the trim is free there.
+                while end > x, cells[y * cols + end - 1].ch == " ",
+                      !cells[y * cols + end - 1].continuation,
+                      prev == nil || prev!.count != cells.count
+                          || (prev![y * cols + end - 1].ch == " "
+                              && !prev![y * cols + end - 1].continuation) {
                     end -= 1
                 }
                 if y == rows - 1 {
@@ -614,6 +774,12 @@ final class Chrome {
                 out.append(contentsOf: Array("\u{1B}[\(y + 1);\(x + 1)H".utf8))
                 for i in x..<end {
                     let cell = cells[y * cols + i]
+                    // The second cell of a 2-cell glyph is part of the glyph before it: the terminal
+                    // already advanced two columns for that glyph, so writing the cell's blank here
+                    // would push the rest of the row one column right per wide glyph -- a CJK path
+                    // overflowed its column and lost the box's border (#118). It is never a run of
+                    // its own (see `Cell.continuation`), so it is never written at all.
+                    if cell.continuation { continue }
                     if style != cell.style {
                         out.append(contentsOf: Array("\u{1B}[\(cell.style.sgr)m".utf8))
                         style = cell.style
