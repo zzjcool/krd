@@ -101,6 +101,19 @@ final class InputReader {
     /// outside `--dev`, and never true in a wall session, which has no chrome and arms nothing: those
     /// route byte-for-byte as they always did.
     var chromePrefixArmed: (() -> Bool)?
+    /// The wall's own keyboard (`--wall`): asked once per key event, before anything can be posted
+    /// or logged, and told which of its six verbs the event is (`WallInput.key(for:)`).
+    ///
+    /// A seam of its own because the wall is the one mode with no remote desktop: every key belongs
+    /// to nobody, and yet a handful of them have to reach the TUI the reader is looking at (#201 —
+    /// `Tab`/`Shift-Tab` walk the focus ring, the arrows move inside a band, `Enter`/`Space` activate
+    /// and `Esc` clears). Nothing else changes for a session whose wall has not asked: the hook is
+    /// `nil` outside `--wall`, and a key this returns `true` for is one the reader posts nothing for.
+    ///
+    /// Called on the reader thread, like every other hook here; the receiver hops, because what a
+    /// wall key changes is the state the painter owns.
+    var onWallKey: ((WallKey) -> Bool)?
+
     /// A click outside the picture, in 1-based cells: the status line and its panels, and — with
     /// `--wall` — the whole pane, which has no picture at all. The third argument is the wheel's
     /// direction: `0` for a click, `-1` for a notch up, `+1` for a notch down. A wall click is a
@@ -297,6 +310,10 @@ final class InputReader {
                 let held = parser.buffer
                 if held.count == 1, held[0] == 0x1B {
                     parser.reset()
+                    // A bare `Esc` is the one key that does not arrive as a parsed event (it is
+                    // decided by the *absence* of the next byte), so the wall is asked here too:
+                    // without this the reader would own the only key that clears the focus ring.
+                    if let onWallKey, onWallKey(.cancel) { continue }
                     postKey(Keys.esc, [])
                     continue
                 }
@@ -409,6 +426,11 @@ final class InputReader {
         default:
             break
         }
+        // The wall's keys are the wall's before they are anybody else's: `--wall` has no remote
+        // desktop, and a key it acts on must not also be a keystroke for a picture that is not there.
+        // Asked here — after `onFocus`, before the chord — so that a wall session keeps the one
+        // behaviour it shares with a mirror (a keypress says the reader is here).
+        if let onWallKey, let key = WallInput.key(for: event), onWallKey(key) { return }
         // The chord is the chrome's before it is the desktop's (see `chromeChordByte`).
         if let chord = chromeChordByte(event), onChromeKey?(chord) == true { return }
         switch event {
