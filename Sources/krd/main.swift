@@ -1036,7 +1036,10 @@ final class Desk {
         // `--list --replay`/`--list --mock` out of that: they still paint.
         if let forced = options.placeholders {
             placeholderTiles = forced && !(options.bench || options.selftest)
-        } else if !(options.bench || options.selftest || Self.listsOnly(options)) {
+        } else if !(options.bench || options.selftest || options.wall || Self.listsOnly(options)) {
+            // `--wall` is excluded because it never reads `placeholderTiles`: the wall's pictures are
+            // `wallPlaceholders`, probed in `runWall`. Asking here was 600 ms of dead time in front of
+            // the wall's first byte, on a terminal that may not answer at all (issue #99).
             placeholderTiles = TermGeometry.supportsPlaceholders() == true
         }
         let deviceCell = Self.cellIsInDevicePixels(options)
@@ -1451,14 +1454,22 @@ final class Desk {
         // (issue #169 review: it was three — this one, `handleResize`'s, and the paint redo's).
     }
 
-    /// Start the landing screen: alternate screen, resize handler, input, one enumeration and a
+    /// Start the landing screen: alternate screen, resize handler, one paint, the probes, input and a
     /// 1 s tick. No capturer, no tile grid, no chrome rows — the wall owns every cell.
+    ///
+    /// The order is paint → probe → input (issue #99). Both terminal probes are round trips a terminal
+    /// is free never to answer (500 ms for the cell query, 600 ms for `U=1`), and they used to run
+    /// before the first byte, so `--wall` showed an empty alternate screen for ~1.7 s.
     private func runWall() {
         // One measurement, one log line: the grid, the cell, and where the cell came from. Every
         // fit in this wall is computed from this value, so a picture that does not fill its cells
         // is answered by this line plus the reader's terminal - never by a guess somewhere else.
+        //
+        // `askTerminal: false`: the `CSI 16t`/`14t` query waits behind the first paint (issue #99).
+        // The assumed cell is the same one that query times out to, so a terminal that never answers
+        // ends up with exactly this pane and no repaint (`probeBehindTheFirstPaint`).
         let pane = PaneGeometry.measure(cell: options.cell, grid: options.pane,
-                                        dpr: options.dpr) { Log.write($0) }
+                                        dpr: options.dpr, askTerminal: false) { Log.write($0) }
         wallPane = pane
         WallPictures.demo = options.demo
         WallPictures.square = options.square
@@ -1468,25 +1479,11 @@ final class Desk {
         Log.write("krd: wall pictures at --wall-quality \(options.wallQuality.value) "
                   + "(\(options.wallQuality.label))\n")
         // Pictures: kitty unicode placeholders when the terminal accepts them, else pixel-sized
-        // placements. One probe, one log line, and the answer is a reply rather than a hope - a
-        // terminal that ignores `U=1` draws missing-glyph boxes over the picture's cells.
-        if let forced = options.placeholders {
-            wallPlaceholders = forced
-            Log.write("krd: pictures as \(forced ? "unicode placeholders (U=1)" : "pixel-sized placements") (forced)\n")
-        } else {
-            switch TermGeometry.supportsPlaceholders() {
-            case .some(true):
-                wallPlaceholders = true
-                Log.write("krd: the terminal answered a U=1 placeholder: pictures are fitted into their cells\n")
-            case .some(false):
-                wallPlaceholders = false
-                Log.write("krd: the terminal refused U=1: pictures are drawn at their own pixel size\n")
-            case .none:
-                wallPlaceholders = false
-                Log.write("krd: the terminal did not answer the U=1 probe: pixel-sized pictures\n")
-            }
-        }
-
+        // placements. The transport is *provisional* here (issue #99): the probe is a round trip, so
+        // the first frame takes the conservative pixel path, which is exactly what a terminal that
+        // never answers `U=1` gets anyway. A terminal that accepts it answers in ~1 ms, i.e. before
+        // that frame's capture has finished, and `probeBehindTheFirstPaint` re-lays-out once.
+        wallPlaceholders = options.placeholders ?? false
         // A size-zero viewport is what "there is no picture" means to the mouse path: no cell and
         // no pixel is inside it (`Viewport.contains`), so every report lands in `chromeClick`,
         // which routes it to the wall. Set before input starts, and never overwritten — nothing in
@@ -1503,10 +1500,11 @@ final class Desk {
         writer.clear()
         installSignalCleanup()
         installResizeHandler()
-        // The desk is built *before* input: `startInput()` decides the wall's key policy from
-        // wall mode, and it runs on the main queue before the reader thread exists — the only
-        // race-free moment to read that. The first paint stays after it, so input is installed
-        // before the wall appears.
+        // The desk is built *before* input: `startInput()` decides the wall's key policy from wall
+        // mode, and it runs on the main queue before the reader thread exists — the only race-free
+        // moment to read that. The first paint is *also* before it now (issue #99): the frame must not
+        // wait for a probe a terminal may never answer, and the probes must run before the mouse is
+        // live (`TermGeometry.ask` reads stdin, so a probe under a live reader steals its bytes).
         wallCanvas = WallCanvas(symbols: options.symbols)
         // A returning mirror brings the page the reader was on, and — when it failed — the sentence
         // it failed with. Both arrive in argv because the process that knew them was replaced.
@@ -1520,9 +1518,67 @@ final class Desk {
             mirrorNotice = .mirrorStopped(exit: said.exit, message: said.text.isEmpty ? nil : said.text)
         }
         wallMode = true
-        startInput()
+        // Paint at the assumed cell on the provisional transport, *then* ask the terminal: on a silent
+        // terminal neither probe can move anything, and on one that answers the answer arrives before
+        // this frame's capture has finished (issue #99).
         refreshWall(force: true)
+        probeBehindTheFirstPaint()
+        startInput()
         startWallTriggers()
+    }
+
+    /// The two terminal probes that used to run before the wall's first byte (issue #99), moved behind
+    /// it.
+    ///
+    /// `PaneGeometry.measure` (`CSI 16t`/`14t`, up to 500 ms) and `supportsPlaceholders` (`U=1`, up to
+    /// 600 ms) are both questions a terminal is free never to answer, and `runWall` paid for them with
+    /// an empty alternate screen. So the first frame went out at the assumed cell on the pixel path,
+    /// and this asks with a wall already on screen: on Rex/kitty both answers arrive in ~1 ms, the
+    /// stale capture is dropped by the `desk.wallPane == pane` guard in `drawWall`, and the frame is
+    /// captured again once — with the real cell and the real transport.
+    ///
+    /// Still before `startInput()`: a probe that runs while the reader thread is live eats the bytes
+    /// the reader is waiting for.
+    ///
+    /// A terminal that does not answer changes nothing, and this repaints nothing: the query times out
+    /// to `fallbackCell` - the cell the first paint already used - and the memoised `U=1` verdict is
+    /// "no answer", i.e. the pixel path that frame was already drawn on.
+    private func probeBehindTheFirstPaint() {
+        // The pane the first frame was laid out for. Post-paint, so a grid `refreshWall` adopted from
+        // the pty is already in it: only a *cell* that moved is news here.
+        guard let drawn = wallPane else { return }
+        let signed = PaneGeometry.measure(cell: options.cell, grid: options.pane,
+                                          dpr: options.dpr) { Log.write($0) }
+        let wasPlaceholders = wallPlaceholders
+        // `--placeholders`/`--no-placeholders` force the transport and send no probe bytes for it (that
+        // has always been the deal); the cell query still runs, because only `--cell` beats it.
+        if let forced = options.placeholders {
+            wallPlaceholders = forced
+            Log.write("krd: pictures as \(forced ? "unicode placeholders (U=1)" : "pixel-sized placements") (forced)\n")
+        } else {
+            switch TermGeometry.supportsPlaceholders() {
+            case .some(true):
+                wallPlaceholders = true
+                Log.write("krd: the terminal answered a U=1 placeholder: pictures are fitted into their cells\n")
+            case .some(false):
+                wallPlaceholders = false
+                Log.write("krd: the terminal refused U=1: pictures are drawn at their own pixel size\n")
+            case .none:
+                wallPlaceholders = false
+                Log.write("krd: the terminal did not answer the U=1 probe: pixel-sized pictures\n")
+            }
+        }
+        let moved = WallProbeOutcome(paneMoved: drawn.paintsDifferently(from: signed),
+                                     transportMoved: wallPlaceholders != wasPlaceholders)
+        if moved.paneMoved { wallPane = signed }
+        guard moved.needsRepaint else { return }
+        // One line, because the repaint is a whole frame: which of the two answers was late is the
+        // difference between "the cell was wrong" and "the pictures were on the wrong transport".
+        let what = moved.paneMoved
+            ? (moved.transportMoved ? "cell and transport" : "cell")
+            : "transport"
+        Log.write("krd: the probe moved the wall's \(what); repainting the first frame\n")
+        refreshWall(force: true)
     }
 
     /// Everything that can move the window list, in one place: the 1 s grid tick, the 2 s staleness

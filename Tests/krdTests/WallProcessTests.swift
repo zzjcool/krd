@@ -51,14 +51,17 @@ final class WallProcessTests: XCTestCase {
             close(master)
         }
 
-        // 1. The header's `N windows` is the marker: it exists only once `runWall()` reached
-        //    `refreshWall`, i.e. after `startInput()` (the reader has the tty in raw mode by then),
-        //    so the keys below are the reader's and not the line discipline's.
+        // 1. Two markers, because the wall paints *before* it starts input (issue #99): `N windows`
+        //    is the paint, and the mouse-mode enable is `InputReader.start()` - by the time those
+        //    bytes are on the pane the tty is raw (`ISIG` cleared, so `0x1C` is a byte and not
+        //    `SIGQUIT`) and no probe can run any more, so the keys below are the reader's and not
+        //    the line discipline's (or a probe's: every probe runs before input).
         let painted = pump(master, into: &stream, timeoutMs: 3_000) { bytes in
-            String(decoding: bytes, as: UTF8.self).contains(" windows")
+            let text = String(decoding: bytes, as: UTF8.self)
+            return text.contains(" windows") && text.contains("\u{1B}[?1003h")
         }
         let soFar = String(decoding: stream, as: UTF8.self)
-        XCTAssertTrue(painted, "no wall paint within 3 s; the pane has \(stream.count) B, tail: "
+        XCTAssertTrue(painted, "no wall paint + input install within 3 s; the pane has \(stream.count) B, tail: "
                       + String(soFar.suffix(300)).debugDescription)
         guard painted else { return }
 

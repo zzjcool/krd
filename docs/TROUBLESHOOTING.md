@@ -399,6 +399,13 @@ use whichever one the probe picked, so this section applies to either page.
 
 3. `--placeholders` / `--no-placeholders` force either path, which is how a terminal is compared against itself.
 
+4. The wall paints **before** it probes (issue #99). The first frame goes out at an assumed 8x16 cell on the
+   pixel path, and the cell query / `U=1` probe run behind it: a terminal that answers gets one re-layout of
+   that same frame (`krd: wall cell 8x16 px, assumed (the cell probe runs behind the first paint)` followed by
+   `krd: the probe moved the wall's cell; repainting the first frame`, or `cell and transport` when `U=1` was
+   accepted too). A terminal that never answers changes nothing - the assumed cell is the fallback - and the
+   log shows no repaint line at all.
+
 ### 23. One frame, then the stream stops forever
 
 **Cause.** `SCStreamConfiguration.queueDepth = 1` stalls the stream on this macOS generation: the

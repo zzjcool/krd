@@ -63,4 +63,61 @@ final class PaneGeometryTests: XCTestCase {
                      "another image's reply is not ours")
         XCTAssertNil(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=31,p=1"), "a partial line")
     }
+
+    // MARK: - paint before probing (issue #99)
+
+    /// The first paint's measurement: with `askTerminal: false` the wall must not sit in a
+    /// `CSI 16t`/`14t` query - a terminal may take 500 ms to answer, or never - so it takes the
+    /// assumed cell and says in the log which assumption that was.
+    ///
+    /// The `--cell` and `ws_xpixel` branches need no query, so they keep winning here; the assertion
+    /// on `source` is therefore about the *branch* as well. A test host with a tty reports its own
+    /// pixel size, and then the pty is the right answer - the exact assumed string is asserted on the
+    /// no-pixel-size hosts (CI, ssh), which is the case the first paint exists for.
+    func testTheFirstPaintAssumesTheCellWithoutAskingTheTerminal() {
+        var lines: [String] = []
+        let pane = PaneGeometry.measure(cell: nil, grid: (cols: 137, rows: 44), dpr: nil,
+                                        askTerminal: false) { lines.append($0) }
+        XCTAssertEqual(lines.count, 1, "one line per measurement, for the bug report")
+        XCTAssertFalse(pane.source.hasPrefix("measured from the terminal"),
+                       "askTerminal: false ran the cell query; got \"\(pane.source)\"")
+        XCTAssertFalse(lines[0].contains("measured from the terminal"),
+                       "the log line claimed a terminal answer the first paint never waited for")
+        let pty = TermGeometry.read()
+        if pty.pixelWidth == 0 || pty.pixelHeight == 0 {
+            XCTAssertEqual(pane.source, "assumed (the cell probe runs behind the first paint)")
+            XCTAssertEqual(pane.cellW, TermGeometry.fallbackCell.w)
+            XCTAssertEqual(pane.cellH, TermGeometry.fallbackCell.h)
+            XCTAssertEqual(pane.dpr, 2, "the pixel path's quality multiplier, unchanged")
+        }
+    }
+
+    /// `--cell` is a pin, not a fallback: it beats every measurement, the first paint's assumed one
+    /// included. Losing that would make `--cell 17x33` a slow way to say nothing - and the pixels
+    /// the reader typed are device pixels, so no `dpr` doubling either.
+    func testAPinnedCellStillWinsWhenTheQueryIsSkipped() {
+        let pane = PaneGeometry.measure(cell: (w: 17, h: 33), grid: (cols: 137, rows: 44),
+                                        dpr: nil, askTerminal: false) { _ in }
+        XCTAssertEqual(pane.source, "--cell")
+        XCTAssertEqual(pane.cellW, 17)
+        XCTAssertEqual(pane.cellH, 33)
+        XCTAssertEqual(pane.dpr, 1)
+    }
+
+    /// The second measurement is allowed to answer "nothing moved" (a silent terminal): its fallback
+    /// is named differently on purpose, and that sentence must not count as a move - a repaint there
+    /// would re-capture every panel to draw the frame that is already on screen.
+    func testTheTwoFallbackSentencesAreTheSameGeometry() {
+        let assumed = PaneGeometry(cols: 137, rows: 44, cellW: 8, cellH: 16, dpr: 2,
+                                   source: "assumed (the cell probe runs behind the first paint)")
+        let silent = PaneGeometry(cols: 137, rows: 44, cellW: 8, cellH: 16, dpr: 2,
+                                  source: "assumed (the terminal did not answer)")
+        XCTAssertNotEqual(assumed, silent, "the log sentences really are different")
+        XCTAssertFalse(assumed.paintsDifferently(from: silent))
+        // A cell that did move is a move, and so is a grid.
+        var wider = silent
+        wider.cellW = 17
+        XCTAssertTrue(assumed.paintsDifferently(from: wider))
+        XCTAssertTrue(assumed.paintsDifferently(from: silent.with(cols: 120, rows: 44)))
+    }
 }
