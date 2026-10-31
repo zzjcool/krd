@@ -35,6 +35,16 @@ enum WallTrigger: Equatable {
     /// `WallRefresh.shouldEnumerate` has the final say, and for `.poll`/`.input` that answer is
     /// "only when the fingerprint moved". `.tick` must stay `false`: that is the fix of #141.
     var enumerates: Bool { self != .tick }
+
+    /// Does this trigger ask "did the world move?" before it enumerates — the fingerprint gate?
+    ///
+    /// Only the triggers that run on a rate the reader feels do: the poll (every 2.0 s) and the
+    /// wall's own input (every click). Their `drawn == nil || drawn != now` answer is what turns an
+    /// idle poll into a comparison instead of an enumeration. `.world` and `.explicit` enumerate by
+    /// design, so a fingerprint in front of them buys nothing — and on `.explicit` (the first paint,
+    /// a resize, a return from a mirror) it is a window-server round trip in front of the only frame
+    /// the wall has, which is the one place a gate must never be.
+    var gatesOnFingerprint: Bool { self == .poll || self == .input }
 }
 
 /// A cheap summary of the world, compared instead of the model (issue #169 review).

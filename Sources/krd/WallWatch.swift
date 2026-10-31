@@ -25,7 +25,10 @@ import Foundation
 ///   click's own, one fingerprint and, only if it moved, one enumeration.)
 /// - Everything else is bounded by the fingerprint poll: `WallSource.pollInterval` (2.0 s) takes one
 ///   fingerprint and enumerates only when it moved, so a card this file's events missed is stale
-///   for **at most 2.0 s**. That bound is hard for any change the fingerprint can see, and it sees
+///   for **at most 2.0 s + one paint** — 0.51 s of capture-and-paint measured (issue #169 gate), so
+///   the honest bound is **~2.5 s**, and **3.0 s** when a second trigger lands mid-capture and is
+///   painted by the follow-up paint (`WallSource.stalenessBound`). That bound is hard for any change
+///   the fingerprint can see, and it sees
 ///   every membership change — the window count *and* the sum of window numbers, which a close plus
 ///   an open cannot cancel.
 ///
@@ -62,7 +65,16 @@ final class WallWatch {
                      NSWorkspace.didHideApplicationNotification,
                      NSWorkspace.didUnhideApplicationNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
-            tokens.append(workspace.addObserver(forName: name, object: nil, queue: .main) { _ in
+            tokens.append(workspace.addObserver(forName: name, object: nil, queue: .main) { note in
+                // The activated app arrives *in the notification*, so the fingerprint's frontmost pid
+                // is a pointer read here rather than a lookup on the 2 s poll — the cache can only be
+                // stale for as long as it takes this notification to land. (Measured: the lookup was
+                // 0.12 µs warm / ~9 µs cold, so this is correctness and tidiness, not the 2.7x.)
+                if name == NSWorkspace.didActivateApplicationNotification,
+                   let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication {
+                    WallSource.noteActivation(app)
+                }
                 // `queue: .main` means this already runs on the main queue, so the work item below
                 // is ordered after the notification that caused it.
                 fire()

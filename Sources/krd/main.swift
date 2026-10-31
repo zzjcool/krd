@@ -811,6 +811,11 @@ final class Desk {
     /// already frontmost — AppKit posts nothing for that — so it is what turns "stale until the next
     /// unrelated system event" into "stale for at most `WallSource.pollInterval`".
     private var wallPollTimer: DispatchSourceTimer?
+    /// The first-paint deadline (issue #169 gate). A wall that shows nothing is worse than a stale
+    /// card, and two of five real-mode runs emitted no frame inside 11 s — so the one thing the wall
+    /// must never do silently, it also refuses to *keep* doing: if no frame has gone out by
+    /// `WallSource.firstPaintDeadline`, say so in the log and paint again.
+    private var wallFirstPaintTimer: DispatchSourceTimer?
     /// The fingerprint the last enumeration was taken against. `nil` = nothing enumerated yet.
     /// Both the poll and the wall's own input ask *this* whether the world moved, so the click path
     /// can afford to resync before it hit-tests a window id.
@@ -1424,6 +1429,7 @@ final class Desk {
         startWallTimer()
         startWallWatch()
         startWallPoll()
+        startFirstPaintWatchdog()
     }
 
     private func stopWallTriggers() {
@@ -1433,6 +1439,8 @@ final class Desk {
         wallPollTimer = nil
         wallWatch?.stop()
         wallWatch = nil
+        wallFirstPaintTimer?.cancel()
+        wallFirstPaintTimer = nil
     }
 
     /// The bounded-staleness poll (issue #169 review): `nil` is not the answer for "a window closed
@@ -1449,6 +1457,27 @@ final class Desk {
         timer.setEventHandler { [weak self] in self?.refreshWall(force: false, trigger: .poll) }
         timer.resume()
         wallPollTimer = timer
+    }
+
+    /// The one deadline the wall sets for itself: a frame must exist shortly after the session
+    /// starts, or the pane is an empty alternate screen that looks exactly like a crash.
+    ///
+    /// This is a log line plus a repaint, not a retry loop: `drawWall` is idempotent, and a paint that
+    /// fails for a real reason (no grant, a window that closed) still leaves the placeholders and the
+    /// footer's notice on the pane. The timer fires once, 1.5 s in, and says what it found.
+    private func startFirstPaintWatchdog() {
+        wallFirstPaintTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + WallSource.firstPaintDeadline)
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.cleanedUp, self.wallState != nil else { return }
+            guard !self.wallPaintedOnce else { return }
+            Log.write("krd: wall had painted nothing "
+                      + "\(WallSource.firstPaintDeadline) s after start; painting again\n")
+            self.drawWall()
+        }
+        timer.resume()
+        wallFirstPaintTimer = timer
     }
 
     /// The wall's 1 s timer. Only the *grid* is its business (an ioctl, no query): what the timer
@@ -1517,10 +1546,18 @@ final class Desk {
         // is what makes the poll cheap enough to bound staleness with, and what lets a click resync
         // before it hit-tests a window id. `.world` and `.explicit` skip the gate on purpose: a
         // notification can precede the window it announces, and the wall asking itself is a request.
-        let fingerprint = options.demo ? Self.demoFingerprint : timedFingerprint()
-        guard force || WallRefresh.shouldEnumerate(trigger, now: fingerprint,
-                                                   drawn: wallFingerprint) else { return }
-        wallFingerprint = fingerprint
+        //
+        // The fingerprint is taken **only for the gated triggers** (issue #169 gate): taking it
+        // before every enumeration put a window-server round trip in front of the *first paint*,
+        // where it can only be a way for the wall to show nothing. So a gated trigger pays it first,
+        // and an enumerating trigger reads its baseline *after* the paint it caused.
+        let gated = trigger.gatesOnFingerprint
+        let fingerprint = gated ? (options.demo ? Self.demoFingerprint : timedFingerprint()) : nil
+        if let fingerprint, !force,
+           !WallRefresh.shouldEnumerate(trigger, now: fingerprint, drawn: wallFingerprint) {
+            return
+        }
+        if let fingerprint { wallFingerprint = fingerprint }
         // The one enumeration in the wall, and it is counted: an idle wall's count must not move.
         let model = options.demo ? WallSource.demoModel() : WallSource.model()
         wallEnumerations += 1
@@ -1529,10 +1566,17 @@ final class Desk {
                       + "\(trigger)" + (force ? " forced" : "") + ")\n")
         }
         guard WallRefresh.needsRepaint(current: model, drawn: wallModel, pane: pane,
-                                       drawnPane: wallPane, force: force) else { return }
+                                       drawnPane: wallPane, force: force) else {
+            if !gated { wallFingerprint = options.demo ? Self.demoFingerprint : timedFingerprint() }
+            return
+        }
         wallModel = model
         wallPane = pane
         clampAndDraw(model: model, pane: pane)
+        // The poll's baseline, taken *after* the paint was started: a fingerprint in front of a paint
+        // is an extra window-server round trip on the wall's slowest path, and the first paint is the
+        // one place it could mean "no wall at all".
+        if !gated { wallFingerprint = options.demo ? Self.demoFingerprint : timedFingerprint() }
     }
 
     /// `WallSource.fingerprint()` with its own cost on the debug log. "Well under the old 1.24 ms per
@@ -1575,7 +1619,13 @@ final class Desk {
     /// a click has to be drawn against the list it was made on, and re-enumerating every window
     /// dictionary inside a click handler is not a thing to do.
     private func drawWall() {
-        guard let state = wallState, let pane = wallPane else { return }
+        guard let state = wallState, let pane = wallPane else {
+            // Silence here was the worst kind: the wall would sit on an alternate screen with nothing
+            // in it and no line anywhere saying why. Every other early return in the paint path says
+            // its reason (issue #169 gate: "any failure must log").
+            Log.write("krd: wall paint skipped, no \(wallState == nil ? "state" : "pane")\n")
+            return
+        }
         let layout = state.layout(cols: pane.cols, rows: pane.rows,
                                   displays: wallModel.displays.count,
                                   windows: wallModel.windows.count,
@@ -1603,8 +1653,10 @@ final class Desk {
         // overwrites them a moment later. Later paints skip this: a repaint is cheap only because it
         // is one frame, and by then the previous picture is already on screen.
         if !wallPaintedOnce {
-            wallPaintedOnce = true
-            paintWall(layout: layout, model: model, panels: [], pictures: [], failures: [:])
+            // The flag tracks a frame that actually went out, not an attempt: set before the paint it
+            // would make one failed write permanent (`paintWall` reports whether it wrote).
+            wallPaintedOnce = paintWall(layout: layout, model: model, panels: [],
+                                        pictures: [], failures: [:])
         }
         // One repaint at a time: a second capture while the first is in flight would put pictures
         // from two different models on one screen.
@@ -1620,6 +1672,28 @@ final class Desk {
             guard let desk = self else { return }
             await MainActor.run {
                 desk.wallPaintTask = nil
+                // A frame whose world moved while it was being captured is dropped, not painted
+                // (issue #169 gate): painting it would show a stale picture and *then* cost a second
+                // capture and paint to correct it — that second whole capture is exactly what put the
+                // staleness bound at 3.0 s instead of 2.5 s. One capture of the model the desk holds
+                // now is both cheaper and fresher.
+                guard desk.wallModel == model, desk.wallPane == pane, !desk.cleanedUp else {
+                    if !desk.cleanedUp {
+                        Log.write("krd: wall dropped a stale frame (the world moved during its capture)\n")
+                        desk.wallDirtyWhilePainting = false
+                        desk.drawWall()
+                    }
+                    return
+                }
+                if !result.failures.isEmpty {
+                    // A mask is a picture that did not happen: say which slot and why, once per frame,
+                    // or "the card is a grey box" has no answer anywhere (issue #169 gate).
+                    let reasons = result.failures
+                        .sorted { $0.key < $1.key }
+                        .map { "\($0.key):\($0.value.maskLabel)" }
+                        .joined(separator: " ")
+                    Log.write("krd: wall capture failed for \(result.failures.count) panel(s) - \(reasons)\n")
+                }
                 desk.paintWall(layout: layout, model: model, panels: panels,
                                pictures: result.pictures, failures: result.failures)
                 if desk.wallDirtyWhilePainting, !desk.cleanedUp {
@@ -1688,9 +1762,13 @@ final class Desk {
     }
 
     /// Paint the text, then the pictures on the cells the text was told to leave alone.
+    @discardableResult
     private func paintWall(layout: WallLayout, model: WallModel, panels: [WallPanel],
-                           pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError]) {
-        guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else { return }
+                           pictures: [WallPictures.Picture], failures: [Int: PanelCaptureError]) -> Bool {
+        guard let canvas = wallCanvas, let pane = wallPane, let state = wallState else {
+            Log.write("krd: wall frame not written (canvas, pane or state missing)\n")
+            return false
+        }
         var paints = WallSlotPaints()
         for panel in panels {
             if let failure = failures[panel.slot] {
@@ -1730,10 +1808,15 @@ final class Desk {
                 paints.notice = .screenRecordingDenied(terminal: program)
             }
         }
-        writer.writeChrome(canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
-                                       layout: layout, focus: state.focus,
-                                       cellW: pane.cellW, cellH: pane.cellH, paints: paints))
-        guard !pictures.isEmpty else { return }
+        let text = canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
+                               layout: layout, focus: state.focus,
+                               cellW: pane.cellW, cellH: pane.cellH, paints: paints)
+        // The canvas answers with no bytes when the frame it was asked for is the frame already on
+        // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
+        // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
+        let wrote = !text.isEmpty
+        writer.writeChrome(text)
+        guard !pictures.isEmpty else { return wrote }
         // The same frame contract the tile path uses: `emitPanel` only appends, `endFrame`
         // flushes. Without the pair the pictures would sit in the writer's buffer forever - which
         // is exactly what the first live run looked like: blank panels and no bytes on the wire.
@@ -1781,6 +1864,7 @@ final class Desk {
             }
         }
         writer.endFrame()
+        return true
     }
 
     /// Is this slot's failure specifically "the grant is missing"?

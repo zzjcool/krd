@@ -70,17 +70,59 @@ enum WallSource {
         }
     }
 
-    /// How long the wall may go stale before its own poll looks again (issue #169 review).
+    /// How often the poll asks the fingerprint — the *detection* half of the staleness bound (issue
+    /// #169 review).
     ///
-    /// This is the hard upper bound on every staleness case the fingerprint can see, and the case it
-    /// exists for is the one AppKit never announces: a window that closes or opens inside the app
-    /// that is already frontmost. 2.0 s rather than 1 s because the poll's cost is now the bound's
-    /// cost — one `fingerprint()` per interval instead of the per-second enumeration of #141.
+    /// The case it exists for is the one AppKit never announces: a window that closes or opens
+    /// inside the app that is already frontmost. 2.0 s rather than 1 s because the poll's cost is
+    /// now the bound's cost — one `fingerprint()` per interval instead of the per-second enumeration
+    /// of #141.
+    ///
+    /// **This is not the staleness bound.** Detection is the first term of it; the frame still has
+    /// to be enumerated, captured and painted after the poll notices (see `stalenessBound`).
     static let pollInterval: TimeInterval = 2.0
+
+    /// One enumeration, measured: `WallSource.model()` 1.24 ms median on this machine.
+    static let enumerationCost: TimeInterval = 0.00124
+
+    /// One capture-plus-paint, measured (issue #169 gate): the wall enumerated at t=1.31 s and the
+    /// first payload was on the wire at t=1.82 s, i.e. **0.51 s** for the ScreenCaptureKit round
+    /// trip and the frame that carries it.
+    static let paintLatency: TimeInterval = 0.51
+
+    /// The honest staleness bound: detection plus the paint it causes.
+    ///
+    /// 2.0 s of poll + 0.51 s of capture-and-paint = **2.51 s**, and the fingerprint (0.9 ms
+    /// median, see `fingerprint()`) and the enumeration (1.24 ms) are inside the noise of that.
+    ///
+    /// The *worst* case is one more paint: a second trigger that lands while a capture is in flight
+    /// cannot start a second capture (one frame at a time, `drawWall`), so it is painted by the
+    /// repaint that follows the first — `paintLatency` twice, **3.02 s**. The earlier claim of "at
+    /// most 2.0 s" was the poll interval alone, which is when the wall *decides* to repaint, not
+    /// when the picture is on the pane.
+    static let stalenessBound: TimeInterval = pollInterval + paintLatency
+    static let worstStalenessBound: TimeInterval = pollInterval + paintLatency * 2
+
+    /// How long a wall session may go without a frame before it says so and paints again (issue #169
+    /// gate: two of five real-mode cold starts emitted nothing inside 11 s). Chosen above the
+    /// measured first-paint cost (0.17 s to the first text frame, 1.8 s to the first payload) and
+    /// below the 2.0 s a reader would call "broken".
+    static let firstPaintDeadline: TimeInterval = 1.5
 
     /// A four-scalar summary of the world, strictly less work than `model()` on the same list
     /// (issue #169 review): the poll runs it forever, so it must not pay for the enumeration it is
     /// there to avoid.
+    ///
+    /// **What it actually costs** (issue #169 gate, `--debug` log lines on this machine):
+    /// **733 µs–3.8 ms per call, median ~900 µs** — against the enumeration it replaces at 1.24 ms,
+    /// i.e. **2.7× cheaper per second, not "near-zero"** (0.45 ms/s at the 2 s rate against the old
+    /// 1.24 ms/s). Where it goes: `CGWindowListCopyWindowInfo` is **99 %** of it (a window-server round
+    /// trip, 261–306 µs minimum, 429 µs median on an idle-ish machine), the CF walk 2–3 µs, the two
+    /// caches 0.7 µs, the frontmost pid 0.1–9 µs. There is no cheaper public API for a *filtered*
+    /// change signal: the option set is filters only (no field selection, no count-only call),
+    /// `CGWindowListCreate` (ids only, 2–3× cheaper) is `CF_SWIFT_UNAVAILABLE` and drops
+    /// layer/owner — the two fields the filter is made of — and the `CGS*WindowCount` SPI is private.
+    /// So the round trip is the floor and the 2.7× is the honest number.
     ///
     /// Which is why nothing here goes through `windows()`: that bridges the window list into
     /// `[[String: Any]]` (a dictionary per window) and then applies `WindowOrder`'s bounds and name
@@ -114,8 +156,36 @@ enum WallSource {
         }
         return WallFingerprint(windows: windows,
                                ids: ids,
-                               frontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0,
+                               frontmost: frontmostPID(),
                                displays: activeDisplayIDs())
+    }
+
+    /// The frontmost app's pid, cached between notifications (issue #169 gate).
+    ///
+    /// `NSWorkspace.frontmostApplication` is the one field of the fingerprint that is not read from
+    /// the window list we already copy, so it is read once per activation instead of once per poll:
+    /// `WallWatch` hears every activation and the notification carries the app itself
+    /// (`noteActivation`). Measured honestly: **0.12 µs warm, ~9 µs for the first call after an idle
+    /// interval** — i.e. 0.03 %–1 % of the 733 µs–3.8 ms call, not the reason the poll costs what it
+    /// costs. It is cached because it is exact and free, not because it is the 2.7×.
+    private static func frontmostPID() -> Int32 {
+        cacheLock.lock()
+        let cached = cachedFrontmost
+        cacheLock.unlock()
+        if let cached { return cached }
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        cacheLock.lock()
+        cachedFrontmost = pid
+        cacheLock.unlock()
+        return pid
+    }
+
+    /// The activation `WallWatch` just heard about, straight from the notification's user info: no
+    /// window-server query, and the cache is exact because the system hands us the answer.
+    static func noteActivation(_ app: NSRunningApplication) {
+        cacheLock.lock()
+        cachedFrontmost = app.processIdentifier
+        cacheLock.unlock()
     }
 
     /// One integer-valued key of a window dictionary, or `nil` when the key is missing or holds
@@ -175,13 +245,19 @@ enum WallSource {
     private static let cacheLock = NSLock()
     private static var cachedPIDs: Set<Int32>?
     private static var cachedDisplays: [UInt32]?
+    private static var cachedFrontmost: Int32?
 
     /// Drop the caches whose truth a notification just moved. Called from `WallWatch`; exact, not
     /// periodic — a launch is the only way the pid set can change, and `WallWatch` hears every one.
+    ///
+    /// The frontmost pid is dropped here too because the frontmost app can *quit*: a launch or a
+    /// terminate is human-scale, so re-reading the answer once per notification costs nothing next to
+    /// the poll that reads it forever.
     static func invalidateFingerprint() {
         cacheLock.lock()
         cachedPIDs = nil
         cachedDisplays = nil
+        cachedFrontmost = nil
         cacheLock.unlock()
     }
 
