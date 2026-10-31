@@ -171,6 +171,8 @@ struct AXOptions {
     var menuBar = false
     var prompt = false
     var maxNodes = 400
+    /// `tree --diff`: print only what changed since this window's previous dump (issue #108).
+    var diff = false
     /// `find`: the text to look for. `press`/`set`: the ref, in `ref`.
     var query = ""
     var ref: String?
@@ -348,6 +350,7 @@ enum AXCommand {
             case "--all": options.all = true
             case "-i", "--interactive": options.interactiveOnly = true
             case "--menubar": options.menuBar = true
+            case "--diff": options.diff = true
             case "--prompt": options.prompt = true
             case "-d", "--depth":
                 options.depth = try int(args, &i, for: arg, min: 1, max: 40)
@@ -384,6 +387,11 @@ enum AXCommand {
         }
         guard !options.verb.isEmpty else {
             throw AXFailure.usage("krd ax — read the Mac as text, without capturing a frame")
+        }
+        // `--diff` compares two dumps of one window, so only `tree` has one to compare. Checked
+        // here, before the per-verb rules, so no verb can accept a flag it would then ignore.
+        if options.diff && options.verb != "tree" {
+            throw AXFailure.usage("--diff only applies to tree (`krd ax tree --app <app> --diff`)")
         }
         if options.all && options.interactiveOnly {
             throw AXFailure.usage("--all and -i contradict each other")
@@ -445,6 +453,8 @@ enum AXCommand {
             --all                  also emit unlabelled structure
             --menubar              prepend the app's menu bar
             --max <n>              node budget (default 400)
+            --diff                 only what changed since this window's previous dump, or
+                                   the single word `unchanged`
           find <query>           nodes whose name/value/identifier/role contains <query>
             --role <r>             …and only that role (`button` or `AXButton`)
           screen                 one line per window, plus the focused element
@@ -875,7 +885,26 @@ enum AXCommand {
         }
         let window = windows[options.windowIndex]
 
-        let dump = AXRefStore().beginDump(bundle: app.bundle, window: options.windowIndex)
+        let scope = AXSnapshotScope(interactiveOnly: options.interactiveOnly && !options.all,
+                                    all: options.all, menuBar: options.menuBar,
+                                    depth: options.depth, maxNodes: options.maxNodes)
+        let store = AXRefStore()
+        let dump = store.beginDump(bundle: app.bundle, window: options.windowIndex)
+        // `--diff` needs the dump before this one, and it is looked up on the index `beginDump`
+        // has already read (#102 keeps that at one read per dump) and loaded here, before
+        // `save`'s prune can drop its file. This is the only snapshot a diff decodes.
+        var baseline: AXBaseline?
+        if options.diff {
+            let found = store.previousSnapshot(bundle: app.bundle, window: options.windowIndex,
+                                               excluding: nil, index: dump.loaded.index)
+            // A baseline walked with other parameters is not a baseline: `--all` alone adds
+            // hundreds of nodes, so comparing across scopes would answer "noise" (issue #108).
+            baseline = found?.snapshot.scope == scope ? found : nil
+            if baseline == nil {
+                noteMissingBaseline(app: app, window: options.windowIndex, store: store,
+                                    previousScope: found?.snapshot.scope, scope: scope)
+            }
+        }
         var reader = AXWalker(
             interactiveOnly: options.interactiveOnly && !options.all,
             emitEverything: options.all,
@@ -899,14 +928,55 @@ enum AXCommand {
 
         let title = text(window, kAXTitleAttribute)
         let generation = persist(app: app, window: title, index: options.windowIndex,
-                                 count: windows.count, entries: reader.entries, dump: dump)
+                                 count: windows.count, entries: reader.entries, dump: dump,
+                                 scope: scope)
+        if options.diff, let baseline {
+            let report = AXDiff.plan(previous: baseline.snapshot.nodes.map(AXDiffNode.init),
+                                     current: reader.entries.map(AXDiffNode.init))
+            if options.json {
+                var payload = AXTreeJSON(
+                    app: app.name, pid: app.pid, windowIndex: options.windowIndex,
+                    windowCount: windows.count, windowTitle: title,
+                    frame: frame(window), nodes: reader.nodes,
+                    truncated: reader.truncated, visited: reader.visited,
+                    generation: generation).dictionary
+                // The tree itself is exactly what a diff exists to not print: `nodes` is
+                // replaced by the changes, and every other key stays where it was. `nodes`
+                // being present is the machine's "no baseline, this is a full dump" marker.
+                payload.removeValue(forKey: "nodes")
+                payload["baseline"] = baseline.generation
+                payload["unchanged"] = report.isEmpty
+                payload["changes"] = (report.added + report.removed + report.changed)
+                    .map(AXDiff.dictionary)
+                print(jsonString(success(payload)))
+                return AXExit.ok.rawValue
+            }
+            if report.isEmpty {
+                // The common case after a press that opened nothing: one word, one token,
+                // instead of re-reading a tree of ~3,200 (issue #108).
+                print(AXDiff.unchanged)
+                return AXExit.ok.rawValue
+            }
+            print(AXDiff.summary(report, generation: generation, baseline: baseline.generation))
+            printChanges(report)
+            return AXExit.ok.rawValue
+        }
         if options.json {
-            print(jsonString(success(AXTreeJSON(
+            var payload = AXTreeJSON(
                 app: app.name, pid: app.pid, windowIndex: options.windowIndex,
                 windowCount: windows.count, windowTitle: title,
                 frame: frame(window), nodes: reader.nodes,
                 truncated: reader.truncated, visited: reader.visited,
-                generation: generation).dictionary)))
+                generation: generation).dictionary
+            if options.diff {
+                // No usable baseline: fail open, the full tree is the answer, and an empty
+                // `changes` beside a null `baseline` is how a caller tells this apart from a
+                // diff that found nothing (`unchanged: true`, no `nodes`).
+                payload["baseline"] = NSNull()
+                payload["unchanged"] = false
+                payload["changes"] = [[String: Any]]()
+            }
+            print(jsonString(success(payload)))
             return AXExit.ok.rawValue
         }
         print(AXText.header(
@@ -926,7 +996,8 @@ enum AXCommand {
     /// writable. Failing to persist must not fail the read: the tree is still the answer, it
     /// just cannot be acted on later, and the note on stderr says exactly that.
     static func persist(app: RunningApp, window: String, index: Int, count: Int,
-                        entries: [AXEntry], dump: AXRefStore.Dump) -> String? {
+                        entries: [AXEntry], dump: AXRefStore.Dump,
+                        scope: AXSnapshotScope) -> String? {
         guard !entries.isEmpty else { return nil }
         let snapshot = AXSnapshot(
             schema: AXSnapshot.schema,
@@ -934,7 +1005,17 @@ enum AXCommand {
             createdAt: Date(),
             app: app.name, bundle: app.bundle, pid: app.pid,
             windowIndex: index, windowTitle: window, windowCount: count,
-            nodes: entries.map { AXSnapshotNode(ref: $0.node.ref, chain: $0.chain, root: $0.root) })
+            // Schema 2 carries what the dump printed, not just what it takes to find the node
+            // again, so a later `--diff` can say *what* changed and not only that something did.
+            // A ref still resolves by `chain` alone: nothing about the write path moves.
+            nodes: entries.map { entry in
+                AXSnapshotNode(ref: entry.node.ref, chain: entry.chain, root: entry.root,
+                               name: entry.node.name, detail: entry.node.detail,
+                               actions: entry.node.actions, frame: AXFrame(entry.node.frame))
+            },
+            // The walk parameters, so a baseline from another scope is refused instead of
+            // compared (`--all` alone would make every diff a wall of additions).
+            scope: scope)
         do {
             try dump.save(snapshot)
             return snapshot.generation
@@ -942,6 +1023,53 @@ enum AXCommand {
             FileHandle.standardError.write(Data(
                 "krd ax: could not save refs (\(error)); `press`/`set` will not resolve them\n".utf8))
             return nil
+        }
+    }
+
+    // MARK: - diff (issue #108)
+
+    /// One stderr sentence when `--diff` has no usable baseline, because "the tree did not
+    /// change" and "there was nothing to compare against" must never look alike. Fail-open on
+    /// purpose, the same rule `persist` follows: the dump is still the answer, it just cannot
+    /// be compared, and which of the two reasons it was is in the sentence.
+    static func noteMissingBaseline(app: RunningApp, window: Int, store: AXRefStore,
+                                    previousScope: AXSnapshotScope?, scope: AXSnapshotScope) {
+        let text: String
+        if let previousScope {
+            text = "krd ax: the last dump of this window used a different scope "
+                + "(\(scopeText(previousScope))); --diff compares like with like, so this is a "
+                + "full dump and the next one can diff\n"
+        } else {
+            text = "krd ax: no previous dump of \(AXText.sanitize(app.name, limit: 40)) "
+                + "window \(window) in \(store.directory.path); this dump becomes the baseline, "
+                + "the next one can diff\n"
+        }
+        FileHandle.standardError.write(Data(text.utf8))
+    }
+
+    /// The walk parameters, as the sentence above names them.
+    static func scopeText(_ scope: AXSnapshotScope) -> String {
+        var parts = ["depth \(scope.depth)", "max \(scope.maxNodes)"]
+        if scope.interactiveOnly { parts.append("-i") }
+        if scope.all { parts.append("--all") }
+        if scope.menuBar { parts.append("--menubar") }
+        return parts.joined(separator: " ")
+    }
+
+    /// The change lines, capped: a diff exists to be one screen, and the two caps are constants
+    /// in `AXDiff` so the tests can assert them. The `≡` lines go last, under the changes: they
+    /// are the ones that say "the @e42 you pressed is still here, as @e180".
+    static func printChanges(_ report: AXDiffReport) {
+        let changes = report.added + report.removed + report.changed
+        for change in changes.prefix(AXDiff.changeLimit) { print(AXDiff.line(change)) }
+        if changes.count > AXDiff.changeLimit {
+            print("# +\(changes.count - AXDiff.changeLimit) more changes · `krd ax tree` without "
+                + "--diff prints the whole tree")
+        }
+        for anchor in report.anchors.prefix(AXDiff.anchorLimit) { print(AXDiff.line(anchor)) }
+        if report.anchors.count > AXDiff.anchorLimit {
+            print("# +\(report.anchors.count - AXDiff.anchorLimit) more nodes are still there "
+                + "under a new ref")
         }
     }
 
@@ -1001,7 +1129,11 @@ enum AXCommand {
 
         let title = text(window, kAXTitleAttribute)
         let generation = persist(app: app, window: title, index: options.windowIndex,
-                                 count: windows.count, entries: reader.entries, dump: dump)
+                                 count: windows.count, entries: reader.entries, dump: dump,
+                                 scope: AXSnapshotScope(interactiveOnly: false, all: options.all,
+                                                        menuBar: options.menuBar,
+                                                        depth: options.depth,
+                                                        maxNodes: options.maxNodes))
         if options.json {
             var payload: [String: Any] = [
                 "app": app.name, "pid": Int(app.pid), "window": options.windowIndex,
