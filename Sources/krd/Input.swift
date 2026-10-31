@@ -68,10 +68,42 @@ final class InputReader {
     /// to the chrome, i.e. must not reach the remote desktop.
     var onChromeKey: ((UInt8) -> Bool)?
     /// A click outside the picture, in 1-based cells: the status line and its panels, and — with
-    /// `--wall` — the whole pane, which has no picture at all. The flag is `report.isWheel`: a wall
-    /// click is a click on a control, and a wheel report over it must not enter anything, so the
-    /// receiver has to be able to tell the two apart.
-    var onChromeClick: ((Int, Int, Bool) -> Void)?
+    /// `--wall` — the whole pane, which has no picture at all. The third argument is the wheel's
+    /// direction: `0` for a click, `-1` for a notch up, `+1` for a notch down. A wall click is a
+    /// click on a control and a wheel report over it must not enter anything, so the receiver has to
+    /// be able to tell the two apart; a panel needs the sign as well as the flag, because one notch
+    /// up and one notch down scroll opposite ways (issue #118).
+    var onChromeClick: ((Int, Int, Int) -> Void)?
+    /// Does the chrome own this cell? 1-based row and column, in cells.
+    ///
+    /// Asked *before* the viewport guards, and for every non-motion, non-release report, because the
+    /// picture's box cannot answer this question: with `?1016h` the box is the pane's own pixel
+    /// grid (a 40x15 pty with 8x16 cells reports 320x240 px and builds its frame out of them, so a
+    /// wheel over the panel — px(160,112) is row 8 — is inside the picture's 320x240 px frame as
+    /// well), so `Viewport.contains(pixel:)` is true over the panel and a wheel there was posted to
+    /// the remote desktop instead of moving the panel's window (#118). The chrome's own regions do
+    /// not depend on the picture's box; a cell that is neither a panel cell nor a status-line button
+    /// answers `false` here and takes the viewport path exactly as before, so a legitimate desktop
+    /// scroll is untouched. `Desk` supplies it, and this stays a closure so the reader keeps its
+    /// one-way dependency on the chrome layer.
+    var chromeOwns: ((Int, Int) -> Bool)?
+
+    /// Is a press the chrome took still in flight, i.e. is its release still to come?
+    ///
+    /// A press the chrome is offered never reaches the remote desktop, and neither may the rest of
+    /// its gesture: in pixel mode the picture's box is the whole pane, so the drag and the release
+    /// of that same click would fall through the viewport guards and arrive as
+    /// `leftMouseDragged`/`leftMouseUp` with no `leftMouseDown` before them — a mirrored app left
+    /// holding a button it never saw pressed (#118). Set when a press is routed to the chrome,
+    /// cleared by its release, and cleared by a press that is not the chrome's (a fresh down means
+    /// the release of the old gesture is never coming). A wheel ends nothing, so it neither sets
+    /// nor clears it.
+    private var chromePress = false
+
+    /// Is a press the chrome took still waiting for its release? The flag above, as a question the
+    /// tests can ask: the rule is a rule about a *sequence*, and "was the drag swallowed" is only
+    /// observable through this (nothing else in the reader changes when a report is dropped).
+    var chromePressInFlight: Bool { chromePress }
 
     /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
     /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
@@ -319,7 +351,12 @@ final class InputReader {
     /// One mouse report, in the terminal's own units. Everything that needs *this* machine happens
     /// here: the cell-vs-pixel latch (a cell can never exceed the grid), the viewport transform,
     /// the click counter and the injection (issue #45 keeps those on this side of the boundary).
-    private func handleMouse(_ report: MouseReport) {
+    ///
+    /// `internal`, not `private`: it is the one entry point a report takes, and the gesture rule
+    /// (`chromePress`, #118) is a rule about a *sequence* of reports — `PanelWheelRealPathTests`
+    /// feeds it three and asserts the desk heard one click. The tty is the only thing left in
+    /// `loop()`, so nothing here touches a file descriptor.
+    func handleMouse(_ report: MouseReport) {
         let cx = report.x, cy = report.y
         let motion = report.isMotion
 
@@ -329,7 +366,40 @@ final class InputReader {
             pixelMouse = true
         }
 
+        // The rest of a gesture the chrome already took: swallowed, so the picture never sees it
+        // half-done (see `chromePress`). The release is where it ends; until then every motion
+        // report of that drag belongs to the chrome too.
+        if chromePress, motion || report.isRelease {
+            if report.isRelease { chromePress = false }
+            if trace {
+                log("swallowed the chrome press's \(report.isRelease ? "release" : "motion") at "
+                    + "\(pixelMouse ? "px" : "cell")(\(cx),\(cy))")
+            }
+            return
+        }
+
         let viewport = currentViewport()
+        // The chrome answers first (see `chromeOwns`): priority is the panel's rectangle, then a
+        // status-line button, then the picture. `chromeCell` is the decision, in one place, so a
+        // test can ask it the same question this line asks.
+        if !motion, !report.isRelease, let owns = chromeOwns, let click = onChromeClick {
+            // The cell size is only divided by in pixel mode, and `TermGeometry.read()` is an
+            // ioctl: ask for it when it is used.
+            let cell = Self.chromeCell(row: cy, col: cx, pixelMouse: pixelMouse,
+                                       wheel: report.wheelStep,
+                                       cellSize: pixelMouse ? TermGeometry.read().cellSize
+                                                            : TermGeometry.fallbackCell,
+                                       owns: owns)
+            if let cell {
+                click(cell.row, cell.col, report.wheelStep)
+                if !report.isWheel { chromePress = true }   // a wheel ends nothing (see above)
+                downButton = nil
+                return
+            }
+            // A press (not a wheel) that is not the chrome's: the gesture in flight, if any, is
+            // not coming back, so drop the flag instead of letting it swallow a later drag.
+            if !report.isWheel { chromePress = false }
+        }
         let point: CGPoint
         let spot: String
         if pixelMouse {
@@ -346,9 +416,8 @@ final class InputReader {
                 // The chrome path opened a panel twice before this and that was invisible, because
                 // opening an already-open panel is a no-op.
                 if !motion, !report.isRelease, let click = onChromeClick {
-                    let cell = TermGeometry.read().cellSize
-                    click(Int(Double(cy) / max(cell.h, 1)) + 1, Int(Double(cx) / max(cell.w, 1)) + 1,
-                          report.isWheel)
+                    let cell = Self.cell(forPixel: cx, cy, cellSize: TermGeometry.read().cellSize)
+                    click(cell.row, cell.col, report.wheelStep)
                 }
                 if !motion { downButton = nil }
                 return
@@ -357,7 +426,7 @@ final class InputReader {
             spot = "px(\(cx),\(cy))"
         } else {
             guard viewport.contains(cell: cx, cy) else {
-                if !motion, !report.isRelease { onChromeClick?(cy, cx, report.isWheel) }
+                if !motion, !report.isRelease { onChromeClick?(cy, cx, report.wheelStep) }
                 if !motion { downButton = nil }
                 return
             }
@@ -398,6 +467,36 @@ final class InputReader {
             if dryRun { return }
         }
         postMouse(type, button: button, at: point, flags: flags)
+    }
+
+    /// The chrome's routing decision, as one pure step: the 1-based cell the chrome is to be asked
+    /// about, or `nil` when this report is not to be offered to it at all.
+    ///
+    /// Press-shaped reports only — a press and a wheel are both `!motion, !isRelease`, and the
+    /// chrome takes both (`Desk.chromeClick` reads `wheel` to tell them apart). A drag or a release
+    /// never gets here: those belong to whatever the press went to (`chromePress`). In pixel mode
+    /// (`?1016h`) the report is in device pixels, so the cell is the pixel divided by the
+    /// terminal's own cell size — the same division the outside-picture path has always done.
+    /// `wheel` travels with the report so the caller hands over the whole report rather than half
+    /// of it; the cell does not depend on it, because a wheel and a press over the panel are the
+    /// same cell and that is the point (#118). Pure so the decision can be tested with a pty's real
+    /// numbers (`PanelWheelTests`) rather than a pty.
+    static func chromeCell(row: Int, col: Int, pixelMouse: Bool, wheel: Int,
+                           cellSize: (w: Double, h: Double),
+                           owns: (Int, Int) -> Bool) -> (row: Int, col: Int)? {
+        let cell = pixelMouse ? self.cell(forPixel: col, row, cellSize: cellSize)
+                              : (row: row, col: col)
+        return owns(cell.row, cell.col) ? cell : nil
+    }
+
+    /// A SGR-Pixels report (`?1016h`) → the 1-based cell it is over. One cell size, from the
+    /// terminal: the pty's `ws_xpixel`/`ws_ypixel` divided by the grid, or the documented fallback
+    /// when the terminal does not report pixels. Pure so the pixel half of the routing can be tested
+    /// against the real numbers (`PanelWheelTests`) instead of a pty.
+    static func cell(forPixel px: Int, _ py: Int,
+                     cellSize: (w: Double, h: Double)) -> (row: Int, col: Int) {
+        (row: Int(Double(py) / max(cellSize.h, 1)) + 1,
+         col: Int(Double(px) / max(cellSize.w, 1)) + 1)
     }
 
     /// Double and triple clicks: same spot within half a second, like the real thing.

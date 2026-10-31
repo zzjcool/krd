@@ -496,6 +496,17 @@ The hard part is not drawing; it is coexisting with the placement layer:
    cannot split a base64 payload.
 5. **A panel's rows come out of the picture**, before the aspect fit: the layout re-fits, the
    capture restarts at the new size, exactly like a resize. A panel is never floated over tiles.
+   When the pane is too short for both, the *panel* keeps its rows and the pictures drops to a
+   one-row strip (`Chrome.pictureRows`) — a panel squeezed into half its rows answers nothing, while
+   a strip of picture still says what is being mirrored. The box carries `1-10/16 ↕` on its top
+   border whenever it holds fewer rows than the panel has (`10/16 ↕` when the pane is too narrow for
+   the window), and the wheel scrolls that window one row per notch, so every row of a panel is a
+   row a reader can reach (issue #118: before this, 8 of the stats panel's 16 rows and the newest
+   lines of the log were simply dropped). The marker is not only a small-pane signal: a box's inside
+   is `height - 3` — two borders and the pane's final row, which the drawer leaves alone — so today
+   all five panels are one to three rows short at *every* pane size, and the wheel is what shows the
+   rest. Giving them `contentRows + 3` rows is the change that would make a tall pane show a panel
+   whole, and it costs the picture that many rows.
 
 The status line is the only thing that runs at a fixed rate (1 Hz), and it costs text bytes:
 ~60 B/s against the 20–50 KB/s the picture needs. That is why this is a text layer and not an

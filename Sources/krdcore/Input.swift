@@ -44,6 +44,20 @@ public struct MouseReport: Equatable {
     public var isMotion: Bool
     /// xterm's meta bit becomes Option on the Mac; the mapping is `krd`'s business.
     public var mods: Modifiers
+
+    /// The wheel's direction in the form the chrome takes: `0` for anything that is not a wheel,
+    /// `-1` for a notch up (button 64) and `+1` for a notch down (65). One notch is one line or one
+    /// card -- how far that is, is the receiver's business; the sign is the terminal's, and it was
+    /// dropped on the way in for as long as the callback carried a `Bool`, which is why nothing
+    /// could scroll up (issue #118).
+    ///
+    /// The horizontal codes (66/67) are a downward step, not a left/right one: the wall has always
+    /// paged its shelf on them and a panel has nothing sideways to scroll. Deciding that here, next
+    /// to the parse, is what keeps the answer the same for both receivers.
+    public var wheelStep: Int {
+        guard isWheel else { return 0 }
+        return button == 0 ? -1 : 1
+    }
 }
 
 /// The CSI/SS3 state machine: bytes in, `Event`s out.
