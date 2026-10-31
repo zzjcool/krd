@@ -500,12 +500,42 @@ selftest 能画出来，说明渲染器没问题，问题在采集或权限；�
 
 ## 6. Headless（`krd ax`）
 
+`krd ax` 的结局都是六个退出码之一，这张表和 `krd ax --help` 里那张是同一张（这里是它的中文译文），
+`README.zh-CN.md` 也一模一样：
+
+```text
+exit  0  ok —— krd ax doctor 的诊断也是绿的
+      2  用法错：不认识的 flag 或子命令，或者值缺失/格式不对
+      3  没有辅助功能（Accessibility）权限
+      4  辅助功能 API 不应答：Mac 睡了或锁屏、窗口服务器没了、能应答的应用全卡住
+      5  没有匹配到：查询、应用或 ref 什么都没找到（krd ax windows 列表为空照样退 0）
+      6  节点拒绝了这个动作，或者应用读回来的值不一样
+
+krd ax doctor 诊断不通过时退出 3 或 4（文本和 --json 都一样），而不是 0，所以
+krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检查。
+```
+
+`--json` 不改任何退出码，也不往 stdout 放散文：失败时 stdout 只有一个对象
+`{"ok": false, "error": {"code", "exit", "message", "next"}}`，`code` 是
+`usage|permission|environment|notFound|notActionable` 之一，`exit` 就是进程退出的那个数，
+`ax` 是 AXError 名字（`cannotComplete`），只出现在权限类和环境类（码 5、6 把名字写在
+`message` 里）。所以 `jq -e '.ok'` 做门、`.error.code` 分类、`.error.ax` 定位是哪个辅助功能
+调用、`.error.exit` 是进程码。成功时带 `"ok": true` 和该命令原有的字段——`press`/`set` 回的是
+它们读回来的状态：
+`{"ok": true, "command": "press|set", "ref": "@e7", "label": "…", "before": "…", "after": "…",
+"elapsedMs": 3}`（`press` 在元素消失时给 `after: null` 和一个 `note`，写进去了但回读没变时也是
+同一个 `note`；`set` 遇到元素消失宁可退 `6` 也不报一个空回读，另外会回写进去的 `value`；`--dry-run` 就是这个
+形状加 `"dryRun": true`、没有 `after`/`elapsedMs`）。`--help` 不论带不带 `--json` 都照旧回文本。
+老调用方的迁移点就一句：AXError 名字以前是唯一的错误 token，现在在 `.error.ax`。
+其余形状见 `krd ax --help`。
+
 ### 37. `krd ax` 报「没有辅助功能权限」
 
 **根因。** 授权记在**代码签名**上，而且按二进制算——ad-hoc 重新构建会换 cdhash，昨天授权过的
 今天就是陌生人了。另一种常见情况是授权面板里列的是**另一份** krd（比如 `~/.build/` 里的，
 而不是 `~/bin/` 的）。
-**对策。** `krd ax doctor` 会打印它正在询问的那个路径，授权那一个：系统设置 → 隐私与安全性 →
+**对策。** `krd ax doctor` 会打印它正在询问的那个路径，并且在这种状态下退出 `3`——它报缺失的
+那个授权就是要加的那个。授权那一个：系统设置 → 隐私与安全性 →
 辅助功能 → `+` → 选中路径（`Cmd-Shift-G` 可以直接输路径）。如果面板里已经有了，先 `−` 删掉再加，
 或者用 `tccutil reset Accessibility com.kkrt.macdesk` 从头来。`krd ax --prompt` 会替你拉起授权弹窗。
 注意 `krd ax` 只要辅助功能权限；屏幕录制是镜像模式的。
@@ -516,7 +546,12 @@ selftest 能画出来，说明渲染器没问题，问题在采集或权限；�
 **第一次**无障碍调用必然是这种失败，碰一下窗口服务器之后就好；krd 会自己预热，所以能冒到你面前的
 失败是真的：Mac 睡了、停在登录窗口、或者所有候选应用都卡住了。
 **对策。** 唤醒/解锁 Mac 再跑。`krd ax doctor` 会把两种情况分开：它打印第一次调用是否失败、
-重试是否成功，以及它成功读到的最前台应用。重试成功说明前面那次只是启动噪声。
+重试是否成功，以及它成功读到的最前台应用。重试成功说明前面那次只是启动噪声。这种状态下
+`doctor` 退出 `4`（已授权，但 API 不应答），文本和 `--json` 都一样，所以
+`krd ax doctor && krd ax windows` 在这里不可能绿。还有一处毛边：`doctor` 自己打的那段最后一行
+是「Run `krd ax doctor` to see which of the two it is.」——那是写给非 `doctor` 子命令的；你已经
+在 `doctor` 里了，要行动的是它上面那句（唤醒或解锁 Mac）。`--json` 那一侧不循环：
+`.error.next` 绝不会说「run `krd ax doctor`」。
 
 ### 39. `krd ax tree` 只有窗口外框，看不到里面的页面
 
@@ -562,12 +597,18 @@ macOS 27 上，过去用来请求的那两个属性（`AXManualAccessibility`、
 （`before` 和 `after` 一模一样）。
 **对策。** `krd ax tree` 会列出每个节点实际有哪些动作（`press`、`showmenu`、`confirm`、`pick`……）。
 先把窗口弄到前台（或者先按窗口里的别的东西），再重试。一个动作都没有的节点用这条路驱不动，退回画面。
+这个失败是码 `6`（不是 `4`、不是 `5`）：节点找到了，只是它没有 `AXPress` 这个动作——`--json` 里是
+`.error.code == "notActionable"`。上面根因里的**另一种**情况不是失败：`AXPress` 被接受了、
+`before`/`after` 一模一样时，写是真的送到了，于是退 `0` 并打印「no observable change — some
+buttons only act on their target window」（JSON：`"ok": true` 加一个 `note`）。这才是该上报而不是
+重试的区别。
 
 ### 44. `krd ax set` 写进去了，却以「reads back something else」失败
 
 **根因。** 应用接受了 `AXValue` 又做了规范化：数字框把值夹到范围内、搜索框重排了格式、富文本框把它
 包进自己的属性里。
-**对策。** 没有坏——退出码是 `6`，上面那行就是应用现在持有的值。读那个值、按它行动；
+**对策。** 没有坏——退出码是 `6`（见 §6 开头那张表；`--json` 里是
+`.error.code == "notActionable"`），上面那行就是应用现在持有的值。读那个值、按它行动；
 `krd ax tree --app … | grep <你的文字>` 能从一次新 dump 确认。字段真的只读时，
 `AXUIElementIsAttributeSettable` 会提前发现，写请求根本不会发出去。
 

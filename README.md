@@ -109,10 +109,48 @@ krd ax screen                # every on-screen window, plus the focused element
 ```
 
 Output is one line per node — `@e3  button  "Save"  value="hi"  [120,80 64x24]  press` — with refs
-stable for the life of that dump. Exit codes: `0` ok, `2` usage, `3` no Accessibility permission,
-`4` window server unreachable, `5` nothing matched. Text is sanitized: a window title can contain
-ESC sequences and those are replaced, not printed. See
+stable for the life of that dump. Text is sanitized: a window title can contain ESC sequences and
+those are replaced, not printed. See
 [docs/research-ax-text-channel.md](docs/research-ax-text-channel.md) for the measurements.
+
+**Exit codes** — the same six wherever they are stated (here, `krd ax --help`, and
+[docs/TROUBLESHOOTING.md §6](docs/TROUBLESHOOTING.md#6-headless-krd-ax)):
+
+```text
+exit  0  ok — and a green krd ax doctor
+      2  usage: unknown flag or verb, or a missing/malformed value
+      3  no Accessibility permission
+      4  the accessibility API is not answering: the Mac asleep or locked, the window
+         server gone, every app that could answer hung
+      5  nothing matched: a query, app or ref found nothing (an empty krd ax windows list exits 0)
+      6  the node refused the action, or the app read back something else
+
+krd ax doctor exits 3 or 4 on a red diagnosis instead of 0, in text and --json alike, so
+krd ax doctor && krd ax windows is a health check that cannot pass on a broken Mac.
+```
+
+`--json` is a format switch, not a second contract: text and JSON leave with the same code, and
+stdout carries exactly one object in every outcome (`krd ax --json --help` still answers in text)
+— `"ok": true` plus the usual fields on success, and on failure
+
+```json
+{"ok": false, "error": {"code": "environment", "exit": 4,
+                         "message": "the accessibility API is not answering (cannotComplete)",
+                         "next": "the Mac may be asleep or at the login window…",
+                         "ax": "cannotComplete"}}
+```
+
+(pretty-printed, and `next` cut short, here: stdout gets that one object on one line)
+
+where `code` is `usage|permission|environment|notFound|notActionable` — one token per exit code —
+`exit` is that same number, and `ax` is the AXError name (`cannotComplete`) for the permission and
+environment classes; codes `5` and `6` name theirs inside `message`. A consumer that used to match
+on the name alone (the `error` field of the old `doctor` payload) reads `error.ax` now. The prose
+stays on stderr; `press`/`set` answer
+`{"ok":true,"command":"press|set","ref":"@e7","label":"…","before":"…","after":"…","elapsedMs":3}`
+(`press` answers `after: null` and a `note` when the element went away, and the same `note` when
+the write landed but read back unchanged; `set` fails with `6` rather than report a null read-back,
+and echoes the `value` it wrote), and `krd ax --help` prints the rest.
 
 ## Requirements
 

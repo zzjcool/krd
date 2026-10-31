@@ -581,12 +581,45 @@ honours), `KRD_Q=0` (errors), `KRD_DUMP` (bytes). Full descriptions in [TESTING.
 
 ## 6. Headless (`krd ax`)
 
+Every `krd ax` outcome is one of six exit codes, and the table is the same one `README.md` and
+`krd ax --help` print:
+
+```text
+exit  0  ok — and a green krd ax doctor
+      2  usage: unknown flag or verb, or a missing/malformed value
+      3  no Accessibility permission
+      4  the accessibility API is not answering: the Mac asleep or locked, the window
+         server gone, every app that could answer hung
+      5  nothing matched: a query, app or ref found nothing (an empty krd ax windows list exits 0)
+      6  the node refused the action, or the app read back something else
+
+krd ax doctor exits 3 or 4 on a red diagnosis instead of 0, in text and --json alike, so
+krd ax doctor && krd ax windows is a health check that cannot pass on a broken Mac.
+```
+
+`--json` changes no exit code and puts no prose on stdout: a failure is exactly one object,
+`{"ok": false, "error": {"code", "exit", "message", "next"}}`, with `code` one of
+`usage|permission|environment|notFound|notActionable`, `exit` the same number the process leaves
+with, and `ax` joining them for the permission and environment classes as the AXError name
+(`cannotComplete`) — codes 5 and 6 name theirs inside `message`. So `jq -e '.ok'` gates,
+`.error.code` branches, `.error.ax` says which accessibility call, `.error.exit` is the process
+code. A success carries `"ok": true` and the command's usual fields — `press`/`set` answer with
+the state they read back,
+`{"ok": true, "command": "press|set", "ref": "@e7", "label": "…", "before": "…", "after": "…",
+"elapsedMs": 3}` (`press` says `after: null` and a `note` when the element went away, and the same
+`note` when the write landed but read back unchanged; `set` fails with 6 rather than report a null
+read-back, and echoes the `value` it wrote; `--dry-run` gives that shape with `"dryRun": true` and no
+`after`/`elapsedMs`). A `--help` request still answers in text, `--json` or not. The migration for
+an old consumer: the AXError name used to be the only error token and is now in `.error.ax`.
+`krd ax --help` prints the rest.
+
 ### 37. `krd ax` says "no Accessibility permission"
 
 **Cause.** The grant is recorded against the code signature, per binary, and an ad-hoc rebuild
 changes the cdhash — a binary that was granted yesterday is a stranger today. It is also possible
 that the pane lists a *different* copy of krd (the one in `~/.build/`, not `~/bin/`).
-**Fix.** `krd ax doctor` prints the exact path it is asking about. Grant that one: System Settings →
+**Fix.** `krd ax doctor` prints the exact path it is asking about, and exits `3` in this state —
+the grant it reports missing is the one to add. Grant that one: System Settings →
 Privacy & Security → Accessibility → `+` → the path (`Cmd-Shift-G`). If it is already listed,
 remove it with `−` and add it again, or start over with
 `tccutil reset Accessibility com.kkrt.macdesk`. `krd ax --prompt` opens the dialog for you.
@@ -600,7 +633,13 @@ the window server has been touched; krd warms up before probing, so a failure th
 real: the Mac is asleep, at the login window, or every candidate app is hung.
 **Fix.** Wake/unlock the Mac and re-run. `krd ax doctor` separates the two cases: it prints whether
 the first call failed and whether the retry succeeded, plus the frontmost app it managed to read.
-If the retry succeeds, the earlier failure was just startup and can be ignored.
+If the retry succeeds, the earlier failure was just startup and can be ignored. In this state
+`doctor` exits `4` (trusted, but the API does not answer) — text and `--json` alike, so
+`krd ax doctor && krd ax windows` cannot be green here. One rough edge: the paragraph `doctor`
+prints ends with "Run `krd ax doctor` to see which of the two it is.", advice written for the verbs
+that are not `doctor`; when you are already in `doctor` the actionable half is the sentence above
+that one (wake or unlock the Mac). The `--json` side does not loop: `.error.next` never says
+"run `krd ax doctor`".
 
 ### 39. `krd ax tree` shows the window frame but not the page inside it
 
@@ -652,13 +691,19 @@ checkbox whose window is not focused reports itself as `enabled=false` — `AXPr
 does nothing, which the read-back then shows (`before` and `after` identical).
 **Fix.** `krd ax tree` lists the actions each node does have (`press`, `showmenu`, `confirm`, `pick`,
 …). Focus the window first (bring it to the front, or press something in it), then retry. A node with
-no actions at all cannot be driven this way — fall back to the picture.
+no actions at all cannot be driven this way — fall back to the picture. This failure is code `6`
+(not `4`, not `5`): the node was found, it just does not advertise `AXPress` — `--json` says the
+same with `.error.code == "notActionable"`. The *other* case in the cause above is not a failure:
+when `AXPress` is accepted and `before`/`after` come back identical, the write did land, so the run
+exits `0` and says `no observable change — some buttons only act on their target window` (JSON:
+`"ok": true` plus a `note`). That is the difference worth reporting, not retrying.
 
 ### 44. `krd ax set` writes, then fails with "reads back something else"
 
 **Cause.** The app accepted `AXValue` and normalised it: a number field clamped the value, a search
 field reformatted it, a rich text field wrapped it in its own attributes.
-**Fix.** Nothing is broken — the exit code is `6` and the line above it shows what the app now holds.
+**Fix.** Nothing is broken — the exit code is `6` (see the table at the head of §6; `--json` says
+`.error.code == "notActionable"`) and the line above it shows what the app now holds.
 Read that value and act on *it*; `krd ax tree --app … | grep <your text>` confirms it from a fresh
 dump. If the field is genuinely read-only, `AXUIElementIsAttributeSettable` says so up front and the
 write is refused before anything is sent.
