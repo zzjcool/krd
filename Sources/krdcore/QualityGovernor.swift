@@ -22,6 +22,34 @@ import Foundation
 ///
 /// `--scale auto` stays on top and outranks this: while the governor below has not finished its own
 /// ladder, `handOver` is false and the caller must not let the scale governor act.
+///
+/// ## A sample is *time*, not a frame (issue #93)
+///
+/// The ratio above used to be a ratio of **frames**, and that is self-defeating on a pipe that
+/// stalls: a frame whose `write(2)` blocks for 2.5 s removes exactly the frames that would have
+/// been its samples. One hang contributed **one** late frame, the burst of fast frames after it
+/// diluted the ratio to ~2.5 %, and a link that froze the picture nine times in 34 s never left the
+/// top rung (`--mock`, 5 KB/s drain, issue #93's measurement).
+///
+/// So each sample carries the **wall time it accounts for** (`span`): the blocked duration of the
+/// write that produced it, floored at one frame interval. The ratio is then `Σ span(late) / Σ span`
+/// — the fraction of wall clock the pipe spent behind — and the ladder reads:
+///
+/// - a **hang**: one sample, `span = 2.5 s`, i.e. 50 frame intervals out of a 3 s window. It steps
+///   down on the first one, which is the point: the picture is already frozen.
+/// - a **slow link that still moves**: many samples, each `span ≈ 50 ms` and each late. Same ratio,
+///   same step — this is the behaviour that already worked, unchanged.
+/// - a **calm link**: not late, `span = 50 ms` each, ratio 0.
+///
+/// The span is derived from the write duration and floored at the frame interval, **never** from the
+/// gap between samples: an idle screen emits no frames at all (a deduped frame writes nothing, #95),
+/// so a still picture contributes no samples and cannot look like a stall. Counting "frames that
+/// never arrived" — the obvious alternative — would do exactly that.
+///
+/// The same arithmetic fixes the *up* side: one stall in ten quiet seconds weighs 25 % and can no
+/// longer pass as "0.5 % of the frames were late, the link is quiet".
+/// Weighting by frames is a mean over frames, and a mean is how a stall disappears; weighting by
+/// wall time is the tail.
 public struct QualityGovernor {
     /// One rung: how much colour, and how many frames per second the loop will allow.
     public struct Step: Equatable {
@@ -33,6 +61,34 @@ public struct QualityGovernor {
         }
         /// `q70 20fps` -- for the log line and the panel.
         public var label: String { "quality \(quality), \(fps) fps" }
+    }
+
+    /// What one emitted frame tells the ladder (issue #93).
+    ///
+    /// `late` is the causal question — did this write take longer than the interval the frame had to
+    /// fit in — and `span` is how much wall clock this frame stands for: its blocked write time,
+    /// floored at the frame interval, because a frame that wrote quickly still occupied its slot.
+    /// A blocked write *is* the missing frames, which is why the two travel together.
+    public struct FrameSample: Equatable {
+        public let late: Bool
+        /// Seconds of wall time this frame accounts for. Strictly positive.
+        public let span: Double
+        public init(late: Bool, span: Double) {
+            self.late = late
+            self.span = span
+        }
+    }
+
+    /// The rule from one frame's `write_ms` (and the round trip's second opinion, #52).
+    ///
+    /// Pure, so the rule the frame loop uses is the rule the tests feed a synthetic timeline to:
+    /// `main.swift` calls this, `Tests/krdcoreTests/QualityGovernorTests` builds nine 2.5 s hangs
+    /// with it and checks the rungs it takes.
+    public static func frameSample(writeMs: Double, targetFps: Int, rttLate: Bool = false)
+        -> FrameSample {
+        let period = 1.0 / Double(Swift.max(targetFps, 1))
+        return FrameSample(late: writeMs > period * 1000.0 || rttLate,
+                           span: Swift.max(writeMs / 1000.0, period))
     }
 
     public struct Change: Equatable {
@@ -69,7 +125,7 @@ public struct QualityGovernor {
 
     /// Index into `ladder`. Only ever moves one rung at a time.
     public private(set) var index: Int
-    private var samples: [(t: Double, late: Bool)] = []
+    private var samples: [(t: Double, late: Bool, span: Double)] = []
     private var lastChangeAt: Double = -.infinity
     private var lastUpgradeAt: Double?
     private var upWindowScale = 1.0
@@ -88,9 +144,10 @@ public struct QualityGovernor {
     public var handOver: Bool { index == QualityGovernor.ladder.count - 1 }
     public var requiredQuietWindow: Double { min(maxUpWindow, upWindow * upWindowScale) }
 
-    /// One frame: `late` is "this frame took longer than the interval it has to fit in".
-    public mutating func observe(at t: Double, late: Bool) -> Change? {
-        samples.append((t, late))
+    /// One frame: `late` is "this frame took longer than the interval it has to fit in", and `span`
+    /// is the wall time it accounts for (see `frameSample`, and the stall note in the type's doc).
+    public mutating func observe(at t: Double, late: Bool, span: Double) -> Change? {
+        samples.append((t, late, Swift.max(span, 0)))
         while let first = samples.first, t - first.t > maxWindow + 1 {
             samples.removeFirst()
         }
@@ -138,7 +195,8 @@ public struct QualityGovernor {
         lastUpgradeAt = nil
     }
 
-    private func window(at t: Double, seconds: Double, minSamples: Int) -> [(t: Double, late: Bool)]? {
+    private func window(at t: Double, seconds: Double, minSamples: Int)
+        -> [(t: Double, late: Bool, span: Double)]? {
         let recent = samples.filter { $0.t >= t - seconds }
         if let first = recent.first, recent.count >= minSamples, t - first.t >= seconds * 0.9 {
             return recent
@@ -149,8 +207,12 @@ public struct QualityGovernor {
         return widened
     }
 
-    private func ratio(_ window: [(t: Double, late: Bool)]) -> Double {
-        guard !window.isEmpty else { return 0 }
-        return Double(window.filter(\.late).count) / Double(window.count)
+    /// Late **wall time** over total wall time, not late frames over frames: a stall is one sample
+    /// worth seconds (see the type's doc). Zero-width windows (every span 0, which the clamp in
+    /// `observe` prevents but a caller can synthesise) read as calm rather than as a division by 0.
+    private func ratio(_ window: [(t: Double, late: Bool, span: Double)]) -> Double {
+        let total = window.reduce(0) { $0 + $1.span }
+        guard total > 0 else { return 0 }
+        return window.reduce(0) { $0 + ($1.late ? $1.span : 0) } / total
     }
 }
