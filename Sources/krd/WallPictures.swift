@@ -81,6 +81,15 @@ enum WallPictures {
     /// It is cleared whenever the terminal's images are (`Desk.runWall`, the resize path) — and, for
     /// the stage only, on every desk change (`forgetStage`): see below.
     ///
+    /// **Nothing in this memo may outlive the wall's staleness bound** (`maxAge`). A key is what a
+    /// source *looks like* in metadata; a window's content can change while its bounds and title
+    /// stand still — a video playing, a terminal scrolling, a document being typed into — and no
+    /// stamp can see that. Before this cache every paint re-photographed every panel, so what was on
+    /// the pane was never older than the paint that drew it. Without an age the cache would turn
+    /// those windows into a screenshot of the first frame, for as long as the key held — an
+    /// unbounded hole in exactly the bound #169/`WallWatch` documents (`~2.5 s`). So a picture or a
+    /// placement older than `maxAge` is a **miss**: the panel is photographed again and re-sent.
+    ///
     /// Locked: `capture` runs in a `Task` off the main queue while `handleResize`/`runWall` reset the
     /// memo on it, so this is shared state across two threads, exactly like `Log`'s ring.
     final class PanelCache {
@@ -97,28 +106,63 @@ enum WallPictures {
         /// reused only when its key is equal) stays the only thing the cache has to decide.
         static let capacity = 16
 
+        /// How long a cached picture may be drawn for, measured from the capture that made it.
+        ///
+        /// This is the wall's own staleness bound (`WallSource.stalenessBound`: 2.0 s of poll + 0.51 s
+        /// of capture-and-paint = **2.51 s**), not a new number: the cache may not be the reason a
+        /// card is older than the wall already promises. It binds *per paint*, which is what the
+        /// pre-cache wall did (every paint re-photographed everything): a paint triggered by a click,
+        /// a page step, a resize or the world moving never draws a picture older than 2.51 s, and two
+        /// paints inside that window pay for no capture at all. A content change nothing announces (a
+        /// playing video) still waits for a trigger to be painted — that was true before this cache
+        /// and is not what the age is for; the age is what keeps the cache from *adding* staleness to
+        /// the trigger it rides on.
+        static let maxAge: TimeInterval = WallSource.stalenessBound
+
         /// Guards everything below. `capture` (off-main) is the only writer of `byKey`; `sent` is
         /// written on the main queue by `paintWall` and read by `isOnScreen` from the same queue, but
         /// `reset()`/`forgetStage()` can arrive from the main queue while a capture is in flight.
         private let lock = NSLock()
-        private var byKey: [PanelKey: Picture] = [:]
+        /// A picture and the moment it was photographed. Both halves are needed: the picture is the
+        /// payload, the stamp is what `maxAge` is measured against.
+        private struct Entry {
+            let picture: Picture
+            let at: TimeInterval
+        }
+        private var byKey: [PanelKey: Entry] = [:]
         /// Least recently used first: a hit or a store moves its key to the end, and the front is
         /// what `store` drops when the cap is reached.
         private var order: [PanelKey] = []
-        private var sent: [Int: (key: PanelKey, rect: CellRect)] = [:]
+        private var sent: [Int: (key: PanelKey, rect: CellRect, at: TimeInterval)] = [:]
+
+        /// The clock. Monotonic (`systemUptime`) by default — age is a duration, and a wall-clock
+        /// change must not expire the whole memo — and injectable so a test can step past `maxAge`
+        /// without sleeping for it.
+        private let now: () -> TimeInterval
+
+        init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+            self.now = now
+        }
 
         func picture(for key: PanelKey) -> Picture? {
             lock.lock()
             defer { lock.unlock() }
-            guard let picture = byKey[key] else { return nil }
+            guard let entry = byKey[key] else { return nil }
+            guard now() - entry.at < Self.maxAge else {
+                // Too old to be a picture of *now*: forget it, so the miss is a capture and not a
+                // memo that grows with every expired key.
+                byKey.removeValue(forKey: key)
+                order.removeAll { $0 == key }
+                return nil
+            }
             Self.touch(&order, key)
-            return picture
+            return entry.picture
         }
 
         func store(_ picture: Picture, _ key: PanelKey) {
             lock.lock()
             defer { lock.unlock() }
-            byKey[key] = picture
+            byKey[key] = Entry(picture: picture, at: now())
             Self.touch(&order, key)
             // Eviction forgets the *capture* cache only. `sent` keeps its entry because the terminal
             // still holds that picture: an evicted key costs one re-capture, and a panel that is
@@ -140,13 +184,19 @@ enum WallPictures {
             lock.lock()
             defer { lock.unlock() }
             guard let placed = sent[slot] else { return false }
+            // The same age, for the same reason: a picture `picture(for:)` would have to re-capture
+            // must also travel on the wire, or the capture is paid for and the pane keeps the old
+            // frame — the one shape of this cache that would cost bytes *and* be wrong. A placement
+            // is never older than its picture (`didPlace` runs in the paint after the capture), so
+            // this can only fire where `picture(for:)` already missed.
+            guard now() - placed.at < Self.maxAge else { return false }
             return placed.key == key && placed.rect == rect
         }
 
         func didPlace(slot: Int, key: PanelKey, rect: CellRect) {
             lock.lock()
             defer { lock.unlock() }
-            sent[slot] = (key: key, rect: rect)
+            sent[slot] = (key: key, rect: rect, at: now())
         }
 
         /// This slot no longer shows the picture it recorded — it paints a mask (the capture failed),
@@ -165,14 +215,15 @@ enum WallPictures {
         /// A **desk change**: drop the stage's picture and its placement record, so the next paint
         /// photographs the display again.
         ///
-        /// Why the stage alone has an age, when a card's key is enough for the card: a window's stamp
-        /// (bounds, size, title) is what makes its picture a picture of *that* window, and the wall
-        /// has never promised otherwise. A display's stamp is only its resolution, and its content is
-        /// the whole desk — which changes constantly and is described by no metadata at all. Reusing
-        /// it across a desk change would turn the wall's biggest panel into a screenshot of the first
-        /// second of the process. Before this cache, *any* model change re-shot every panel; keeping
-        /// that for the stage keeps the wall as live as it was, while a page step (which is a click,
-        /// not a desk change) still reuses it — that is the case issue #100 is about.
+        /// Why the stage alone is dropped on a desk change, when `maxAge` already bounds every picture:
+        /// a window's stamp (bounds, size, title) is what makes its picture a picture of *that*
+        /// window, and the wall has never promised otherwise. A display's stamp is only its
+        /// resolution, and its content is the whole desk — which changes constantly and is described
+        /// by no metadata at all. `maxAge` would catch it 2.51 s later; a desk change is the one
+        /// moment we know for free that it is wrong, so it is re-photographed now. Before this cache,
+        /// *any* model change re-shot every panel; keeping that for the stage keeps the wall as live
+        /// as it was, while a page step (which is a click, not a desk change) still reuses it — that
+        /// is the case issue #100 is about.
         func forgetStage() {
             lock.lock()
             defer { lock.unlock() }

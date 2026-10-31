@@ -172,6 +172,59 @@ final class WallPictureReuseTests: XCTestCase {
         XCTAssertEqual(after.pictures.count, page.count, "every slot still gets a picture")
     }
 
+    // MARK: the age bound (the one thing a key cannot see)
+
+    /// A window whose *content* moves while its bounds and title stand still — a video, a terminal
+    /// scrolling, a document being typed into — has a key that never changes. Without an age the
+    /// cache would pin it to its first frame for as long as the wall runs, which is the staleness
+    /// bound `WallWatch`/`#169` document (~2.5 s) quietly reopening as unbounded.
+    ///
+    /// The clock is injected, so "past the bound" is a number a test can assert rather than a sleep.
+    func testAPictureOlderThanTheWallsStalenessBoundIsPhotographedAgain() async {
+        var now: TimeInterval = 1000
+        let cache = WallPictures.PanelCache(now: { now })
+        let page = demoPlan(cardStart: 0)
+
+        let first = await WallPictures.capture(page, cache: cache)
+        XCTAssertEqual(first.reused, [], "nothing is cached before the first paint")
+        // The placement record a paint would have made, so the *second* half of the rule is live.
+        for panel in page { cache.didPlace(slot: panel.slot, key: key(panel), rect: panel.rect) }
+
+        // Inside the bound: the same page is free. Half the bound, so the assertion is about the
+        // rule and not about a rounding.
+        now += WallPictures.PanelCache.maxAge / 2
+        let warm = await WallPictures.capture(page, cache: cache)
+        XCTAssertEqual(warm.reused, Set(page.map(\.slot)), "inside the bound, nothing is re-shot")
+        for panel in page {
+            XCTAssertTrue(cache.isOnScreen(slot: panel.slot, key: key(panel), rect: panel.rect),
+                          "slot \(panel.slot) is still on screen inside the bound")
+        }
+
+        // One whole bound past the *store*: the key still matches, and it must not matter.
+        now += WallPictures.PanelCache.maxAge
+        let cold = await WallPictures.capture(page, cache: cache)
+        XCTAssertEqual(cold.reused, [], "past the bound every panel is photographed again")
+        XCTAssertEqual(cold.pictures.count, page.count, "and every slot still gets a picture")
+        for panel in page {
+            XCTAssertFalse(cache.isOnScreen(slot: panel.slot, key: key(panel), rect: panel.rect),
+                           "slot \(panel.slot): a re-captured picture must also be re-sent")
+        }
+
+        // The age is a *duration*, not a property of the key: the very next paint is warm again.
+        let after = await WallPictures.capture(page, cache: cache)
+        XCTAssertEqual(after.reused, Set(page.map(\.slot)),
+                       "the fresh capture is cached, so the next paint is free")
+    }
+
+    /// The bound is the wall's own number, not a second opinion invented in the cache: a retune of
+    /// `WallSource.stalenessBound` (the 2 s poll, #169) has to move the card's age with it, or the
+    /// cache silently re-opens the hole for whatever the wall now promises.
+    func testThePicturesAgeIsTheWallsStalenessBound() {
+        XCTAssertEqual(WallPictures.PanelCache.maxAge, WallSource.stalenessBound)
+        XCTAssertLessThan(WallPictures.PanelCache.maxAge, 3.0,
+                          "2.51 s: the poll plus one paint, per WallWatch's own bound")
+    }
+
     // MARK: a repaint that changes nothing
 
     func testTheSamePageTwiceCapturesNothing() async {
