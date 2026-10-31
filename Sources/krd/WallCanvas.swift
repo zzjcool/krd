@@ -301,7 +301,7 @@ struct WallState: Equatable {
     /// `capacity` could only change together with the model or the pane, and both of those send
     /// `refreshWall` through `clamp(capacity:)`. A row-width click changes the page size with
     /// neither, and `refreshWall` returns before its clamp while the model and the pane stand still
-    /// (`main.swift:1364`), so a `cardStart` the layout had already pulled back would stay stale for
+    /// (`refreshWall`), so a `cardStart` the layout had already pulled back would stay stale for
     /// as long as the wall is up — and the next `▲`/`▼` would step from the page the state
     /// remembers rather than the one on screen, landing on a page the reader never saw (8 windows
     /// at 137x44, last page at row width 3, click `⤢`, click `▲`: `2–5 / 8`, where one page back

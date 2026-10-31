@@ -802,8 +802,14 @@ final class Desk {
     private var wallCanvas: WallCanvas?
     private var wallModel = WallModel()
     private var wallTimer: DispatchSourceTimer?
+    /// The notifications that can move the window list (issue #141). The wall enumerates when one of
+    /// them fires, and not otherwise — the 1 s timer below never touches the window server.
+    private var wallWatch: WallWatch?
+    /// Every window-server enumeration this session made. The count is the point of issue #141: an
+    /// idle wall must not add to it, and `--debug --log` prints it so a probe can read it back.
+    private var wallEnumerations = 0
     /// The pane the last wall draw was laid out for. Together with `wallModel` it is the whole
-    /// answer to "would the wall look different?" — the 1 s tick emits nothing while both match.
+    /// answer to "would the wall look different?".
     /// One snapshot of the pane this wall draws into: the layout and every capture size come from
     /// it, and nothing else may measure the terminal (design §6.9).
     private var wallPane: PaneGeometry?
@@ -1392,30 +1398,89 @@ final class Desk {
         wallMode = true
         startInput()
         refreshWall(force: true)
+        startWallTimer()
+        startWallWatch()
+    }
+
+    /// The wall's 1 s timer. Only the *grid* is its business (an ioctl, no query): what the timer
+    /// used to do was enumerate the window server once a second to discover it had nothing to say
+    /// (issue #141). The list is now driven by `startWallWatch()` and by `refreshWall(force: true)`;
+    /// this handler can only relayout.
+    private func startWallTimer() {
+        wallTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1)
-        timer.setEventHandler { [weak self] in self?.refreshWall(force: false) }
+        timer.setEventHandler { [weak self] in self?.wallTick() }
         timer.resume()
         wallTimer = timer
     }
 
-    /// Re-enumerate the world and repaint — but only when the wall would actually look different:
-    /// the display list, the window list (order included, it is "most recently used first"), or the
-    /// pane size. That comparison is also what keeps an idle wall at 0 B/s with a 1 s tick.
-    private func refreshWall(force: Bool) {
-        guard !cleanedUp, wallState != nil else { return }
-        guard let stored = wallPane else { return }
+    /// Subscribe to the notifications that can move the window list. One subscription per wall
+    /// session: `handOver`/`shutdown` stop it, `resumeWall` starts it again.
+    private func startWallWatch() {
+        let watch = WallWatch()
+        watch.start { [weak self] in self?.refreshWall(force: false, trigger: .world) }
+        wallWatch = watch
+    }
+
+    /// The 1 s tick: adopt a grid the pty changed without a `SIGWINCH`, and repaint from the cached
+    /// model. No window server call happens here — that is the whole difference to the old tick.
+    private func wallTick() {
+        guard !cleanedUp, wallState != nil, let drawn = wallPane else { return }
         // The grid can change without a resize report (an ssh client that resizes its own pty), so
         // it is re-read every tick - an ioctl, no query. The *cell* is not: it is re-measured on a
         // resize only (`remeasureWallPane`), because a terminal that answers `CSI 16t` late is not
         // something to ask once a second.
+        let pty = paneFromTTY(drawn)
+        switch WallRefresh.tick(drawn: drawn, pty: pty, pinned: options.pane != nil) {
+        case .idle:
+            return
+        case .relayout(let cols, let rows):
+            // A grid moves the layout and the band's capacity, never the world: `clampAndDraw`
+            // re-clamps the page offsets against the cached counts, which is the same arithmetic a
+            // resize goes through.
+            let pane = drawn.with(cols: cols, rows: rows)
+            wallPane = pane
+            clampAndDraw(model: wallModel, pane: pane)
+        }
+    }
+
+    /// The pty's grid as a `PaneGeometry`, falling back to the one the wall drew for. `read()` is an
+    /// ioctl; nothing here allocates a model.
+    private func paneFromTTY(_ stored: PaneGeometry) -> PaneGeometry {
         let tty = TermGeometry.read()
-        let pane = options.pane == nil && (tty.cols != stored.cols || tty.rows != stored.rows)
+        return options.pane == nil && (tty.cols != stored.cols || tty.rows != stored.rows)
             ? stored.with(cols: tty.cols, rows: tty.rows) : stored
+    }
+
+    /// Re-enumerate the world and repaint — but only when the wall would actually look different:
+    /// the display list, the window list (order included, it is "most recently used first"), or the
+    /// pane size. That comparison is also what keeps an idle wall at 0 B/s.
+    ///
+    /// Called by the triggers and never by the timer: `force` is the wall asking itself (the first
+    /// paint, a return from a mirror, a resize), `.world` is a notification the system posted.
+    private func refreshWall(force: Bool, trigger: WallTrigger = .explicit) {
+        guard !cleanedUp, wallState != nil else { return }
+        guard trigger.enumerates, let stored = wallPane else { return }
+        let pane = paneFromTTY(stored)
+        // The one enumeration in the wall, and it is counted: an idle wall's count must not move.
         let model = options.demo ? WallSource.demoModel() : WallSource.model()
-        guard force || model != wallModel || pane != wallPane else { return }
+        wallEnumerations += 1
+        if options.debug {
+            Log.write("krd: wall enumeration \(wallEnumerations) (trigger "
+                      + (force ? "forced" : "world") + ")\n")
+        }
+        guard WallRefresh.needsRepaint(current: model, drawn: wallModel, pane: pane,
+                                       drawnPane: wallPane, force: force) else { return }
         wallModel = model
         wallPane = pane
+        clampAndDraw(model: model, pane: pane)
+    }
+
+    /// Clamp the state against this model and pane, then paint. Both callers of a repaint go
+    /// through here — the enumeration path and the relayout path — so there is one definition of
+    /// how many cards fit.
+    private func clampAndDraw(model: WallModel, pane: PaneGeometry) {
         // The world can shrink under a static wall (a display unplugged, a window closed) while the
         // offsets still point past the end; clamping here is what keeps the shelf from going blank.
         // The clamp takes the layout's *effective page size*: below 28 columns `WallLayout.make`
@@ -1823,6 +1888,10 @@ final class Desk {
         mirroring = true
         wallTimer?.cancel()
         wallTimer = nil
+        // The child owns the pane; a notification landing after `exec` would enumerate for a wall
+        // that is no longer on screen.
+        wallWatch?.stop()
+        wallWatch = nil
         input?.stop()
         input = nil
         writer.clear()
@@ -1846,11 +1915,8 @@ final class Desk {
         wallPaintedOnce = false
         refreshWall(force: true)
         startInput()
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
-        timer.setEventHandler { [weak self] in self?.refreshWall(force: false) }
-        timer.resume()
-        wallTimer = timer
+        startWallTimer()
+        startWallWatch()
     }
 
     /// Replace this process with `krd <arguments>`. Returns only when the image could not be started.
@@ -3687,6 +3753,8 @@ final class Desk {
         // keeps enumerating the window server and painting into a session that is already gone.
         wallTimer?.cancel()
         wallTimer = nil
+        wallWatch?.stop()
+        wallWatch = nil
         mock?.stop()
         mock = nil
         // The card is a 110 ms timer of its own: without this it keeps clearing rows after

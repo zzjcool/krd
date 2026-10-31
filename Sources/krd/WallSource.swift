@@ -120,7 +120,8 @@ enum WallSource {
     }
 
     /// Screen frames are points and come from another process: a NaN would trap in `Int(_:)`,
-    /// and this runs on the 1 s timer, where a trap leaves the terminal in the alternate screen.
+    /// and this runs on a wall trigger (a notification, a resize), where a trap leaves the terminal
+    /// in the alternate screen.
     private static func points(_ value: CGFloat) -> Int {
         guard value.isFinite, value >= 0 else { return 0 }
         return Int(min(Double(value), 1e9).rounded())
