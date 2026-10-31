@@ -772,6 +772,9 @@ final class Desk {
     private let chrome = Chrome()
     var chromeState = ChromeState()
     var chromeMetrics = ChromeMetrics()
+    /// The log panel's offset into the log file, kept across ticks so a tick reads what the writer
+    /// added instead of the whole file (#90).
+    private var logTail = LogTailReader()
     var chromeGeometry: ChromeGeometry?
     private var chromeTimer: DispatchSourceTimer?
     /// The single 1 Hz tick that samples rates and feeds the panel, the log line and the JSON.
@@ -3357,7 +3360,8 @@ final class Desk {
         if m.mbpsHistory.count > 60 { m.mbpsHistory.removeFirst() }
         if m.latencyHistory.count > 60 { m.latencyHistory.removeFirst() }
         if Date() > chromeToastUntil { chromeState.toast = nil }
-        // the log panel is I/O: only pay for it while it is open
+        // the log panel is I/O: only pay for it while it is open, and only for the bytes the writer
+        // added since the last tick (`LogTailReader`, #90)
         if chromeState.panel == .log { m.logTail = readLogTail() }
         m.title = barTitle
         chromeMetrics = m
@@ -3476,10 +3480,12 @@ final class Desk {
         return active.map { "\($0)=\(env[$0] ?? "")" }.joined(separator: " ")
     }
 
-    /// The last `lines` lines of the log, newest last: what the log panel shows.
-    private func readLogTail(_ lines: Int = 12) -> [String] {
-        guard let path = Log.path, let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
-        return Log.tail(of: text, lines: lines)
+    /// The last twelve lines of the log, newest last: what the log panel shows. The reader keeps its
+    /// own offset into the file, so a tick costs what was written since the last one and not what the
+    /// session has written so far -- the whole-file read here was 220 ms per second at a 19 MB log
+    /// (#90).
+    private func readLogTail() -> [String] {
+        logTail.update(path: Log.path)
     }
 
     /// Draw and write, on the main queue. `ScreenWriter.writeChrome` is serialized against the
