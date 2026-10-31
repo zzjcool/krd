@@ -155,11 +155,22 @@ extension TermGeometry {
     /// `q=0`, so the only message that comes back is the placement's `OK` or `E...`. A terminal that
     /// ignores `U=1` draws the placeholder cells as missing-glyph boxes over the picture - much worse
     /// than a small picture - so "no answer" counts as "no".
+    /// The probe's three APC bodies — the *only* copy of them.
+    ///
+    /// `supportsPlaceholders`, `DeleteProbeImage` and the test that walks the probe's bytes through
+    /// `GraphicsAPC.isFullyEnveloped` all read this: a second literal copy is how a regression test
+    /// ends up testing itself instead of the code that had the bug.
+    enum PlaceholderProbe {
+        static let transmit = "Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA"
+        static let place = "Gi=31,p=1,a=p,U=1,q=0,c=1,r=1"
+        static let delete = "Ga=d,d=i,i=31"
+    }
+
     static func supportsPlaceholders(timeoutMs: Int = 600) -> Bool? {
         // Both APCs come out of `GraphicsAPC`, so `--passthrough` reaches them too: inside tmux a raw
         // `a=t` is eaten by the multiplexer, which is the exact question this probe asks.
-        let transmit = GraphicsAPC.sequence("Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA")
-        let place = GraphicsAPC.sequence("Gi=31,p=1,a=p,U=1,q=0,c=1,r=1")
+        let transmit = GraphicsAPC.sequence(PlaceholderProbe.transmit)
+        let place = GraphicsAPC.sequence(PlaceholderProbe.place)
         // The reply echoes whatever the request carried, so it is `i=31,p=1;OK` here - *not*
         // `i=31;OK`. Matching the literal `i=31;OK` made every answer look like silence, which sent
         // the wall down the pixel path on a terminal that had accepted the placeholder (measured
@@ -171,13 +182,14 @@ extension TermGeometry {
         return placeholderProbeVerdict(reply)
     }
 
-    /// The probe's APCs, as bytes, without a terminal: what `supportsPlaceholders` sends.
-    /// `TmuxPassthroughTests` walks this through `GraphicsAPC.isFullyEnveloped`, so a probe APC
-    /// added outside the sink fails the suite instead of the tmux pane.
+    /// The probe's APCs, as bytes, without a terminal — built from the same three constants
+    /// `supportsPlaceholders` and `DeleteProbeImage` send, so the test cannot drift from the emitter.
+    /// `ProbePassthroughTests` walks this through `GraphicsAPC.isFullyEnveloped`, so a probe APC
+    /// emitted outside the sink fails the suite instead of the tmux pane.
     static func placeholderProbePayload() -> [UInt8] {
-        Array((GraphicsAPC.sequence("Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA")
-               + GraphicsAPC.sequence("Gi=31,p=1,a=p,U=1,q=0,c=1,r=1")
-               + GraphicsAPC.sequence("Ga=d,d=i,i=31")).utf8)
+        Array((GraphicsAPC.sequence(PlaceholderProbe.transmit)
+               + GraphicsAPC.sequence(PlaceholderProbe.place)
+               + GraphicsAPC.sequence(PlaceholderProbe.delete)).utf8)
     }
 
     /// What a placeholder probe's reply means: `true` accepted, `false` refused, `nil` no answer yet.
@@ -197,7 +209,7 @@ extension TermGeometry {
     /// Remove the probe's image by id, so it can never sit on the wall as a stray pixel.
     /// Same sink, same envelope: an unwrapped `a=d` inside tmux leaves the probe image on screen.
     private static func DeleteProbeImage() {
-        GraphicsAPC.write("Ga=d,d=i,i=31")
+        GraphicsAPC.write(PlaceholderProbe.delete)
     }
 }
 

@@ -919,8 +919,9 @@ public final class ScreenWriter {
     /// on (`--passthrough`, issue #107).
     ///
     /// Every body krd emits is ESC-free -- a comma-separated control list and, for a transmit,
-    /// base64 -- so the envelope only has to double the introducer and the terminator: 3 bytes of
-    /// prefix and 4 extra ESCs per APC, never a copy of the payload. `TmuxPassthroughTests` pins
+    /// base64 -- so the envelope only has to double the introducer and the terminator: 7 bytes of
+    /// `ESC Ptmux;`, 2 for the envelope's own `ST` and 2 doubled ESCs = 11 bytes per APC, never a
+    /// copy of the payload. `TmuxPassthroughTests` pins
     /// that fast path against the pure `TmuxPassthrough.wrap`.
     @inline(__always)
     private var apcOpen: String { GraphicsAPC.open }
@@ -1008,13 +1009,21 @@ public final class ScreenWriter {
     }
     public var quietLabel: String { quiet }
 
+    /// Chunks that reached the sink without a complete tmux envelope while `--passthrough` was on
+    /// (issue #107). Zero is the only correct value: non-zero means a graphics APC went round
+    /// `GraphicsAPC` — or a chrome write split one. Written under `writeLock`, read by tests.
+    public private(set) var envelopeViolations = 0
+
     private func flushLocked() {
         guard !out.isEmpty else { return }
-        // The sink's own guard (issue #107): with passthrough on, nothing may reach the terminal
-        // outside an envelope. A tenth call site that hand-rolls `ESC _ G…` trips this in every
-        // debug run, and `GraphicsAPC.isFullyEnveloped` is the same predicate the tests use.
-        assert(!passthrough || GraphicsAPC.isFullyEnveloped(out),
-               "krd: a graphics APC reached the sink without its tmux envelope")
+        // The sink's own guard (issue #107): with passthrough on, a chunk that is not a run of
+        // complete envelopes is a bypass, and it is counted rather than asserted. Counted because
+        // `flushLocked` can legitimately be reached with a frame half-appended: `writeChrome` flushes
+        // this same buffer from the main queue while the capture queue is inside `appendTransmitChunk`
+        // (an unsynchronised window that predates this flag), and a flush that lands between an APC's
+        // open and its close is not something to abort a running krd over. The count is what the
+        // tests assert on, and it is the number a future `--debug` stats line should surface.
+        if passthrough, !GraphicsAPC.isFullyEnveloped(out) { envelopeViolations += 1 }
         frameWireBytes += out.count
         if let sink {
             sink(out)

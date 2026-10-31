@@ -152,6 +152,12 @@ final class TmuxPassthroughTests: XCTestCase {
 
     /// One 3x2 placeholder panel through a real `ScreenWriter`, as a byte stream.
     private func panelStream(passthrough: Bool) -> [UInt8] {
+        streamWithWriter(passthrough: passthrough).bytes
+    }
+
+    /// The stream *and* the writer, so the sink's own counter can be read: zero violations is what
+    /// "every APC went through the sink" means at runtime, and a bypass raises it.
+    private func streamWithWriter(passthrough: Bool) -> (bytes: [UInt8], violations: Int) {
         let writer = ScreenWriter()
         writer.passthrough = passthrough
         var bytes: [UInt8] = []
@@ -164,7 +170,7 @@ final class TmuxPassthroughTests: XCTestCase {
                                       level: 3, paneCols: 10, paneRows: 5)
         writer.endFrame()
         writer.endSession()
-        return bytes
+        return (bytes, writer.envelopeViolations)
     }
 
     /// The whole claim of the feature in one assertion: put the wrapped stream through the inverse
@@ -215,7 +221,16 @@ final class TmuxPassthroughTests: XCTestCase {
         let loneEscape = TmuxPassthrough.prefix + "Ga=t\(esc)X" + TmuxPassthrough.terminator
         XCTAssertFalse(GraphicsAPC.isFullyEnveloped(Array(loneEscape.utf8)),
                        "a lone ESC inside the envelope is not a payload byte tmux can restore")
-        // An envelope left open would swallow whatever krd sends next.
+        // The likeliest tenth-site mistake: an enveloped open with a hand-rolled `ESC \\` close.
+        // Looks enveloped, is not — tmux ends the envelope at that ST and the terminal gets an
+        // unterminated APC. This is why the close is matched as the whole 5-byte unit.
+        let halfEnveloped = TmuxPassthrough.open + "Ga=t" + TmuxPassthrough.terminator
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(Array(halfEnveloped.utf8)),
+                       "an envelope opened and closed by a single ST is not an envelope")
+        // An empty envelope is not an APC at all, and an envelope left open would swallow whatever
+        // krd sends next.
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(Array((TmuxPassthrough.prefix
+                                                           + TmuxPassthrough.terminator).utf8)))
         XCTAssertFalse(GraphicsAPC.isFullyEnveloped(Array(TmuxPassthrough.open.utf8) + Array("Ga=t".utf8)))
     }
 
@@ -230,6 +245,10 @@ final class TmuxPassthroughTests: XCTestCase {
                        "with the flag off the stream stays raw: that is the byte-identical contract")
         XCTAssertTrue(GraphicsAPC.isFullyEnveloped(on),
                       "\(envelopes(in: on)) envelopes for \(countAPCs(off)) APCs")
+        // The sink agrees with the parser: nothing reached it outside a complete envelope.
+        XCTAssertEqual(streamWithWriter(passthrough: true).violations, 0)
+        XCTAssertEqual(streamWithWriter(passthrough: false).violations, 0,
+                       "the counter only runs with the flag on, and then it must stay 0")
     }
 
     // MARK: helpers

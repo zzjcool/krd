@@ -39,8 +39,8 @@ public enum TmuxPassthrough {
     public static let terminator = "\u{1B}\\"
 
     /// `ESC Ptmux;` + an APC introducer whose `ESC` is already doubled: the open half of the
-    /// emission fast path, which is what makes wrapping an APC cost 3 bytes of prefix and 4 ESCs
-    /// instead of a copy of the payload. Equal to `prefix + doubled(ESC _)` by construction, and
+    /// emission fast path, which is what makes wrapping an APC cost a prefix and one doubled ESC
+    /// instead of a copy of the payload (11 bytes in all, with `close`). Equal to `prefix + doubled(ESC _)` by construction, and
     /// the test pins `open + body + close == wrap(ESC _ G<body> ESC \)`.
     public static let open = prefix + "\u{1B}\u{1B}_"
     /// `ESC ESC \ ESC \`: the doubled ST that closes the APC, then the envelope's own ST.
