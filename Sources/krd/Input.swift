@@ -74,6 +74,18 @@ final class InputReader {
     /// be able to tell the two apart; a panel needs the sign as well as the flag, because one notch
     /// up and one notch down scroll opposite ways (issue #118).
     var onChromeClick: ((Int, Int, Int) -> Void)?
+    /// Does the chrome own this cell? 1-based row and column, in cells.
+    ///
+    /// Asked *before* the viewport guards, and for every non-motion, non-release report, because the
+    /// picture's box cannot answer this question: with `?1016h` the box is the pane's own pixel
+    /// grid (a 40x15 pty that reports 320x3600 px puts a wheel over the panel at y ≈ 1800, inside
+    /// the picture's 320x3600 px frame), so `Viewport.contains(pixel:)` is true over the panel and
+    /// a wheel there was posted to the remote desktop instead of moving the panel's window
+    /// (#118). The chrome's own regions do not depend on the picture's box; a cell that is neither
+    /// a panel cell nor a status-line button answers `false` here and takes the viewport path
+    /// exactly as before, so a legitimate desktop scroll is untouched. `Desk` supplies it, and this
+    /// stays a closure so the reader keeps its one-way dependency on the chrome layer.
+    var chromeOwns: ((Int, Int) -> Bool)?
 
     /// `kitty` reports the flags the terminal answered with, or nil when it stayed silent — the
     /// capability handshake in `ScreenWriter.writeKeyboardProtocol`. Silence is a normal outcome:
@@ -332,6 +344,20 @@ final class InputReader {
         }
 
         let viewport = currentViewport()
+        // The chrome answers first (see `chromeOwns`): priority is the panel's rectangle, then a
+        // status-line button, then the picture. In pixel mode the report is device pixels, so it is
+        // mapped to cells with the terminal's own cell size before the question is asked — the same
+        // division the outside-picture path below has always done.
+        if !motion, !report.isRelease, let owns = chromeOwns, let click = onChromeClick {
+            let cell = pixelMouse
+                ? Self.cell(forPixel: cx, cy, cellSize: TermGeometry.read().cellSize)
+                : (row: cy, col: cx)
+            if owns(cell.row, cell.col) {
+                click(cell.row, cell.col, report.wheelStep)
+                downButton = nil
+                return
+            }
+        }
         let point: CGPoint
         let spot: String
         if pixelMouse {
@@ -400,6 +426,16 @@ final class InputReader {
             if dryRun { return }
         }
         postMouse(type, button: button, at: point, flags: flags)
+    }
+
+    /// A SGR-Pixels report (`?1016h`) → the 1-based cell it is over. One cell size, from the
+    /// terminal: the pty's `ws_xpixel`/`ws_ypixel` divided by the grid, or the documented fallback
+    /// when the terminal does not report pixels. Pure so the pixel half of the routing can be tested
+    /// against the real numbers (`PanelWheelTests`) instead of a pty.
+    static func cell(forPixel px: Int, _ py: Int,
+                     cellSize: (w: Double, h: Double)) -> (row: Int, col: Int) {
+        (row: Int(Double(py) / max(cellSize.h, 1)) + 1,
+         col: Int(Double(px) / max(cellSize.w, 1)) + 1)
     }
 
     /// Double and triple clicks: same spot within half a second, like the real thing.

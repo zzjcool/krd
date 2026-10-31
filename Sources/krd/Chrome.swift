@@ -235,6 +235,34 @@ enum ChromeHit: Equatable {
     case outside
 }
 
+/// Who owns a cell, in priority order — the decision the input path routes a mouse report on.
+///
+/// `ChromeHit` is the same answer in the shape the click path wants (`status/panel/outside`), and
+/// it is derived from this one so the two cannot drift. The order is the whole rule: the panel's
+/// rectangle, then a chrome row that carries a `hit` id, then the picture. A panel cell is *not*
+/// "outside the picture" in general — with `?1016h` a one-row picture's pixel box is the whole pane,
+/// so `Viewport.contains(pixel:)` answers true over the panel and the wheel never reaches it (#118).
+/// Hence: a chrome region must never be expressed as "a cell the picture does not cover".
+extension ChromeHit {
+    /// The same verdict, without the id: what `Chrome.route` is asked for.
+    init(route: ChromeRoute) {
+        switch route {
+        case .panel: self = .insidePanel
+        case .status(let id): self = .statusSegment(id)
+        case .picture: self = .outside
+        }
+    }
+}
+
+enum ChromeRoute: Equatable {
+    /// A cell inside an open panel's box: the panel owns the pointer there (wheel: scroll it).
+    case panel
+    /// A cell on the status line or the bar that carries a control id.
+    case status(String)
+    /// Everything else, i.e. the picture: the report keeps its old meaning.
+    case picture
+}
+
 final class Chrome {
     private struct Cell: Equatable {
         var ch: Character = " "
@@ -390,19 +418,39 @@ final class Chrome {
 
     /// Mouse coordinates arrive 1-based, in cells.
     func hitTest(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeHit {
+        ChromeHit(route: route(row: row, col: col, geometry: geometry))
+    }
+
+    /// An open panel's box, as a rectangle of 1-based cells. **Pure geometry, never the cell grid.**
+    ///
+    /// The two callers live on different threads (the drawer and the 1 Hz tick on the main queue,
+    /// the wheel in `Desk.chromeClick` on the reader thread), and `cells` is replaced wholesale by
+    /// `resize` on every pane-size change. A rectangle read out of `ChromeGeometry` is a fact about
+    /// the layout, so the reader's answer cannot go blank because a repaint is half way through.
+    static func panelRect(_ geometry: ChromeGeometry, row: Int, col: Int) -> Bool {
+        let y = row - 1
+        guard col >= 1, col <= geometry.cols, row >= 1, row <= geometry.rows else { return false }
+        return geometry.panelHeight > 0
+            && y >= geometry.panelTop && y < geometry.panelTop + geometry.panelHeight
+    }
+
+    /// The routing decision, in priority order: panel rectangle → chrome row with a `hit` id →
+    /// picture. Only the middle arm reads `cells`, and only for the two rows that are drawn as
+    /// clickable text (`statusRow`, `barRow`); everything else is a rectangle.
+    func route(row: Int, col: Int, geometry: ChromeGeometry) -> ChromeRoute {
+        if Chrome.panelRect(geometry, row: row, col: col) { return .panel }
         let y = row - 1, x = col - 1
-        guard y >= 0, y < rows, x >= 0, x < cols else { return .outside }
-        // The status line and the bar are both single rows of clickable text; everything else the
-        // chrome draws is either the picture (not ours) or a panel (which swallows its own clicks).
+        // `cells.count` is the invariant that makes the index safe rather than `rows`/`cols`: the
+        // reader thread and the main queue both hold this object, and `resize` writes all three
+        // fields one at a time. An inconsistent snapshot answers "nobody's" instead of reading a
+        // cell that the new grid no longer has.
+        guard cells.count == cols * rows, cols > 0,
+              y >= 0, y < rows, x >= 0, x < cols else { return .picture }
         if y == geometry.statusRow || y == geometry.barRow {
             let id = cells[y * cols + x].hit
-            return id.isEmpty ? .outside : .statusSegment(id)
+            return id.isEmpty ? .picture : .status(id)
         }
-        if geometry.panelHeight > 0,
-           y >= geometry.panelTop, y < geometry.panelTop + geometry.panelHeight {
-            return .insidePanel
-        }
-        return .outside
+        return .picture
     }
 
     // MARK: cells
@@ -451,7 +499,7 @@ final class Chrome {
     /// on a box narrower than that -- a twenty-column pane has no space between `─ stats ─` and
     /// ` ^\ q/esc ` for anything else. Narrowing the marker is what keeps "a squeezed panel says
     /// so" true down to ~26 columns instead of ~30 (#118).
-    private func panelBadge(offset: Int, inside: Int, total: Int, room: Int) -> String {
+    static func panelBadge(offset: Int, inside: Int, total: Int, room: Int) -> String {
         guard total > inside, room > 0 else { return "" }
         let full = " \(offset + 1)-\(offset + inside)/\(total) ↕ "
         if DisplayWidth.of(full) <= room { return full }
@@ -560,6 +608,22 @@ final class Chrome {
         return (min(max(0, start), last), total, last)
     }
 
+    /// One wheel notch on a panel: the offset to store, or `nil` for "wherever this panel is read
+    /// from" — the log's end, which is also what keeps a log sitting on its newest line when the
+    /// tail is re-read every second.
+    ///
+    /// This is `Chrome.panelWindow` plus one row, in one place, because the wheel and the drawer
+    /// have to agree about both ends: a notch that walks off either end lands on that end (the
+    /// clamp), and the notch that lands back on the log's end forgets the offset instead of pinning
+    /// the old last row (#118). Separated from `Desk.scrollPanel` so a test can drive the real
+    /// arithmetic without a pty, a timer or a main queue.
+    static func panelScroll(_ panel: ChromePanel, _ m: ChromeMetrics, inside: Int,
+                            requested: Int?, by rows: Int) -> Int? {
+        let (current, _, last) = panelWindow(panel, m, inside: inside, requested: requested)
+        let wanted = min(max(0, current + rows), last)
+        return (panel.readsFromTheEnd && wanted == last) ? nil : wanted
+    }
+
     private func drawPanel(_ panel: ChromePanel, geometry: ChromeGeometry, m: ChromeMetrics,
                            requested: Int?) {
         let y = geometry.panelTop
@@ -573,7 +637,7 @@ final class Chrome {
         // squeezed box has to spare -- the content rows are what the reader came for (#118).
         // The cells strictly between the title and ` ^\ q/esc `, which is where the marker has to fit.
         let badgeRoom = w - 9 - (2 + DisplayWidth.of(" \(panel.title) "))
-        let badge = panelBadge(offset: offset, inside: inside, total: total, room: badgeRoom)
+        let badge = Chrome.panelBadge(offset: offset, inside: inside, total: total, room: badgeRoom)
         box(0, y, w, inside + 2, title: panel.title, badge: badge)
         /// Where content row `i` lands inside the box, or nil when the window does not hold it.
         /// Every panel walks its rows through this, so a row is either drawn at its own row or not

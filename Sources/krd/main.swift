@@ -3427,6 +3427,13 @@ final class Desk {
         reader.onChromeClick = { [weak self] row, col, wheel in
             self?.chromeClick(row: row, col: col, wheel: wheel)
         }
+        // The reader asks this before the viewport guards: a chrome region is not "the cells the
+        // picture does not cover" (#118). Wall mode has no chrome at all (`chromeAvailable` is
+        // false there), so every wall click keeps taking the outside-the-picture path, which is
+        // what it was built on.
+        reader.chromeOwns = { [weak self] row, col in
+            self?.chromeOwns(row: row, col: col) ?? false
+        }
         reader.trace = options.debug
         reader.ime = options.ime
         if options.debug {
@@ -3538,8 +3545,12 @@ final class Desk {
             return
         }
         guard chromeAvailable, let geometry = chromeGeometry else { return }
-        switch chrome.hitTest(row: row, col: col, geometry: geometry) {
-        case .statusSegment(let id):
+        if options.debug {
+            Log.write("chrome: click wall=\(wallMode ? 1 : 0) row=\(row) col=\(col) wheel=\(wheel) "
+                      + "hit=\(chrome.hitTest(row: row, col: col, geometry: geometry))\n")
+        }
+        switch chrome.route(row: row, col: col, geometry: geometry) {
+        case .status(let id):
             // A notch is not a click, even when it lands on a segment: a two-finger scroll over the
             // bar used to take whatever the segment does, and one of them shrinks the mirror back
             // into the wall (#118).
@@ -3558,7 +3569,7 @@ final class Desk {
             case "target": openPanel(.devices)
             default: break
             }
-        case .insidePanel:
+        case .panel:
             // The wheel over a panel is how the rows its box cannot hold are reached (#118): one
             // notch is one row, clamped at both ends. A click inside a panel is still not forwarded
             // anywhere -- it is not a picture cell and there is no control under it.
@@ -3569,9 +3580,21 @@ final class Desk {
             DispatchQueue.main.async { [weak self] in
                 self?.scrollPanel(by: wheel < 0 ? -1 : 1)
             }
-        case .outside:
+        case .picture:
             break
         }
+    }
+
+    /// Whether the chrome owns a cell, asked from the *reader* thread (`InputReader.chromeOwns`).
+    ///
+    /// It reads two things and nothing else: `chromeAvailable` (fixed before the reader starts) and
+    /// `chromeGeometry` (a value type the main queue replaces wholesale), plus — for the status line
+    /// and the bar only — the cell grid. The panel arm is a rectangle out of the geometry
+    /// (`Chrome.panelRect`), so a repaint or a resize on the main queue can never turn a panel cell
+    /// into "nobody's" half way through this question.
+    private func chromeOwns(row: Int, col: Int) -> Bool {
+        guard chromeAvailable, let geometry = chromeGeometry else { return false }
+        return chrome.route(row: row, col: col, geometry: geometry) != .picture
     }
 
     /// One wheel notch inside an open panel, on the main queue: move the window a row and repaint
@@ -3582,14 +3605,21 @@ final class Desk {
     private func scrollPanel(by rows: Int) {
         guard let panel = chromeState.panel, let geometry = chromeGeometry else { return }
         let inside = geometry.panelInsideRows
-        let (current, total, last) = Chrome.panelWindow(panel, chromeMetrics, inside: inside,
-                                                        requested: chromeState.panelOffset)
-        let wanted = min(max(0, current + rows), last)
+        if options.debug {
+            // What the notch is about to do, next to what it did with: the window the drawer
+            // clamped to, the row it wants, and the offset that was stored before this notch (#118).
+            let (current, total, last) = Chrome.panelWindow(panel, chromeMetrics, inside: inside,
+                                                            requested: chromeState.panelOffset)
+            Log.write("chrome: scroll panel=\(panel.rawValue) inside=\(inside) current=\(current) "
+                      + "total=\(total) wanted=\(min(max(0, current + rows), last)) stored="
+                      + "\(chromeState.panelOffset.map(String.init) ?? "nil")\n")
+        }
         // A log scrolled back onto its last line is at the end again, and the stored `nil` is what
         // keeps it there: the tail is re-read every second, so a window pinned to the old last row
         // would stop showing the newest line -- in the panel whose job is to show it. `nil` means
         // "wherever this panel is read from", which for a log is the end (#118).
-        chromeState.panelOffset = (panel.readsFromTheEnd && wanted == last) ? nil : wanted
+        chromeState.panelOffset = Chrome.panelScroll(panel, chromeMetrics, inside: inside,
+                                                    requested: chromeState.panelOffset, by: rows)
         chromeDirty = true
         drawChrome()
     }
