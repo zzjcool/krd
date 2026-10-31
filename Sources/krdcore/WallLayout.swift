@@ -172,7 +172,9 @@ public struct WallLayout: Equatable {
 
             /// Where the thumb is drawn, or nil when this segment cannot show a position.
             /// Two arrows plus at least one thumb row is the minimum (design §6: "no `◀ ▶`,
-            /// one cell is too small to hit").
+            /// one cell is too small to hit"). With exactly one shaft cell the thumb goes in that
+            /// cell for *every* `start`: a single cell can say "somewhere in this track", not
+            /// *where*, so the click on it has to agree — see `jumpTarget` (issue #135).
             public func thumbRow() -> Int? {
                 guard scrollable, rect.rows >= 3, shaftCount >= 1 else { return nil }
                 if shaftCount == 1 { return rect.row + 1 }
@@ -184,8 +186,19 @@ public struct WallLayout: Equatable {
             /// the shaft) makes `jumpTarget` the new start. Exact whenever the shaft has at least
             /// as many cells as there are positions; with fewer cells several starts share one
             /// thumb cell and the nearest one wins.
+            ///
+            /// A shaft of **at most one cell** cannot invert anything: every `start` shares that
+            /// cell, so an offset cannot single out a page, and the only position left to name is
+            /// the one the thumb is drawn for — the reader's own. The click is then a no-op (the
+            /// state clamps it back to the same start, and the text layer's per-cell diff writes
+            /// nothing). It used to answer `0`, which turned the one live shaft cell of a 3-row
+            /// segment into a "go to the first page" button that looked like "you are here"
+            /// (issue #135).
             public func jumpTarget(shaftOffset: Int) -> Int {
-                guard maxStart > 0, shaftCount >= 2 else { return 0 }
+                guard maxStart > 0 else { return 0 }
+                // `make` already clamps `start` into 0...maxStart; the clamp keeps this function's
+                // range contract independent of the caller.
+                guard shaftCount >= 2 else { return max(0, min(maxStart, start)) }
                 let offset = max(0, min(shaftCount - 1, shaftOffset))
                 let t = Double(offset) / Double(shaftCount - 1)
                 return max(0, min(maxStart, Int((t * Double(maxStart)).rounded())))
@@ -535,7 +548,8 @@ public struct WallLayout: Equatable {
     }
 
     /// Top row = one step back, bottom row = one step forward, the shaft = jump to the position
-    /// under the cursor. Fewer than 2 rows (the arrows would be the same cell) or nothing to
+    /// under the cursor (a one-cell shaft can only hold the one it is showing, so that jump is a
+    /// no-op — `jumpTarget`). Fewer than 2 rows (the arrows would be the same cell) or nothing to
     /// scroll (`scrollable == false`) means the whole segment is dead, caps included — that is
     /// what makes the grey `▲`/`▼` honestly grey (design §5).
     private func segmentAction(_ segment: WallBar.Segment, row: Int,
