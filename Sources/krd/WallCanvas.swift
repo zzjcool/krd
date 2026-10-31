@@ -92,6 +92,22 @@ enum WallSlotPaint: Equatable {
     case mask
 }
 
+/// What the pointer is doing on the wall: what it is over, and whether a button is down.
+///
+/// The wall has no hover of its own — it is drawn as text, and text does not know where the mouse is.
+/// This is the value the *input* path computes (`WallState.focus(atRow:col:)`, i.e. the click table)
+/// and the painter styles: the target's border in the accent colour, and the same row reversed while
+/// the button is down. It deliberately carries nothing about *what a click does* — a pointer is a
+/// question, not an action.
+struct WallPointer: Equatable {
+    /// The item under the pointer, in `WallState.Focus`'s vocabulary: a display (the stage) or a
+    /// window (a card or its caption). `nil` is the furniture, which nothing highlights.
+    var over: WallState.Focus? = nil
+    /// A press that has not been released yet. The wall's only feedback before the mirror opens, so
+    /// it has to be visible in one row (`press` is what makes a click feel received).
+    var down: Bool = false
+}
+
 /// The paint state of every slot of one frame: the stage, then the cards of the current page.
 ///
 /// A missing entry means `.placeholder`, so a caller that knows nothing about pictures gets exactly
@@ -208,12 +224,33 @@ struct WallState: Equatable {
     var stageStart: Int = 0
     var cardStart: Int = 0
     var focus: Focus? = nil
+    /// Where the pointer is, and whether it is down. Not part of `apply`: a click changes what is on
+    /// stage, a hover only changes how what is already there is drawn.
+    var pointer = WallPointer()
 
     /// `nil` = looking at the wall itself; otherwise which item the user picked (the phase-1
     /// placeholder for the mirror that P2 starts here).
     enum Focus: Equatable {
         case display(Int)
         case window(Int)
+    }
+
+    /// What a click at this cell would act on, in the vocabulary a highlight needs.
+    ///
+    /// Derived from `WallLayout.action` — the very table the click path runs — rather than from a
+    /// second look at the rectangles. A second hit test is how a hover ends up sitting on something
+    /// a click would not enter, and the wall already has one table for "what is here"
+    /// (`slot`), one for "what does a click do" (`action`), and no appetite for a third.
+    ///
+    /// `nil` for the furniture: the bar, the band's `⤢ N`, the footer and the margins all *do*
+    /// something on a click (a page step, a width cycle, back) and none of them is an item, so
+    /// nothing lights up there.
+    func focus(atRow row: Int, col: Int, in layout: WallLayout) -> Focus? {
+        switch layout.action(row: row, col: col) {
+        case let .enterStage(i): return .display(i)
+        case let .enterCard(i): return .window(i)
+        default: return nil
+        }
     }
 
     /// The geometry of the current pane. `WallLayout` does the clamping by itself, so passing in
@@ -432,9 +469,10 @@ final class WallCanvas {
     /// run on `(rows, cols)`, and is empty when nothing changed since the last call.
     func draw(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
-              paints: WallSlotPaints = WallSlotPaints()) -> [UInt8] {
+              paints: WallSlotPaints = WallSlotPaints(),
+              pointer: WallPointer = WallPointer()) -> [UInt8] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH, paints: paints)
+                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer)
         return render(cells, cols: cols, rows: rows)
     }
 
@@ -446,9 +484,10 @@ final class WallCanvas {
     /// not turn the second draw into a full repaint.
     func lines(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
                focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
-               paints: WallSlotPaints = WallSlotPaints()) -> [String] {
+               paints: WallSlotPaints = WallSlotPaints(),
+               pointer: WallPointer = WallPointer()) -> [String] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
-                          cellW: cellW, cellH: cellH, paints: paints)
+                          cellW: cellW, cellH: cellH, paints: paints, pointer: pointer)
         var out: [String] = []
         out.reserveCapacity(max(0, rows))
         for y in 0..<max(0, rows) {
@@ -473,7 +512,8 @@ final class WallCanvas {
 
     private func build(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
                        focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
-                       paints: WallSlotPaints = WallSlotPaints()) -> [Cell] {
+                       paints: WallSlotPaints = WallSlotPaints(),
+                       pointer: WallPointer = WallPointer()) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
         // Order matters only where two elements share a row: the footer and the band header place
@@ -481,12 +521,13 @@ final class WallCanvas {
         // tail leaves, so the tail keeps the cells it needs even if a degenerate pane makes them
         // collide.
         drawHeader(&grid, model: model, layout: layout)
-        drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints)
-        drawStageCaption(&grid, model: model, layout: layout)
+        drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints,
+                  pointer: pointer)
+        drawStageCaption(&grid, model: model, layout: layout, pointer: pointer)
         drawDivider(&grid, layout: layout)
         drawBand(&grid, model: model, layout: layout)
-        drawCards(&grid, model: model, layout: layout, paints: paints)
-        drawCardCaptions(&grid, model: model, layout: layout, paints: paints)
+        drawCards(&grid, model: model, layout: layout, paints: paints, pointer: pointer)
+        drawCardCaptions(&grid, model: model, layout: layout, paints: paints, pointer: pointer)
         drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice,
                    demoNote: paints.demoNote)
         drawBar(&grid, layout: layout)
@@ -510,7 +551,8 @@ final class WallCanvas {
     /// centred in it — the contract's stand-in for the §4 mask, deliberately occupying exactly the
     /// rect the picture will occupy in P2, so nothing moves when it appears.
     private func drawStage(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                           cellW: Double, cellH: Double, paints: WallSlotPaints) {
+                           cellW: Double, cellH: Double, paints: WallSlotPaints,
+                           pointer: WallPointer = WallPointer()) {
         guard !layout.stage.isEmpty else { return }
         switch paints.stage {
         case .picture:
@@ -521,7 +563,9 @@ final class WallCanvas {
             clear(&grid, rect: layout.stage)
             return
         case .mask:
-            drawMask(&grid, rect: layout.stage, reason: paints.maskReason(0))
+            let lit = pointer.over == .display(layout.stageStart)
+            drawMask(&grid, rect: layout.stage, reason: paints.maskReason(0),
+                     style: lit ? (pointer.down ? .reverse : .accent) : .dim)
             return
         case .placeholder:
             break
@@ -540,13 +584,15 @@ final class WallCanvas {
         // The middle row is the same expression for a box (any `rows >= 3`) and for the "too short
         // for a box" case, so the label does not move when the pane crosses that threshold.
         let middle = rect.row + (rect.rows - 1) / 2
+        let lit = pointer.over == .display(layout.stageStart)
         if rect.rows >= 3, rect.cols >= 2 {
-            drawBox(&grid, rect: rect)
+            drawBox(&grid, rect: rect, style: lit ? .accent : .dim)
             let inner = max(0, rect.cols - 2)          // inside the two side borders
             let body = DisplayWidth.truncate(label, to: inner)
             let offset = max(0, (inner - DisplayWidth.of(body)) / 2)
             grid.text(body, row: middle, col: rect.col + 1 + offset,
-                      shown == nil ? .dim : .bright, limit: max(0, inner - offset))
+                      lit ? (pointer.down ? .reverse : .accent) : (shown == nil ? .dim : .bright),
+                      limit: max(0, inner - offset))
         } else {
             // Two rows or one: no box (a box needs a top, a bottom and a side), just the label.
             let body = DisplayWidth.truncate(label, to: rect.cols)
@@ -557,7 +603,8 @@ final class WallCanvas {
     }
 
     /// `🖥 Built-in — 1512×982 · main · 1/3`
-    private func drawStageCaption(_ grid: inout Grid, model: WallModel, layout: WallLayout) {
+    private func drawStageCaption(_ grid: inout Grid, model: WallModel, layout: WallLayout,
+                                 pointer: WallPointer = WallPointer()) {
         let rect = layout.stageCaption
         guard !rect.isEmpty else { return }
         let text: String
@@ -569,8 +616,11 @@ final class WallCanvas {
         } else {
             text = "\(symbols.display) no displays"
         }
-        grid.text(DisplayWidth.truncate(text, to: rect.cols), row: rect.row, col: rect.col, .plain,
-                  limit: rect.cols)
+        // Reverse video, not a colour: it is the one signal that also works on a slot whose picture
+        // covers the box, and it is exactly one row of bytes in the diff.
+        let lit = pointer.over == .display(layout.stageStart)
+        grid.text(DisplayWidth.truncate(text, to: rect.cols), row: rect.row, col: rect.col,
+                  lit ? .reverse : .plain, limit: rect.cols)
     }
 
     /// `▣ recent    1–3 / 7                                          ⤢ 3`
@@ -640,7 +690,7 @@ final class WallCanvas {
     /// a rect never reaches here. A squeezed box still keeps its first lines and never overwrites a
     /// border.
     private func drawCards(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                           paints: WallSlotPaints) {
+                           paints: WallSlotPaints, pointer: WallPointer = WallPointer()) {
         for (slot, rect) in layout.cards.enumerated() {
             guard !rect.isEmpty else { continue }
             switch paints.card(slot) {
@@ -648,7 +698,9 @@ final class WallCanvas {
                 clear(&grid, rect: rect)    // transparent bars show what is under the picture
                 continue
             case .mask:
-                drawMask(&grid, rect: rect, reason: paints.maskReason(1 + slot))
+                let lit = pointer.over == .window(layout.cardStart + slot)
+                drawMask(&grid, rect: rect, reason: paints.maskReason(1 + slot),
+                         style: lit ? (pointer.down ? .reverse : .accent) : .dim)
                 continue
             case .placeholder:
                 break
@@ -657,7 +709,10 @@ final class WallCanvas {
             let index = layout.cardStart + slot
             guard model.windows.indices.contains(index) else { continue }
             let window = model.windows[index]
-            drawBox(&grid, rect: rect)
+            // The pointer is on *this* item, not on this slot: the index is absolute, so page 2's
+            // first card answers for window 3 (`cardStart + slot`), the same index a click enters.
+            let lit = pointer.over == .window(index)
+            drawBox(&grid, rect: rect, style: lit ? .accent : .dim)
 
             let inner = rect.cols - 4              // one blank cell inside each border
             guard inner >= 1 else { continue }
@@ -681,8 +736,12 @@ final class WallCanvas {
             let interior = rect.rows - 2           // rows between the two borders
             let shown = lines.prefix(max(0, interior))
             var row = rect.row + 1 + max(0, (interior - shown.count) / 2)
-            for line in shown {
-                grid.text(line.text, row: row, col: col, line.style, limit: inner)
+            for (i, line) in shown.enumerated() {
+                // Only the card's first line (the app name) deepens on a press: reversing the whole
+                // block would repaint every row of a card for one click, and the box already says
+                // which card it is.
+                let style: Chrome.Style = lit && pointer.down && i == 0 ? .reverse : line.style
+                grid.text(line.text, row: row, col: col, style, limit: inner)
                 row += 1
             }
         }
@@ -691,7 +750,7 @@ final class WallCanvas {
     /// `▣ Safari — Apple…` — the same width as its card, so a click on the caption enters the card
     /// right above it (design §1: "点图或点说明都进入").
     private func drawCardCaptions(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                                 paints: WallSlotPaints) {
+                                 paints: WallSlotPaints, pointer: WallPointer = WallPointer()) {
         for (slot, box) in layout.cardCaptions.enumerated() {
             guard box.rows == 1, !box.isEmpty else { continue }
             let index = layout.cardStart + slot
@@ -709,8 +768,11 @@ final class WallCanvas {
                 rect = CellRect(col: col, row: box.row,
                                 cols: max(0, min(cells.cols, box.maxCol - col + 1)), rows: 1)
             }
+            // The same row for both states of the card: a picture card draws no box, so this is the
+            // only hover it can show, and `press` is already said by the box and the app line above.
+            let lit = pointer.over == .window(index)
             grid.text(DisplayWidth.truncate(text, to: rect.cols), row: rect.row, col: rect.col,
-                      .plain, limit: rect.cols)
+                      lit ? .reverse : .plain, limit: rect.cols)
         }
     }
 
@@ -823,34 +885,42 @@ final class WallCanvas {
         }
     }
 
-    private func drawMask(_ grid: inout Grid, rect: CellRect, reason: String? = nil) {
+    /// A slot whose picture did not arrive. `style` is the pointer's: a mask is a box like any
+    /// other, and the pointer has to be acknowledged here too — a wall whose captures failed (no
+    /// Screen Recording grant, a display that is not shareable) is *all* masks, and a hover that
+    /// did nothing on it would look like the input path was broken.
+    private func drawMask(_ grid: inout Grid, rect: CellRect, reason: String? = nil,
+                          style: Chrome.Style = .dim) {
         guard !rect.isEmpty else { return }
         guard rect.rows >= 3, rect.cols >= 2 else {
             let label = DisplayWidth.truncate(symbols.dash, to: rect.cols)
-            grid.text(label, row: rect.row + (rect.rows - 1) / 2, col: rect.col, .dim,
+            grid.text(label, row: rect.row + (rect.rows - 1) / 2, col: rect.col, style,
                       limit: rect.cols)
             return
         }
-        drawBox(&grid, rect: rect)
+        drawBox(&grid, rect: rect, style: style)
         let inner = max(0, rect.cols - 2)
         // One word if the caller knows it ("closed", "denied", "no stream"): a reader looking at a
         // card that will not show its window needs the reason on the card, not in a log file.
         let body = DisplayWidth.truncate(reason ?? "no picture", to: inner)
         let offset = max(0, (inner - DisplayWidth.of(body)) / 2)
-        grid.text(body, row: rect.row + (rect.rows - 1) / 2, col: rect.col + 1 + offset, .dim,
-                  limit: max(0, inner - offset))
+        grid.text(body, row: rect.row + (rect.rows - 1) / 2, col: rect.col + 1 + offset,
+                  style == .dim ? .dim : style, limit: max(0, inner - offset))
     }
 
-    private func drawBox(_ grid: inout Grid, rect: CellRect) {
+    /// The frame around a card or the stage. `style` is the pointer's to choose: `.dim` is the wall
+    /// at rest, `.accent` is "under the pointer", and nothing else about the box moves — a highlight
+    /// that changed the geometry would reflow the card and cost a full row of bytes.
+    private func drawBox(_ grid: inout Grid, rect: CellRect, style: Chrome.Style = .dim) {
         guard rect.rows >= 3, rect.cols >= 2 else { return }
         let run = String(repeating: symbols.boxH, count: rect.cols - 2)
-        grid.text(symbols.boxTL + run + symbols.boxTR, row: rect.row, col: rect.col, .dim,
+        grid.text(symbols.boxTL + run + symbols.boxTR, row: rect.row, col: rect.col, style,
                   limit: rect.cols)
         for row in (rect.row + 1)..<rect.maxRow {
-            grid.set(row: row, col: rect.col, glyph(symbols.boxV), .dim)
-            grid.set(row: row, col: rect.maxCol, glyph(symbols.boxV), .dim)
+            grid.set(row: row, col: rect.col, glyph(symbols.boxV), style)
+            grid.set(row: row, col: rect.maxCol, glyph(symbols.boxV), style)
         }
-        grid.text(symbols.boxBL + run + symbols.boxBR, row: rect.maxRow, col: rect.col, .dim,
+        grid.text(symbols.boxBL + run + symbols.boxBR, row: rect.maxRow, col: rect.col, style,
                   limit: rect.cols)
     }
 

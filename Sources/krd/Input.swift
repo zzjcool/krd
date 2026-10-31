@@ -108,6 +108,19 @@ final class InputReader {
     /// be able to tell the two apart; a panel needs the sign as well as the flag, because one notch
     /// up and one notch down scroll opposite ways (issue #118).
     var onChromeClick: ((Int, Int, Int) -> Void)?
+    /// The pointer moved, or a button changed state, over a cell: 1-based row and column, and whether
+    /// a press is down.
+    ///
+    /// Called for *every* mouse report except a wheel — motion, press and release alike. Before this
+    /// existed only a press was routed anywhere and a move was thrown away, so nothing on the wall
+    /// could answer the pointer: a reader had to click a card to find out whether the thing they were
+    /// aiming at was a card at all. The receiver gets the raw cell (the chrome's own hit test is what
+    /// decides if it means anything) and the button state, so a highlight can end on the release it
+    /// belongs to instead of staying lit.
+    ///
+    /// Reports arrive on the reader thread; `Desk` hops to the main queue, because a hover changes
+    /// what the wall paints.
+    var onChromeHover: ((Int, Int, Bool) -> Void)?
     /// Does the chrome own this cell? 1-based row and column, in cells.
     ///
     /// Asked *before* the viewport guards, and for every non-motion, non-release report, because the
@@ -552,6 +565,32 @@ final class InputReader {
     /// feeds it three and asserts the desk heard one click. The tty is the only thing left in
     /// `loop()`, so nothing here touches a file descriptor.
     func handleMouse(_ report: MouseReport) {
+        reportHover(report)
+        handleMouseBody(report)
+    }
+
+    /// Tell the receiver where the pointer is, before the event is routed.
+    ///
+    /// Before, because "is a button down" is a fact about the *state the event arrives in*: a press
+    /// is down (and `chromePress` is not set until the route below decides it belongs to the
+    /// chrome), a release is up, and a motion is down exactly when a chrome press is still in flight
+    /// — the drag of a click that the picture must never see (#118). After routing, the same motion
+    /// during a press would read as "up", and the pressed look would flicker with every drag report.
+    private func reportHover(_ report: MouseReport) {
+        guard let hover = onChromeHover, !report.isWheel else { return }
+        let px = report.x, py = report.y
+        // A cell coordinate can never be larger than the grid; anything bigger is a pixel coordinate,
+        // i.e. the terminal honoured `?1016h` — the same test `handleMouseBody` makes, for the same
+        // reason (the wall runs with pixel reporting on, so this is the normal path there).
+        let pixel = px > TermGeometry.lastGrid.cols || py > TermGeometry.lastGrid.rows
+        let cell = pixel
+            ? Self.cell(forPixel: px, py, cellSize: TermGeometry.read().cellSize)
+            : (row: py, col: px)
+        let down = !report.isRelease && (report.isMotion ? chromePress : true)
+        hover(cell.row, cell.col, down)
+    }
+
+    private func handleMouseBody(_ report: MouseReport) {
         let cx = report.x, cy = report.y
         let motion = report.isMotion
 
