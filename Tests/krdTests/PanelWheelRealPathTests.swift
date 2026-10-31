@@ -196,32 +196,34 @@ final class PanelWheelRealPathTests: XCTestCase {
     func testBothModesStillLeaveThePictureToTheDesktopWithNoPanelOpen() {
         // No panel: the pane is picture, status line, and nothing else. A wheel there is the
         // remote desktop's, in both report modes — `chromeOwns` has to say no, or `handleMouse`
-        // would hand it to `chromeClick` and the mirrored app would stop scrolling.
-        for pixelMouse in [true, false] {
-            var options = Options()
-            options.wall = false
-            options.dev = true
-            options.mock = true
-            let desk = Desk(options: options)
-            desk.writer.sink = { _ in }
-            let pictureRows = Chrome.pictureRows(paneRows: 15, bar: false, panel: nil, chrome: true)
-            desk.chromeGeometry = Chrome.layout(paneCols: 40, paneRows: 15, imageCols: 40,
-                                                imageRows: pictureRows, bar: false, dev: true,
-                                                panel: nil)
+        // would hand it to `chromeClick` and a mirrored app would stop scrolling.
+        var options = Options()
+        options.wall = false
+        options.dev = true
+        options.mock = true
+        let desk = Desk(options: options)
+        desk.writer.sink = { _ in }
+        let pictureRows = Chrome.pictureRows(paneRows: 15, bar: false, panel: nil, chrome: true)
+        desk.chromeGeometry = Chrome.layout(paneCols: 40, paneRows: 15, imageCols: 40,
+                                            imageRows: pictureRows, bar: false, dev: true,
+                                            panel: nil)
+        // The pane really is the picture: nothing to route to but row 1's own cells and the status
+        // line's undrawn ones, so a `false` here means "the picture", not "the chrome never drew".
+        XCTAssertEqual(desk.chromeGeometry?.panelHeight, 0, "no box to route to")
+        XCTAssertEqual(desk.chromeGeometry?.imageRows, 14, "fourteen rows of picture under the status line")
 
-            // The picture's own row at the top of the pane, in each mode's own coordinates: a cell
-            // report says row 1, a pixel report says py 8 at the tty's 8x16 cell. Either way the
-            // reader divides it the same way it divides a panel report -- and lands on the picture.
-            let inPicture = InputReader.cell(forPixel: pixelMouse ? 160 : 21,
-                                             pixelMouse ? 8 : 1, cellSize: ttyCell)
-            XCTAssertEqual(inPicture.row, 1)
-            XCTAssertNil(InputReader.chromeCell(row: inPicture.row, col: inPicture.col,
-                                                pixelMouse: false, wheel: -1,
-                                                cellSize: ttyCell, owns: desk.chromeOwns),
-                         "pixelMouse=\(pixelMouse): row 1 is the picture, so the desktop keeps the notch")
-            XCTAssertFalse(desk.chromeOwns(row: inPicture.row, col: inPicture.col),
-                           "pixelMouse=\(pixelMouse): row \(inPicture.row) is the picture")
-        }
+        // Pixel mode: a `?1016h` report over the picture's own row. px(160,112) is the *panel* cell
+        // in the wheel tests; over the picture the report is px(160,8), i.e. py 8 = row 1.
+        XCTAssertNil(InputReader.chromeCell(row: 8, col: 160, pixelMouse: true, wheel: -1,
+                                            cellSize: ttyCell, owns: desk.chromeOwns),
+                     "pixel mode: row 1 is the picture, so the desktop keeps the notch")
+        // Cell mode: the same row, sent as the cell itself. No division, same answer.
+        XCTAssertNil(InputReader.chromeCell(row: 1, col: 21, pixelMouse: false, wheel: -1,
+                                            cellSize: ttyCell, owns: desk.chromeOwns),
+                     "cell mode: row 1 is the picture, so the desktop keeps the notch")
+        // …and the status line, with nothing drawn on it, is nobody's either: a notch there must not
+        // be swallowed by the chrome, which is what `route`'s "a `hit` id or nothing" rule buys.
+        XCTAssertFalse(desk.chromeOwns(row: 2, col: 1))
     }
 
     // MARK: (e) a press the chrome takes keeps its whole gesture
