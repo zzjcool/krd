@@ -7,16 +7,21 @@ import Darwin
 /// `Desk` that a unit test cannot build -- and `--replay --bench` gives exactly that from outside,
 /// with no tty, no capture and no permissions.
 ///
-/// On cd9ac5d every case below except the last replays nothing, prints the ordinary summary and exits
-/// 0, so a scripted replay of a valid recording reports success while painting nothing. No other test
-/// in this bundle spawns the binary, so without this file deleting the pre-flight in `runReplay`
-/// leaves every other replay test green -- which is exactly why this file exists.
+/// On cd9ac5d every failure case below replays nothing, prints the ordinary summary and exits 0, so a
+/// scripted replay of a valid recording reports success while painting nothing. No other test drives
+/// the *replay* path -- `WallProcessTests` spawns the binary too, but it looks at the pane, never at a
+/// replay's exit status -- so without this file deleting the pre-flight in `runReplay` leaves every
+/// other replay test green, which is exactly why this file exists.
 final class ReplayProcessTests: XCTestCase {
     /// `pane 8x4` of `cell 4x6` is 32x24 px, and a source of the same aspect keeps the grid from
     /// scaling it; 32*24*3 = 2304 B per frame.
     private static let headerLine =
         #"{"header":{"pane":"8x4","cell":"4x6","tile":"4x2","source":"64x48","format":"rgb"}}"#
     private static let frameBytes = 32 * 24 * 3
+    /// A recording of a 137x44 pane taken at `--scale 0.5`: that pane of `cell 17x33` renders
+    /// 2329x1452 px at scale 1, so its half-scale frames are 1165x726 (1165*726*3 = 2537370 B).
+    private static let halfScaleHeaderLine =
+        #"{"header":{"pane":"137x44","cell":"17x33","tile":"16x8","source":"1920x1200","format":"rgb"}}"#
     private var dir: URL!
 
     override func setUpWithError() throws {
@@ -43,6 +48,14 @@ final class ReplayProcessTests: XCTestCase {
 
     private func frameLine(n: Int, w: Int, h: Int, bpp: Int = 3, tMs: Double) -> String {
         String(format: "{\"n\":%d,\"w\":%d,\"h\":%d,\"bpp\":%d,\"t_ms\":%.2f}", n, w, h, bpp, tMs)
+    }
+
+    /// A frame that only needs to be 2.5 MB of replayable bytes: the replay copies it wholesale, so a
+    /// flat buffer says as much as a patterned one and costs a `Data` instead of a two-million-element
+    /// `map` per file.
+    private func writeFlatFrame(_ index: Int, bytes: Int) throws {
+        try Data([UInt8](repeating: 0x5A &+ UInt8(truncatingIfNeeded: index), count: bytes))
+            .write(to: dir.appendingPathComponent(String(format: "%06d.raw", index)))
     }
 
     /// One `--replay --bench` of the temp recording: what the shell would see, i.e. the exit status
@@ -248,6 +261,32 @@ final class ReplayProcessTests: XCTestCase {
         XCTAssertGreaterThan(p50, 0, "`2 frames` is the *declared* count; the payload column is the only "
                             + "one that says a frame went through the pipeline")
         XCTAssertEqual(run.err, "", "a replay that works has nothing to explain")
+    }
+
+    /// A recording made at `--scale 0.5` and replayed without the flag: every line agrees with every
+    /// other, so nothing *in* the recording explains the miss -- a recording carries no scale
+    /// (`docs/ENCODING.md`) -- and the one thing that makes it fit is the flag it was made with. So the
+    /// sentence has to name that flag: "the header disagrees with its lines" would be a lie about a
+    /// consistent recording. `--scale 0.5` then replays it, which is the other half of the promise.
+    func testARecordingMadeAtAnotherScaleSaysWhichFlagToUse() throws {
+        try writeManifest([
+            Self.halfScaleHeaderLine,
+            frameLine(n: 0, w: 1165, h: 726, tMs: 0),
+            frameLine(n: 1, w: 1165, h: 726, tMs: 33.3),
+        ])
+        try writeFlatFrame(0, bytes: 1165 * 726 * 3)
+        try writeFlatFrame(1, bytes: 1165 * 726 * 3)
+
+        let refused = try XCTUnwrap(try replay())
+        XCTAssertEqual(refused.status, 1, refused.err)
+        XCTAssertTrue(refused.err.contains("the recording carries no scale"), refused.err)
+        XCTAssertTrue(refused.err.contains("--scale"), refused.err)
+        XCTAssertFalse(refused.out.contains("frames"), refused.out)
+
+        let replayed = try XCTUnwrap(try replay(extraArguments: ["--scale", "0.5"]))
+        XCTAssertEqual(replayed.status, 0, replayed.err)
+        XCTAssertTrue(replayed.out.contains("1165x726"), replayed.out)
+        XCTAssertTrue(replayed.out.contains("2 frames"), replayed.out)
     }
 
     /// `--mirror` leaves `Log`'s sink on stderr, so the sentence must still be written exactly once:
