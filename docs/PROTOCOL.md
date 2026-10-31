@@ -282,9 +282,31 @@ Deliberately **not** wrapped:
 | `?2026h` / `?2026l` | tmux ≥ 3.7 implements synchronized output itself and before that it has none at all: wrapped, the mode would be forwarded *past* the process that paints the pane instead of honoured by it |
 | the mouse modes (`?1002`/`?1003`/`?1006`/`?1016` and the four resets) | tmux is the thing that reports the mouse, so these have to reach *it*; sent past it, nothing would ever turn tracking on or off |
 | OSC 52 (§7.4) | the clipboard belongs to the terminal krd is attached to — tmux keeps its own buffers and relays with `set-clipboard`, and a read (`out`) sent beyond it could never be answered back on stdin |
+| OSC 22 (the pointer shape, #202) | **the mouse in that pane is tmux's own, so the shape must not be depended on** — the envelope could carry the sequence (it is a pure re-escaping), and krd deliberately does not wrap it for that reason: under a multiplexer the shape simply does not change |
 | `?2027h` / `?2027l` | the same shape of reason as the mouse modes: the question is asked of the terminal that will draw the cells, and a multiplexer that keeps its own idea of the mode would answer for a pane it composes itself |
 | the kitty keyboard protocol (`CSI > 15 u`, `CSI ? u`, `CSI < u`) | the answer is what krd gates on, and only tmux — the terminal it is actually talking to — can send one back |
 | the placeholder cells | they are ordinary text (`U+10EEEE` plus diacritics), not escapes: tmux rewrites them like any other cell, and it is the image they point at that needs the envelope |
+
+OSC 22 is the wall's pointer shape (#202): `ESC ] 22 ; pointer ST` over anything that **enters** —
+the stage, a card, either one's caption row — and `ESC ] 22 ; default ST` over the wall's own
+furniture (the bar's arrows, shaft and caps, `⤢ N`, the footer, the header, the gaps) and over
+nothing at all, 14 B each, `ST` rather than `BEL`; the wall has no text field, so `text` is the
+mirror's later work. It follows the target's **class**, not the cell: `ScreenWriter.writeChrome`
+prepends the sequence to the frame's own write when the shape changed, so a hover that moves inside
+one card emits nothing, and crossing card → bar → card emits exactly two sequences — 14 B each, on a
+write that was going out anyway. Both terminals krd is tested against (Rex, Ghostty 1.4.0) reset the
+shape when the mouse modes are toggled, so the arming is krd's own book rather than a probe (there
+is no DECRQM for it), and the wall re-asks after a session restart or after `InputReader` re-enables
+mouse reporting — never per frame. Teardown gives it back: `endSession` writes `ESC ] 22 ; default
+ST` before `?1049l`, only when this session asked for a shape, and `handOver` writes the same reset
+before its `exec` — that path replaces the process image, so `endSession` never runs, and a pane
+left holding a hand pointer is a lie the shell behind us inherits. Under a multiplexer the sequence
+is dropped and the shape simply does not change, so nothing may depend on it having any effect: krd
+adds no envelope for it and does not probe for it, and a `SIGKILL` residue is healed by the next
+session's mouse-mode toggle, the argument §1 makes for the mouse modes themselves. The wall is the
+only mode that asks for a shape, so every other mode's byte stream is unchanged — the four golden
+dumps and `--selftest`'s sha256 are byte contracts, and a session that never asked for a hand writes
+no reset either.
 
 Measured, not run in a pane: the transform is pinned byte for byte (`--selftest --no-input` is
 61112 B, `--passthrough on` is 68119 B in 637 envelopes, and stripping them reproduces the plain

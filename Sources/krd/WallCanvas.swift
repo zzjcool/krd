@@ -106,6 +106,20 @@ struct WallPointer: Equatable {
     /// A press that has not been released yet. The wall's only feedback before the mirror opens, so
     /// it has to be visible in one row (`press` is what makes a click feel received).
     var down: Bool = false
+
+    /// The shape the *terminal's* pointer should take while this is the pointer (OSC 22, #202).
+    ///
+    /// A projection of `over` and of nothing else, which is what makes it a **class** rather than a
+    /// per-cell answer: a card and the stage are both "something a click enters", so the hand stays
+    /// on across the gap between them and the wall emits nothing. The furniture — the bar's arrows
+    /// and shaft, `⤢ N`, the footer, the header, every blank — answers a click too, but it is not a
+    /// target (the plan's decision, and why the bar's ends are dimmed), so the terminal keeps its own
+    /// pointer there. `down` is not in it either: a press is not a different shape, it is the same
+    /// target being pushed (the wall already says so in reverse video).
+    ///
+    /// `text` has no case to reach: the wall has no text field, so #202 keeps the wall at two shapes
+    /// and the third belongs to the mirror's later work.
+    var shape: PointerShape { over == nil ? .default : .pointer }
 }
 
 /// The paint state of every slot of one frame: the stage, then the cards of the current page.

@@ -121,6 +121,14 @@ re-send pictures: the first implementation did, and crossing four cards cost 18 
 the frame already on screen (`wallLastPaints`) and sends text alone. Moving within the same item
 costs 0 B — no report, no paint.
 
+The terminal's own pointer now follows the same table — a hand over anything that enters, the
+terminal's shape over the furniture — and is asked for only on a *class* change: one 14 B sequence,
+prepended to the bytes the frame was sending anyway, so a class change costs **+14 B** on top of the
+repaint it already caused and a hover that stays inside one class costs nothing at all
+(`WallPointerShapeTests` pins the mapping, the +14 B and that no class change ever costs a second
+`write(2)`). It is reset to `default` on the way out, the `handOver` before an `exec` included,
+because a pane left holding a hand pointer is a lie the shell behind us inherits.
+
 **The keyboard reaches exactly what the mouse can, because both read the action table.** `Tab` does
 not walk a hand-written list of controls — it walks `WallLayout.stops()`, which is one scan of
 `action(row:col:)` over the pane (deduplicated by action, in reading order). A control added to the

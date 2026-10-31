@@ -1,5 +1,6 @@
 import XCTest
 import Darwin
+import krdcore
 
 /// The pane's byte discipline, seen from outside the process: **the tty gets the paint and nothing
 /// else.**
@@ -400,6 +401,140 @@ final class WallProcessTests: XCTestCase {
         }
         XCTAssertTrue(handedBack, "Ctrl-\\ did not hand the pane back to the wall; tail: "
                       + String(decoding: stream.suffix(300), as: UTF8.self).debugDescription)
+    }
+
+    /// The pointer shape the **terminal** is asked for, end to end: a hover on the wall comes out as
+    /// `ESC ] 22 ; <shape> ST` (#202).
+    ///
+    /// The canvas tests pin the mapping (a target's *class*: a hand over anything that enters, the
+    /// terminal's own shape over the furniture) and the writer tests pin the emission (one sequence,
+    /// riding the frame's write). Neither can catch the two being wired up wrongly: a `drawWall` that
+    /// forgets `writer.pointerShape`, or a mouse-mode toggle that resets the shape and is not told,
+    /// looks exactly like a feature nobody implemented. Only a process with a pointer in it does.
+    ///
+    /// The cells come from the same layout the child builds (`--pane 60x24`, the demo model's one
+    /// display and four windows, the pty's 8x20 cell), so this asserts a *class change* rather than a
+    /// cell number: card → bar → card is two writes, and a hover that stays inside one card is none.
+    func testThePointerShapeFollowsTheHoverTarget() throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+
+        /// `ESC ] 22 ; <name> ST`, in order.
+        func shapes(_ bytes: [UInt8]) -> [String] {
+            let open = Array("\u{1B}]22;".utf8)
+            var out: [String] = [], i = 0
+            while i + open.count <= bytes.count {
+                guard Array(bytes[i..<(i + open.count)]) == open else { i += 1; continue }
+                var j = i + open.count, name = ""
+                while j < bytes.count, bytes[j] != 0x1B {
+                    name.append(Character(UnicodeScalar(bytes[j])))
+                    j += 1
+                }
+                out.append(name)
+                i = j + 1
+            }
+            return out
+        }
+
+        // The demo model's layout, for a pane the test fixes and a cell the pty reports (8x20).
+        let layout = WallLayout.make(paneCols: 60, paneRows: 24, displayCount: 1, windowCount: 4,
+                                     per: 3, stageStart: 0, cardStart: 0,
+                                     stageAspect: 2560.0 / 1600.0, cellAspect: 2.5)
+        XCTAssertGreaterThanOrEqual(layout.cards.count, 2, "the demo's 4 windows must fill 2 cards")
+        let card0 = layout.cards[0]
+        let card1 = layout.cards[1]
+        let barCol = layout.barCol
+
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        child.arguments = ["--wall", "--demo", "--pane", "60x24"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+
+        // The paint, then the mouse modes: the second one is the toggle that resets the shape, so
+        // hovering before it would be answered with a hand no terminal holds.
+        let ready = pump(master, into: &stream, timeoutMs: 5_000) { bytes in
+            let text = String(decoding: bytes, as: UTF8.self)
+            return text.contains(" windows") && text.contains("\u{1B}[?1003h")
+        }
+        XCTAssertTrue(ready, "no wall paint + input install within 5 s; tail: "
+                      + String(decoding: stream.suffix(300), as: UTF8.self).debugDescription)
+        guard ready else { return }
+        XCTAssertEqual(shapes(stream), [], "a wall nobody has pointed at asks for no shape")
+
+        /// One SGR mouse *motion* report (button 35 = no button, moving), 1-based cells.
+        ///
+        /// The hop is reader thread → main queue → paint, so "did it arrive" is polled for rather than
+        /// slept through: a loaded machine is a slower machine, not a different behaviour.
+        func hover(_ row: Int, _ col: Int, expecting count: Int) {
+            let before = stream.count
+            writeAll(master, Array("\u{1B}[<35;\(col);\(row)M".utf8))
+            let arrived = pump(master, into: &stream, timeoutMs: 2_000) { shapes($0).count >= count }
+            XCTAssertTrue(arrived, "hover at \(row),\(col) asked for no shape within 2 s "
+                          + "(\(stream.count - before) B arrived): \(shapes(stream))")
+        }
+
+        /// A report that must change nothing: settle, then the caller asserts the count did not move.
+        func hoverWithoutAsking(_ row: Int, _ col: Int) -> Int {
+            let before = stream.count
+            writeAll(master, Array("\u{1B}[<35;\(col);\(row)M".utf8))
+            _ = pump(master, into: &stream, timeoutMs: 300) { _ in false }
+            return stream.count - before
+        }
+
+        // Onto a card: the hand.
+        hover(card0.row + 1, card0.col + 1, expecting: 1)
+        XCTAssertEqual(shapes(stream), ["pointer"],
+                       "hovering a card must ask for the hand: \(shapes(stream))")
+
+        // Inside the same card, then onto the next card: same class, so neither asks for anything —
+        // and neither re-sends a frame (a frame here is ~9 KB of text).
+        let sameClass = hoverWithoutAsking(card0.row + 1, card0.col + 2)
+                      + hoverWithoutAsking(card1.row + 1, card1.col + 1)
+        XCTAssertEqual(shapes(stream), ["pointer"],
+                       "moving inside the card class asked again: \(shapes(stream))")
+        XCTAssertLessThan(sameClass, 600, "two hovers in one class cost \(sameClass) B")
+
+        // Out to the bar and back: two class changes, two writes.
+        hover(card1.row + 1, barCol, expecting: 2)
+        XCTAssertEqual(shapes(stream), ["pointer", "default"],
+                       "the furniture is the terminal's own pointer: \(shapes(stream))")
+        hover(card0.row + 1, card0.col + 1, expecting: 3)
+        XCTAssertEqual(shapes(stream), ["pointer", "default", "pointer"],
+                       "card → bar → card is two: \(shapes(stream))")
+
+        // The way out resets it: a pane left holding a hand is a lie the shell inherits.
+        writeAll(master, [0x1C])
+        let deadline = Date().addingTimeInterval(5)
+        while child.isRunning && Date() < deadline {
+            _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        }
+        _ = pump(master, into: &stream, timeoutMs: 100) { _ in false }
+        XCTAssertEqual(shapes(stream), ["pointer", "default", "pointer", "default"],
+                       "the teardown must give the shape back: \(shapes(stream))")
+        let leave = String(decoding: stream, as: UTF8.self)
+        if let reset = leave.range(of: "\u{1B}]22;default"),
+           let altScreen = leave.range(of: "\u{1B}[?1049l") {
+            XCTAssertLessThan(reset.lowerBound, altScreen.lowerBound,
+                              "the reset goes out before the alternate screen is left")
+        } else {
+            XCTFail("no reset, or no `?1049l`, in the teardown: \(leave.suffix(200).debugDescription)")
+        }
     }
 
     // MARK: pty plumbing
