@@ -419,10 +419,11 @@ krd *does* parse replies (issue #109) — the `APC` the graphics protocol answer
 - **Past the deadline the discard ends and the keyboard comes back at that moment.** The one thing
   still protected is the sequence's own tail: if the very next read *completes* the sequence (it
   contains the terminator, within the cap), that read is the reply's ending arriving late and it is
-  swallowed, never typed, however late it arrived. A read that does not complete the sequence is
-  input: it is typed, and every read after it is typed too. So a reply that is still mid-body when
-  the deadline passes is not swallowed forever — the deadline buys the keyboard back, and the price
-  is a reply whose tail is still arriving.
+  swallowed, never typed, however late it arrived. The invariant, in one line: **a byte that arrived
+  inside a sequence that began as a reply head is never typed, no matter how late it arrived.** A
+  read that does not complete the sequence is input: it is typed, and every read after it is typed
+  too. So a reply that is still mid-body when the deadline passes is not swallowed forever — the
+  deadline buys the keyboard back, and the price is a reply whose tail is still arriving.
 - **Past the byte cap the sequence is dropped whole**: no part of it becomes input, and the keyboard
   is back at the next sequence boundary.
 - Every discard that does not end at its terminator logs exactly one line saying which introducer it
