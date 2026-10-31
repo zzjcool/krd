@@ -44,9 +44,23 @@ struct TermGeometry {
         return grid
     }
 
-    /// Cell size in pixels, either measured (CSI 16t) or assumed. 8x20 is what a default
-    /// Terminal.app/Ghostty window gives; `--cell` overrides it.
+    /// `--cell WxH`: the operator's cell, in device pixels, as a *pin* and not a fallback.
+    ///
+    /// It beats every measurement because the one thing an operator knows and a terminal does not is
+    /// its own cell: `CSI 16t` answers in points on some terminals, an sshd pty answers 0 for
+    /// `ws_xpixel`, and a terminal that lies about its cell draws a picture that is not its cells'
+    /// box. Set once at startup, from the one parsed `Options` (issue #146).
+    static var pinnedCell: (w: Double, h: Double)? = nil
+
+    /// One cell in pixels: the operator's pin, else the terminal's own answer, else the fallback.
+    ///
+    /// **This is the only cell derivation in the program**, and it divides by the *terminal's* grid.
+    /// `cols`/`rows` here are the pane's cells, so a consumer that wants a smaller box must pass the
+    /// box (see `TileGrid.make(geometry:rows:...)`) and never hand this a row count that already lost
+    /// rows to the mirror's bar: `ws_ypixel / (73 - 1)` built a 33.46 px cell out of a 33 px one and a
+    /// frame 20 px taller than the cells it is drawn on (issue #146). Chrome is not part of a cell.
     var cellSize: (w: Double, h: Double) {
+        if let pin = TermGeometry.pinnedCell { return pin }
         if pixelWidth > 0, pixelHeight > 0 {
             return (Double(pixelWidth) / Double(cols), Double(pixelHeight) / Double(rows))
         }
@@ -468,12 +482,19 @@ extension TermGeometry {
 extension TileGrid {
     /// `TermGeometry` owns the tty and stays in this module; the arithmetic is `krdcore`'s
     /// (issue #21). Same numbers in, same grid out — call sites did not change.
-    static func make(geometry: TermGeometry, aspect: Double, tileCols: Int, tileRows: Int,
+    ///
+    /// `rows` is how many rows the picture may use — the pane minus the bar and the panels. It
+    /// decides the *box* (`paneRows`, the fit, the tile count) and **not the cell**: the cell is read
+    /// off `geometry`'s own grid, which is the terminal's. That split is the whole of issue #146; the
+    /// old shape (a `TermGeometry` whose `rows` had been reassigned) fed the chrome budget into
+    /// `cellH` and made the frame a fraction of a row taller than the cells it covers.
+    static func make(geometry: TermGeometry, rows pictureRows: Int? = nil,
+                     aspect: Double, tileCols: Int, tileRows: Int,
                      bpp: Int = 3, scale: Double = 1, fillsCells: Bool = false,
                      source: CGSize = CGSize(width: 0, height: 0),
                      area: (top: Int, left: Int, cols: Int, rows: Int)? = nil) -> TileGrid {
         let cell = geometry.cellSize
-        return make(paneCols: geometry.cols, paneRows: geometry.rows,
+        return make(paneCols: geometry.cols, paneRows: max(1, pictureRows ?? geometry.rows),
                     cellW: cell.w, cellH: cell.h, aspect: aspect,
                     tileCols: tileCols, tileRows: tileRows, bpp: bpp, scale: scale,
                     fillsCells: fillsCells, source: source, area: area)

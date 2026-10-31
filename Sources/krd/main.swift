@@ -182,7 +182,8 @@ func usage() -> String {
       --zoom-follow       pan the crop when the pointer reaches the edge of the picture
       --tile <c>x<r>      dirty-tile size in cells (default 8x4; 16x8 = fewer, bigger images)
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
-      --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x16)
+      --cell <w>x<h>      pin the cell size in px: it beats the terminal's own answer (default:
+                          measure with CSI 16t / ws_xpixel, else 8x16)
       --log <path>        write diagnostics to a file instead of over the picture
       --scale <f|auto>    how many pixels to capture per side, terminal upscales (issue #60).
                           auto (default) starts at 1 and steps down only while the pipe is behind,
@@ -2163,6 +2164,7 @@ final class Desk {
             failReplay("no usable manifest.jsonl in \(dir) (record one with --record <dir>)")
         }
         TermGeometry.fallbackCell = header.cell
+        TermGeometry.pinnedCell = header.cell     // the recording's cell beats a stray --cell
         var geometry = TermGeometry.read()
         geometry.cols = header.pane.cols
         geometry.rows = header.pane.rows
@@ -2508,12 +2510,14 @@ final class Desk {
             let panelRows = chromeState.panel?.height ?? 0
             pictureRows = max(3, pictureRows - 1 - min(panelRows, pictureRows - 4))
         }
-        var paneGeometry = geometry
-        paneGeometry.rows = pictureRows
+        // The cell is the *terminal's* (issue #146), so `geometry` reaches the grid unmodified: the rows
+        // the bar and the panels own go in as the picture's box (`rows:`), never folded into a copy of
+        // the geometry. Dividing the pty's pixel height by `pictureRows` is what built a 33.46 px cell
+        // out of a 33 px one, i.e. a frame 20 px taller than the cells it is drawn on.
         let area = (top: 1 + barRows, left: 1, cols: geometry.cols, rows: pictureRows)
         // The source's own size, so the grid never asks for a box bigger than the source
         // (issue #69: ScreenCaptureKit pads that with black instead of upscaling).
-        let layout = TileGrid.make(geometry: paneGeometry, aspect: aspect,
+        let layout = TileGrid.make(geometry: geometry, rows: pictureRows, aspect: aspect,
                                    tileCols: options.tileCols, tileRows: options.tileRows,
                                    bpp: writer.format.bytesPerPixel, scale: effectiveScale,
                                    fillsCells: placeholderFillsCells,
@@ -2527,7 +2531,7 @@ final class Desk {
         // cell, the source, and what the fit made of them. "The display page is smaller than the
         // pane" has to be diagnosable by reading a number, not by looking at a picture.
         Log.write("krd: mirror grid \(layout.paneCols)x\(layout.paneRows) cells at "
-                  + "\(Int(paneGeometry.cellSize.w))x\(Int(paneGeometry.cellSize.h)) px, "
+                  + "\(Int(geometry.cellSize.w))x\(Int(geometry.cellSize.h)) px, "
                   + "pane \(geometry.cols)x\(geometry.rows), src "
                   + "\(Int(layout.sourceW))x\(Int(layout.sourceH)) px, "
                   + "fit \(String(format: "%.3f", layout.fit)), "
@@ -3607,6 +3611,11 @@ do {
     FileHandle.standardError.write(Data("krd: \(error)\n".utf8))
     exit(UsageError.status)
 }
+// `--cell` is a *pin*, not a fallback (issue #146): the one thing an operator knows and a terminal
+// does not is its own cell - a `CSI 16t` answered in points or a pty that reports 0 for `ws_xpixel`
+// is exactly why the flag exists. Set once, from the one parsed `Options`, before any path reads a
+// geometry; `--replay` overrides it with the recording's own cell.
+TermGeometry.pinnedCell = options.cell
 // Hold the Desk in a variable: run() installs closures that capture it weakly, and a
 // temporary would be a "weak reference will always be nil" trap.
 let desk = Desk(options: options)
