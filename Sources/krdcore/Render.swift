@@ -42,7 +42,13 @@ public final class ScreenWriter {
     /// #107). Off by default and set once, before the first byte: with it off the stream is
     /// byte-identical to what krd has always sent, which is the contract the golden dumps check.
     /// See `TmuxPassthrough` for why a multiplexer needs it at all.
-    public var passthrough = false
+    ///
+    /// Forwarded to `GraphicsAPC`, not stored here: the geometry probe emits APCs before a
+    /// `ScreenWriter` exists, and two copies of this bit is exactly how the probe ended up raw.
+    public var passthrough: Bool {
+        get { GraphicsAPC.passthrough }
+        set { GraphicsAPC.passthrough = newValue }
+    }
     /// Pixel format on the wire: the desktop is opaque, so RGB (`f=24`) is ~17 % smaller than
     /// RGBA (`f=32`) and also compresses faster. `KRD_FORMAT=rgba` is the documented fallback
     /// for a terminal that does not implement `f=24`.
@@ -917,16 +923,19 @@ public final class ScreenWriter {
     /// prefix and 4 extra ESCs per APC, never a copy of the payload. `TmuxPassthroughTests` pins
     /// that fast path against the pure `TmuxPassthrough.wrap`.
     @inline(__always)
-    private var apcOpen: String { passthrough ? TmuxPassthrough.open : "\u{1B}_" }
+    private var apcOpen: String { GraphicsAPC.open }
 
     @inline(__always)
-    private var apcClose: String { passthrough ? TmuxPassthrough.close : "\u{1B}\\" }
+    private var apcClose: String { GraphicsAPC.close }
 
     @inline(__always)
     func appendAPC(_ body: String) {
-        append(apcOpen)
-        append(body)
-        append(apcClose)
+        append(GraphicsAPC.sequence(body))
+    }
+
+    /// One graphics APC in a write of its own, outside any batch (the `KRD_DELTEST` delete).
+    public func writeAPC(_ body: String) {
+        write(GraphicsAPC.sequence(body))
     }
 
     /// One transmit APC, `m=` chunking included: `ESC _ G<header>;<base64 up to 4096> ESC \`.
@@ -1001,6 +1010,11 @@ public final class ScreenWriter {
 
     private func flushLocked() {
         guard !out.isEmpty else { return }
+        // The sink's own guard (issue #107): with passthrough on, nothing may reach the terminal
+        // outside an envelope. A tenth call site that hand-rolls `ESC _ G…` trips this in every
+        // debug run, and `GraphicsAPC.isFullyEnveloped` is the same predicate the tests use.
+        assert(!passthrough || GraphicsAPC.isFullyEnveloped(out),
+               "krd: a graphics APC reached the sink without its tmux envelope")
         frameWireBytes += out.count
         if let sink {
             sink(out)

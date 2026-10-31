@@ -181,7 +181,8 @@ APC 到它这里就断了 —— 图像永远到不了外层终端。占位*格�
 `tmux`/`screen` 开头时套，其它终端不套（flag 优先于变量）。
 
 打开之后，krd 发出的每一条 kitty APC —— 每个 `a=t` 传输分块、每条 `a=p` 放置（包括 `U=1` 的虚拟
-放置）、以及那条 `a=d,d=a` 删除 —— 都变成
+放置）、那条 `a=d,d=a` 删除，以及 §6.7 几何探测自己的 `a=t`/`a=p`/`a=d` 和 `KRD_DELTEST` 那条
+孤零零的 `a=d` —— 都变成
 
 ```
 ESC P tmux;  ESC ESC _ G <那条 APC 自己的字节> ESC ESC \  ESC \
@@ -193,6 +194,14 @@ ESC P tmux;  ESC ESC _ G <那条 APC 自己的字节> ESC ESC \  ESC \
 引号习惯：tmux 用遇到的**第一个** `ESC \` 结束信封，内部的 `ESC \` 会把信封断在画面中间 ——
 翻倍之后它对这次扫描不可见，tmux 转发出去时再拆回一层，于是外层终端收到的就是 krd 写的那条
 APC，一个字节不差。
+
+**「每一条」是结构上成立的，不是逐个调用点的承诺。** 图形转义只可能由 `GraphicsAPC`
+（`krdcore/GraphicsAPC.swift`）构造，而它查的那个开关在任何字节发出之前就按进程设好了一次 ——
+所以几何探测（§6.7，它在 `ScreenWriter` 存在之前就写到裸 fd 1 上）和传输分块走的是同一个决定。
+两道保险：`GraphicsAPC.writeRaw`（探测的写）和 `ScreenWriter.flushLocked`（帧的出口）在真正
+发出之前都会跑一遍信封解析器 `GraphicsAPC.isFullyEnveloped` 并 assert；将来谁再手搓一条
+`ESC _ G…`，debug 跑一次就炸，`TmuxPassthroughTests.testEveryAPCInACapturedStreamIsEnveloped`
+也会红，而不是在 pane 里悄悄失效。
 
 代价：每条 APC 多 11 字节 —— 引导符从 2 字节变成 3 字节（翻倍的 `ESC _`），APC 自己的 `ST`
 从 2 变 3（翻倍的 `ESC \`），前面 `ESC P tmux;` 再加 7 字节、后面信封自己的 `ESC \` 加 2 字节。
@@ -208,6 +217,11 @@ APC，一个字节不差。
 | OSC 52（§7.4） | 剪贴板属于 krd 直接连着的那个终端 —— tmux 有自己的缓冲，靠 `set-clipboard` 转发，而往外层发的 `out` 读请求永远不可能再从 stdin 回来 |
 | kitty 键盘协议（`CSI > 15 u`、`CSI ? u`、`CSI < u`） | krd 要按它的**回**决定行为，而能回这个的只有 tmux —— 它实际对话的那个终端 |
 | 占位格本身 | 它们是文字（`U+10EEEE` 加变音符号），不是转义：tmux 像其它格一样重写它们，需要信封的是它们指向的那张图 |
+
+已测的是变换本身，不是真实 pane：`--selftest --no-input` 61112 B，`--passthrough on` 68119 B、
+637 个信封，拆回去与明文逐字节相同（把明文里每段 `ESC _ … ESC \` 正向套一遍，也能逐字节还原
+出包装流）—— 但**本机没有装 tmux**，所以端到端的 pane 测试没有跑。`auto` 的判断、翻倍规则和
+11 字节的代价来自 tmux 自己的解析器和文档，不是来自一个活的 pane。
 
 限制：需要 tmux ≥ 3.3 且 `allow-passthrough` 打开（`set -g allow-passthrough on`，默认关），而且
 只能嵌一层（DCS 里再套 DCS 不转发）。tmux < 3.7 根本没有 `?2026`，所以那种环境下画面是分段到的：

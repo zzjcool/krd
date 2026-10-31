@@ -203,7 +203,8 @@ default `auto` = wrap when `TERM` starts with `tmux` or `screen`, off otherwise 
 the variable).
 
 With it on, every kitty APC krd emits — each `a=t` transmit chunk, each `a=p` placement including
-the `U=1` virtual ones, and the `a=d,d=a` delete — goes out as
+the `U=1` virtual ones, the `a=d,d=a` delete, and the §6.7 geometry probe's own `a=t`/`a=p`/`a=d`
+plus `KRD_DELTEST`'s lone `a=d` — goes out as
 
 ```
 ESC P tmux;  ESC ESC _ G <the APC's own bytes> ESC ESC \  ESC \
@@ -216,6 +217,16 @@ is seven bytes, `\ePtmux;` — the spaces are this file's notation, the way §1 
 first `ESC \` it meets, so an interior `ESC \` would end it in the middle of the image — doubled, it
 is invisible to that scan, and tmux un-doubles it on the way out, so the outer terminal receives
 byte for byte what krd wrote.
+
+**"Every APC" is structural, not a promise per call site.** `GraphicsAPC`
+(`krdcore/GraphicsAPC.swift`) is the only constructor of a graphics escape, and the flag it consults
+is set once, process-wide, before the first byte — so the geometry probe (§6.7), which writes through
+raw fd 1 before any `ScreenWriter` exists, is enveloped by the same decision as a transmit chunk. Two
+guards keep it that way: `GraphicsAPC.writeRaw` (the probe's write) and `ScreenWriter.flushLocked`
+(the frame sink) both run the envelope parser `GraphicsAPC.isFullyEnveloped` over the bytes they are
+about to send and assert on it. A new emission path that hand-rolls `ESC _ G…` therefore fails a
+debug run and `TmuxPassthroughTests.testEveryAPCInACapturedStreamIsEnveloped`, instead of failing
+silently in a pane.
 
 Cost: 11 bytes per APC — the introducer grows from 2 bytes to 3 (the doubled `ESC _`), the APC's own
 `ST` from 2 to 3 (the doubled `ESC \`), `ESC P tmux;` adds 7 in front and the envelope's `ESC \` adds
@@ -232,6 +243,13 @@ Deliberately **not** wrapped:
 | OSC 52 (§7.4) | the clipboard belongs to the terminal krd is attached to — tmux keeps its own buffers and relays with `set-clipboard`, and a read (`out`) sent beyond it could never be answered back on stdin |
 | the kitty keyboard protocol (`CSI > 15 u`, `CSI ? u`, `CSI < u`) | the answer is what krd gates on, and only tmux — the terminal it is actually talking to — can send one back |
 | the placeholder cells | they are ordinary text (`U+10EEEE` plus diacritics), not escapes: tmux rewrites them like any other cell, and it is the image they point at that needs the envelope |
+
+Measured, not run in a pane: the transform is pinned byte for byte (`--selftest --no-input` is
+61112 B, `--passthrough on` is 68119 B in 637 envelopes, and stripping them reproduces the plain
+stream exactly; forward-wrapping every `ESC _ … ESC \` span of the plain stream reproduces the
+wrapped stream), but **tmux is not installed** on the machine this was built on, so the end-to-end
+pane test has not been run. The `auto` guess, the doubling rule and the 11-byte cost come from
+tmux's own parser and manual, not from a live pane.
 
 Limits: tmux ≥ 3.3 with `allow-passthrough` on (`set -g allow-passthrough on` — it is off by
 default) and one level of nesting only (a DCS inside a DCS is not forwarded). tmux < 3.7 has no

@@ -18,6 +18,13 @@ import XCTest
 final class TmuxPassthroughTests: XCTestCase {
     private let esc = "\u{1B}"
 
+    /// `GraphicsAPC.passthrough` is process-wide on purpose (the probe runs before any writer), so
+    /// each case leaves it off again: a leak would envelope streams other cases expect raw.
+    override func tearDown() {
+        GraphicsAPC.passthrough = false
+        super.tearDown()
+    }
+
     /// The shapes krd actually puts on the wire, as complete APC sequences. Every emitter in
     /// `Render.swift` goes through `appendAPC`/`appendTransmitChunk`, and this is the corpus those
     /// helpers have to handle: transmit chunks (first and continuation), virtual placements with
@@ -189,6 +196,40 @@ final class TmuxPassthroughTests: XCTestCase {
         XCTAssertTrue(out.contains("Ga=d,d=a"))
         XCTAssertTrue(out.contains("\u{1B}\u{1B}\\"),
                       "the delete's own ST is doubled inside the envelope: \(out.debugDescription)")
+    }
+
+    // MARK: the sink (issue #107 rework: the envelope must not be bypassable)
+
+    /// The guard the sink uses, and proof it has teeth. Before the rework the probe's `a=t`/`a=p`/
+    /// `a=d` and `KRD_DELTEST`'s lone `a=d` were written straight to fd 1 — this predicate says
+    /// `false` for exactly those bytes, which is what makes the assertion below meaningful.
+    func testTheEnvelopeAuditorAcceptsOnlyFullyWrappedStreams() {
+        let raw = Array("\(esc)_Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA\(esc)\\".utf8)
+        let wrapped = Array(TmuxPassthrough.wrap("\(esc)_Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA\(esc)\\").utf8)
+        XCTAssertTrue(GraphicsAPC.isFullyEnveloped(wrapped))
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(raw), "a bare APC is what tmux eats")
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(wrapped + raw), "one bare APC spoils the stream")
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(raw + wrapped), "position does not matter")
+        // An undoubled ESC inside an envelope: not followed by `\`, so tmux could not un-double it
+        // and the payload's own end would be up for grabs.
+        let loneEscape = TmuxPassthrough.prefix + "Ga=t\(esc)X" + TmuxPassthrough.terminator
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(Array(loneEscape.utf8)),
+                       "a lone ESC inside the envelope is not a payload byte tmux can restore")
+        // An envelope left open would swallow whatever krd sends next.
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(Array(TmuxPassthrough.open.utf8) + Array("Ga=t".utf8)))
+    }
+
+    /// A captured stream from the real emitter: every APC in it is enveloped, asserted by the same
+    /// parser the sink itself runs. This is the regression net — a future tenth emission site that
+    /// appends `ESC _ G…` by hand fails here even if it forgets the flag, and
+    /// `ScreenWriter.flushLocked` asserts the identical predicate at runtime.
+    func testEveryAPCInACapturedStreamIsEnveloped() {
+        let off = panelStream(passthrough: false)
+        let on = panelStream(passthrough: true)
+        XCTAssertFalse(GraphicsAPC.isFullyEnveloped(off),
+                       "with the flag off the stream stays raw: that is the byte-identical contract")
+        XCTAssertTrue(GraphicsAPC.isFullyEnveloped(on),
+                      "\(envelopes(in: on)) envelopes for \(countAPCs(off)) APCs")
     }
 
     // MARK: helpers

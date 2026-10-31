@@ -127,15 +127,9 @@ extension TermGeometry {
         }
         guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return nil }
         defer { tcsetattr(STDIN_FILENO, TCSANOW, &original) }
-        let out = Array(bytes.utf8)
-        out.withUnsafeBufferPointer { buf in
-            var off = 0
-            while off < buf.count {
-                let n = Darwin.write(STDOUT_FILENO, buf.baseAddress! + off, buf.count - off)
-                if n <= 0 { return }
-                off += n
-            }
-        }
+        // The probe's bytes leave through the same sink as everything else (issue #107): one write
+        // loop, and `GraphicsAPC` asserts its envelope there rather than trusting each call site.
+        GraphicsAPC.writeRaw(bytes)
         var response = ""
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
         var buffer = [UInt8](repeating: 0, count: 256)
@@ -162,8 +156,10 @@ extension TermGeometry {
     /// ignores `U=1` draws the placeholder cells as missing-glyph boxes over the picture - much worse
     /// than a small picture - so "no answer" counts as "no".
     static func supportsPlaceholders(timeoutMs: Int = 600) -> Bool? {
-        let transmit = "\u{1B}_Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA\u{1B}\\"
-        let place = "\u{1B}_Gi=31,p=1,a=p,U=1,q=0,c=1,r=1\u{1B}\\"
+        // Both APCs come out of `GraphicsAPC`, so `--passthrough` reaches them too: inside tmux a raw
+        // `a=t` is eaten by the multiplexer, which is the exact question this probe asks.
+        let transmit = GraphicsAPC.sequence("Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA")
+        let place = GraphicsAPC.sequence("Gi=31,p=1,a=p,U=1,q=0,c=1,r=1")
         // The reply echoes whatever the request carried, so it is `i=31,p=1;OK` here - *not*
         // `i=31;OK`. Matching the literal `i=31;OK` made every answer look like silence, which sent
         // the wall down the pixel path on a terminal that had accepted the placeholder (measured
@@ -173,6 +169,15 @@ extension TermGeometry {
         }
         DeleteProbeImage()
         return placeholderProbeVerdict(reply)
+    }
+
+    /// The probe's APCs, as bytes, without a terminal: what `supportsPlaceholders` sends.
+    /// `TmuxPassthroughTests` walks this through `GraphicsAPC.isFullyEnveloped`, so a probe APC
+    /// added outside the sink fails the suite instead of the tmux pane.
+    static func placeholderProbePayload() -> [UInt8] {
+        Array((GraphicsAPC.sequence("Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA")
+               + GraphicsAPC.sequence("Gi=31,p=1,a=p,U=1,q=0,c=1,r=1")
+               + GraphicsAPC.sequence("Ga=d,d=i,i=31")).utf8)
     }
 
     /// What a placeholder probe's reply means: `true` accepted, `false` refused, `nil` no answer yet.
@@ -190,11 +195,9 @@ extension TermGeometry {
     }
 
     /// Remove the probe's image by id, so it can never sit on the wall as a stray pixel.
+    /// Same sink, same envelope: an unwrapped `a=d` inside tmux leaves the probe image on screen.
     private static func DeleteProbeImage() {
-        let bytes = Array("\u{1B}_Ga=d,d=i,i=31\u{1B}\\".utf8)
-        bytes.withUnsafeBufferPointer { buf in
-            _ = Darwin.write(STDOUT_FILENO, buf.baseAddress!, buf.count)
-        }
+        GraphicsAPC.write("Ga=d,d=i,i=31")
     }
 }
 

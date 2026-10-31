@@ -906,6 +906,9 @@ final class Desk {
         let passthrough = TmuxPassthrough.resolve(
             flag: options.passthroughPinned ? options.passthrough : nil,
             env: ProcessInfo.processInfo.environment)
+        // Set on the sink itself, not just the writer: the geometry probe (`a=t` and friends)
+        // writes before a frame exists, and it is the probe that must survive tmux (issue #107).
+        GraphicsAPC.passthrough = passthrough.on
         writer.passthrough = passthrough.on
         if passthrough.on || options.debug {
             // A log line, not stderr: inside a pane a line of text scrolls the picture off its own
@@ -2398,7 +2401,7 @@ final class Desk {
             try await Task.sleep(nanoseconds: 6_000_000_000)
             if ProcessInfo.processInfo.environment["KRD_DELTEST"] != nil {
                 // one lone delete, in its own write, outside any synchronized block
-                writer.write("\u{1B}_Ga=d,i=901\u{1B}\\")
+                writer.writeAPC("Ga=d,i=901")   // same sink, so it is enveloped like the rest
                 Log.write("krd: sent lone delete for 901\n")
             }
             try await Task.sleep(nanoseconds: 20_000_000_000)
