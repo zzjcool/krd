@@ -48,6 +48,22 @@ final class SeriesTests: XCTestCase {
         XCTAssertEqual(single.percentile(0.99), 20, "and is just outside p99 by construction")
     }
 
+    /// Issue #91: `pipe p99` was the p99 of *one frame per second*, so a frame that blocked for
+    /// 1,368 ms was reported as 0.36 ms. The series is fed per frame now; this pins the arithmetic
+    /// the panel's two numbers rest on — the ring's `max` reports that frame, and its p99 (the
+    /// 4th-worst of 300 by construction) cannot, which is exactly why `pipe max` exists.
+    func testOneHugeFrameAmongSmallOnesIsReported() {
+        var pipe = Series(capacity: 300)
+        for _ in 0..<299 { pipe.add(0.3) }
+        pipe.add(1368.0)
+        XCTAssertEqual(pipe.count, 300)
+        XCTAssertEqual(pipe.last, 1368.0, "the huge frame is the newest sample")
+        XCTAssertEqual(pipe.max, 1368.0, "one 1,368 ms frame has to read as 1,368 ms")
+        XCTAssertEqual(pipe.percentile(0.99), 0.3, accuracy: 1e-9,
+                       "nearest-rank p99 of 300 samples is the 4th worst: a single outlier is outside"
+                       + " it, so p99 alone would still call this run 0.3 ms")
+    }
+
     func testRemoveAllKeepsTheCapacity() {
         var series = Series(capacity: 4)
         series.add(1)

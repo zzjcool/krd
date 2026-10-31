@@ -187,6 +187,9 @@ struct ChromeMetrics {
     /// with their own clock. Over ssh nothing on this side can see the other end.
     var clock = ""
     var pipeP99Ms = 0.0
+    /// The worst `pipe` in the ring. `pipeP99Ms` is the 4th-worst of 300 frames, so a *single*
+    /// 1,368 ms frame cannot move it; this is the number that shows one hiccup (issue #91).
+    var pipeMaxMs = 0.0
     var e2eMs = 0.0
     var zlibMs = 0.0
     var zlibP99Ms = 0.0
@@ -692,7 +695,8 @@ final class Chrome {
             let cap = m.capMs < 0 ? "cap — (no PTS)"
                 : String(format: "cap %.0f p99 %.0f", m.capMs, m.capP99Ms)
             line(next(), "frame", "\(m.e2eLabel) ms",
-                 String(format: "%@ · pipe %.0f p99 %.0f", cap, m.pipeMs, m.pipeP99Ms))
+                 String(format: "%@ · pipe %.0f p99 %.0f max %.0f", cap, m.pipeMs, m.pipeP99Ms,
+                        m.pipeMaxMs))
             // The network's own share, which `pipe` cannot see: it is measured on the terminal's
             // reply, so it includes whatever is still queued in front of the picture.
             line(next(), "rtt", "\(m.rttLabel) ms",

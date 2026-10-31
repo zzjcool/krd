@@ -731,7 +731,7 @@ final class StatsJSONWriter {
                 + "\"skipped_per_s\":%.1f,\"idle_per_s\":%.1f,"
                 + "\"zlib_ms\":%.2f,\"zlib_p99_ms\":%.2f,\"write_ms\":%.2f,\"write_max_ms\":%.2f,"
                 + "\"write_over5\":%d,\"cap_ms\":%.2f,\"cap_p99_ms\":%.2f,"
-                + "\"pipe_ms\":%.2f,\"pipe_p99_ms\":%.2f,\"e2e_ms\":%.2f,"
+                + "\"pipe_ms\":%.2f,\"pipe_p99_ms\":%.2f,\"pipe_max_ms\":%.2f,\"e2e_ms\":%.2f,"
                 + "\"input_ms\":%.2f,\"input_p99_ms\":%.2f,"
                 + "\"rtt_ms\":%.2f,\"rtt_p99_ms\":%.2f,"
                 + "\"px\":[%d,%d],\"cells\":[%d,%d],"
@@ -742,7 +742,7 @@ final class StatsJSONWriter {
             n(m.skippedPerSec), n(m.idlePerSec),
             n(m.zlibMs), n(m.zlibP99Ms), n(m.writeMs), n(m.writeMaxMs), m.writeOver5,
             capMs, n(m.capP99Ms),
-            n(m.pipeMs), n(m.pipeP99Ms), n(m.e2eMs),
+            n(m.pipeMs), n(m.pipeP99Ms), n(m.pipeMaxMs), n(m.e2eMs),
             n(m.inputMs), n(m.inputP99Ms),
             n(rttMs), n(rttP99),
             m.pxW, m.pxH, m.cellsW, m.cellsH,
