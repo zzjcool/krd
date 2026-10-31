@@ -85,6 +85,25 @@ enum WallTick: Equatable {
     case relayout(cols: Int, rows: Int)
 }
 
+/// Did the probes that run behind the wall's first paint move anything (issue #99)?
+///
+/// The wall now paints before it asks the terminal, so the two questions it asks - the cell
+/// (`CSI 16t`/`14t`) and the transport (`U=1`) - arrive *after* a frame is already on screen. Both are
+/// allowed to answer "nothing changed", which is the common case and the one that must stay free: an
+/// unchanged answer means the frame that is up is right, and a repaint would re-capture every panel to
+/// draw exactly the same picture. A value type with the decision in `needsRepaint` (rather than an
+/// `if` at the call site) is what makes "a silent terminal moves nothing" a test instead of a claim.
+struct WallProbeOutcome: Equatable {
+    /// The second measurement found a different cell (or grid).
+    var paneMoved: Bool
+    /// The `U=1` verdict differs from the transport the first frame was drawn on.
+    var transportMoved: Bool
+
+    /// Repaint only when one of them moved: `false` is the silent terminal, whose probe times out to
+    /// the fallback cell and the pixel path - the exact two values the first paint already used.
+    var needsRepaint: Bool { paneMoved || transportMoved }
+}
+
 /// The pure half of `refreshWall`'s bookkeeping: what a trigger does, and when a fresh model is
 /// worth painting.
 enum WallRefresh {

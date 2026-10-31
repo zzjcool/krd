@@ -166,7 +166,21 @@ extension TermGeometry {
         static let delete = "Ga=d,d=i,i=31"
     }
 
+    /// The `U=1` verdict for this *process*, asked exactly once (issue #99).
+    ///
+    /// The probe is up to 600 ms of a terminal that will not answer, and it used to be asked twice per
+    /// `--wall` start - once for the mirror's tiles (a value the wall never reads) and once for the
+    /// wall's pictures. Two callers asking the same terminal the same question are asking it once, so
+    /// the second one sends no bytes at all. `nil` ("no answer") is memoised too: a silent terminal
+    /// stays silent for the life of the process, and re-asking it is the same 600 ms again.
+    private static var placeholdersAsked = false
+    private static var placeholdersAnswer: Bool?
+
+    /// Test seam: forget the process-wide verdict (a test that wants to re-ask).
+    static func resetPlaceholderProbeCache() { placeholdersAsked = false; placeholdersAnswer = nil }
+
     static func supportsPlaceholders(timeoutMs: Int = 600) -> Bool? {
+        if placeholdersAsked { return placeholdersAnswer }
         // Both APCs come out of `GraphicsAPC`, so `--passthrough` reaches them too: inside tmux a raw
         // `a=t` is eaten by the multiplexer, which is the exact question this probe asks.
         let transmit = GraphicsAPC.sequence(PlaceholderProbe.transmit)
@@ -179,7 +193,9 @@ extension TermGeometry {
             placeholderProbeVerdict(text) != nil
         }
         DeleteProbeImage()
-        return placeholderProbeVerdict(reply)
+        placeholdersAnswer = placeholderProbeVerdict(reply)
+        placeholdersAsked = true
+        return placeholdersAnswer
     }
 
     /// The probe's APCs, as bytes, without a terminal — built from the same three constants
@@ -220,9 +236,17 @@ extension PaneGeometry {
     /// `grid` is `--pane CxR` (the bench and the mock path reproduce a wall at an exact size), and
     /// `cell` is `--cell WxH` (a cell the terminal will not answer for). Both win over measurement:
     /// a report has to be reproducible.
+    ///
+    /// `askTerminal: false` is the wall's *first* measurement (issue #99): the first frame may be
+    /// drawn before the terminal has answered `CSI 16t`/`14t`, and that query costs up to 500 ms of an
+    /// empty alternate screen - or forever on a terminal that never answers. So this call takes the
+    /// documented fallback cell and never sends a byte; `probeBehindTheFirstPaint` re-measures with the
+    /// query right behind the paint and repaints once, and only if the answer moved the cell. `--cell`
+    /// and the pty's own `ws_xpixel`/`ws_ypixel` need no query, so they still win here unchanged.
     static func measure(cell explicitCell: (w: Double, h: Double)?,
                         grid: (cols: Int, rows: Int)?,
                         dpr: Double?,
+                        askTerminal: Bool = true,
                         log: (String) -> Void) -> PaneGeometry {
         let pty = TermGeometry.read()
         let cols = max(1, grid?.cols ?? pty.cols)
@@ -239,7 +263,7 @@ extension PaneGeometry {
             cellH = Double(pty.pixelHeight) / Double(rows)
             source = "the pty's pixel size \(pty.pixelWidth)x\(pty.pixelHeight)"
             deviceCell = true
-        } else if let measured = TermGeometry.query(timeoutMs: 500) {
+        } else if askTerminal, let measured = TermGeometry.query(timeoutMs: 500) {
             (cellW, cellH) = (measured.cellSize.w, measured.cellSize.h)
             // Neither answer may be believed as *device* pixels: the protocol says `14t` is a pixel
             // count, but a terminal that reports its cell in points reports its text area in points
@@ -250,7 +274,8 @@ extension PaneGeometry {
             source = "measured from the terminal (\(TermGeometry.lastAnswer.label))"
         } else {
             (cellW, cellH) = (TermGeometry.fallbackCell.w, TermGeometry.fallbackCell.h)
-            source = "assumed (the terminal did not answer)"
+            source = askTerminal ? "assumed (the terminal did not answer)"
+                                 : "assumed (the cell probe runs behind the first paint)"
         }
         // Device pixels per reported pixel. With unicode placeholders this is only *quality* - the
         // terminal fits the image into the cells - so one reported pixel per cell is enough and it
@@ -261,6 +286,17 @@ extension PaneGeometry {
         log("krd: wall cell \(Int(cellW))x\(Int(cellH)) px, \(source)\(deviceCell ? "" : " (not device pixels)") - "
             + "\(cols)x\(rows) cells, \(pane.dpr)x pictures\n")
         return pane
+    }
+
+    /// Did the second measurement (the one with a terminal, issue #99) move anything the paint uses?
+    ///
+    /// Everything but `source`: `measure(askTerminal:)` names the *same* fallback cell differently on
+    /// purpose, so a whole-value comparison would call a silent terminal's two identical measurements
+    /// a move and repaint a first frame that nothing moved - the one thing the re-measure exists to
+    /// avoid. `source` is the sentence for the log, not geometry.
+    func paintsDifferently(from other: PaneGeometry) -> Bool {
+        cols != other.cols || rows != other.rows
+            || cellW != other.cellW || cellH != other.cellH || dpr != other.dpr
     }
 }
 

@@ -147,6 +147,25 @@ final class WallTriggerTests: XCTestCase {
         }
     }
 
+    // MARK: - the probes behind the first paint (issue #99)
+
+    /// The four answers a late probe can give, and the one thing that follows from each.
+    ///
+    /// The wall paints before it asks (`CSI 16t` for the cell, `U=1` for the transport), so both
+    /// answers arrive with a frame already on screen. A repaint is a whole frame - every panel
+    /// re-captured - so "nothing moved" has to be free, and it is the case that matters: a terminal
+    /// that answers neither question is every terminal krd was written for before #99.
+    func testOnlyAProbeThatMovedSomethingRepaints() {
+        XCTAssertFalse(WallProbeOutcome(paneMoved: false, transportMoved: false).needsRepaint,
+                       "a silent terminal moves nothing (issue #99)")
+        XCTAssertTrue(WallProbeOutcome(paneMoved: true, transportMoved: false).needsRepaint,
+                      "the cell arrived late: the frame is at the assumed one")
+        XCTAssertTrue(WallProbeOutcome(paneMoved: false, transportMoved: true).needsRepaint,
+                      "`U=1` was accepted: the first frame is on the pixel path")
+        XCTAssertTrue(WallProbeOutcome(paneMoved: true, transportMoved: true).needsRepaint,
+                      "both arrived late, which is one repaint and not two")
+    }
+
     func testTheStalenessBoundIsTwoSeconds() {
         // The number IS the bound: a window that closes inside the already-frontmost app posts no
         // `NSWorkspace` notification, so nothing announces it and its card stays on the wall until
