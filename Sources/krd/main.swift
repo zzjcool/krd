@@ -248,7 +248,7 @@ func usage() -> String {
                           ▲ ▣ ⤢ two cells wide
       --mock              draw the desktop in process: no screen, no permission, runs forever
       --mock-size WxH     size of the generated desktop (default 1920x1200)
-      --list              list displays and windows, then exit
+      --list              list displays and windows, then exit (--list --json: one object)
       -v, --version       print the version and exit
 
     wall internals (written by krd for krd; a reader has no reason to type them):
@@ -261,7 +261,7 @@ func usage() -> String {
       --bench             time the encoder on synthetic frames, then exit
       --bench-wire <case> emit one case at --fps to stdout, per-frame JSON on stderr
                           (bench/wire.py puts a rate-limited drain behind it)
-      --json              with --bench: results on stdout, table on stderr
+      --json              with --bench: results on stdout, table on stderr; with --list: one object
       --pane <c>x<r>      force the pane size in cells (bench/selftest only)
       --source <w>x<h>    source aspect for --bench/--selftest (default 1440x2560)
       --rounds <n>        measured rounds per bench case (default 30)
@@ -949,9 +949,13 @@ final class Desk {
         // pixel count is sharpness and `--scale`/`--quality` stop being able to *move* the picture
         // (design §6.9). `--bench` and `--selftest` are byte contracts and must not see a probe's
         // escape, so they keep the pixel-sized path; nothing else needs to.
+        // `--list` is excluded for the same reason: a listing paints nothing, so it owes the
+        // terminal neither the capability query nor the `ESC _ G a=d,d=i,i=31 ESC \` cleanup that
+        // goes with it — stdout is the listing, and nothing else (issue #124). `listsOnly` keeps
+        // `--list --replay`/`--list --mock` out of that: they still paint.
         if let forced = options.placeholders {
             placeholderTiles = forced && !(options.bench || options.selftest)
-        } else if !(options.bench || options.selftest) {
+        } else if !(options.bench || options.selftest || Self.listsOnly(options)) {
             placeholderTiles = TermGeometry.supportsPlaceholders() == true
         }
         let deviceCell = Self.cellIsInDevicePixels(options)
@@ -1088,35 +1092,78 @@ final class Desk {
             while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        // The one call that throws when Screen Recording is denied. On the listing path both
+        // formats answer the same failure class and the same exit code (#123, #157: `--json` is a
+        // format, not a second contract): `--list --json` prints the one documented object on
+        // stdout, `--list` prints prose on stderr, and both leave 3 (no grant) or 4 (the Mac did
+        // not answer). Every other path — the wall, the mirror — keeps the behaviour it had: the
+        // error goes to the handler at the bottom of `main`.
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            guard options.listOnly else { throw error }
+            // `CGPreflight` is the question "is this binary granted?" — false means the throw *is*
+            // the missing grant, true means the Mac did not answer. The advice follows the answer:
+            // telling an already-granted machine to grant again is the one thing a caller cannot
+            // act on.
+            let granted = CGPreflightScreenCaptureAccess()
+            let message = "\(error)".split(whereSeparator: \.isNewline).joined(separator: " ")
+            let output = ListOutput.failure(
+                code: granted ? "environment" : "permission",
+                exit: granted ? AXExit.environment.rawValue : AXExit.permission.rawValue,
+                message: message,
+                next: granted
+                    ? "the Mac did not answer its window list (asleep, at the login window, or the "
+                        + "window server is gone); retry when it is awake, `krd ax doctor` says which"
+                    : "grant Screen Recording to this binary in System Settings > Privacy & Security "
+                        + "> Screen Recording, then re-run")
+            if options.benchJSON {
+                FileHandle.standardOutput.write(Data(output.stdout.utf8))
+            }
+            FileHandle.standardError.write(Data(output.stderr.utf8))
+            exit(output.exit)
+        }
 
         if options.listOnly {
-            var text = ""
             // `content.displays` can be empty while windows are listed (macOS 26 without a
             // display-capture grant), so fall back to CoreGraphics for recognition. The index is
             // only printed when it really is the one `--display` expects.
             let shareable = content.displays.map { CGDisplayBounds($0.displayID) }
             let displayBounds = shareable.isEmpty ? WindowPick.displayBounds() : shareable
-            for (index, display) in content.displays.enumerated() {
+            let displays = content.displays.enumerated().map { index, display -> ListDisplay in
                 let bounds = displayBounds[index]
-                text += "[\(index)] display \(display.displayID)  \(Int(bounds.width))x\(Int(bounds.height)) pt\n"
+                return ListDisplay(index: index, id: display.displayID,
+                                   width: Int(bounds.width), height: Int(bounds.height),
+                                   main: CGDisplayIsMain(display.displayID) != 0)
             }
-            for window in content.windows where window.frame.width > 60 {
-                let app = window.owningApplication?.applicationName ?? "?"
-                var line = "    window \(window.windowID)  @\(Int(window.frame.minX)),\(Int(window.frame.minY)) \(Int(window.frame.width))x\(Int(window.frame.height))  app=\(app)  title=\(window.title ?? "-")"
-                // Say it here, before somebody picks it: a backdrop window captures as a black
-                // frame, which looks like krd being broken (issue #24).
-                if let covered = WindowPick.backdrop(layer: window.windowLayer, frame: window.frame,
-                                                     displays: displayBounds) {
-                    if let index = shareable.firstIndex(of: covered) {
-                        line += "  (backdrop — use --display \(index))"
-                    } else {
-                        line += "  (backdrop — use --display <n>)"
-                    }
-                }
-                text += line + "\n"
+            let windows = content.windows.filter { $0.frame.width > 60 }.map { window -> ListWindow in
+                let frame = window.frame
+                let centre = CGPoint(x: frame.midX, y: frame.midY)
+                // Two display questions, two answers: the text hint names the display a backdrop
+                // *covers* (resolved through the shareable list, exactly as before issue #124),
+                // the JSON field names the display the frame's centre is on. Conflating them
+                // would change the hint on a window whose centre is not on the display it covers.
+                let covered = WindowPick.backdrop(layer: window.windowLayer, frame: frame,
+                                                  displays: displayBounds)
+                return ListWindow(
+                    id: window.windowID,
+                    app: window.owningApplication?.applicationName ?? "?",
+                    title: window.title ?? "-",
+                    frame: frame,
+                    // Resolved against the shareable list only: when it is empty the CoreGraphics
+                    // fallback's order is advisory (Windows.swift), so those indices neither
+                    // index `displays[]` nor mean what `--display` means — `null` says so.
+                    display: shareable.firstIndex { $0.contains(centre) },
+                    backdropDisplay: covered.flatMap { shareable.firstIndex(of: $0) },
+                    targetable: covered == nil)
             }
-            FileHandle.standardOutput.write(Data(text.utf8))
+            // `--json` is the one format switch the parser has today (`options.benchJSON`, set by
+            // `case "--json"`); `--list` reads it as "the listing, as one object".
+            let listing = options.benchJSON
+                ? ListOutput.json(displays: displays, windows: windows)
+                : ListOutput.text(displays: displays, windows: windows)
+            FileHandle.standardOutput.write(Data(listing.utf8))
             exit(0)
         }
 
@@ -1737,6 +1784,17 @@ final class Desk {
             return false
         }
         return true
+    }
+
+    /// Whether this run is *only* a listing: the one path that paints nothing, so it owes the
+    /// terminal neither the placeholder capability query nor the `ESC _ G a=d,d=i,i=31 ESC \`
+    /// cleanup that follows it (issue #124: `krd --list | awk` used to get `_Ga=d,...` as its first
+    /// field). Pure, so the guard is a test rather than a hexdump.
+    ///
+    /// `--list` *riding on* `--replay` or `--mock` still paints those frames, so the probe stays:
+    /// the exclusion is about the path that exits after printing, not about the flag.
+    static func listsOnly(_ options: Options) -> Bool {
+        options.listOnly && options.replay == nil && !options.mock
     }
 
     /// Whether the placeholder transport has to be given the picture's whole cell box (issue #86).
@@ -3750,6 +3808,15 @@ let options: Options
 do {
     options = try parseArguments()
 } catch {
+    // A usage refusal asked for in JSON answers in the same envelope as every other failure
+    // (#123, #124): one object, `--json` read from the raw argv because the parser is exactly what
+    // failed. Without the flag this stays the byte-identical line it has always been.
+    if AXCommand.wantsJSON(Array(CommandLine.arguments)) {
+        let output = ListOutput.usageFailure("\(error)")
+        FileHandle.standardOutput.write(Data(output.stdout.utf8))
+        FileHandle.standardError.write(Data(output.stderr.utf8))
+        exit(output.exit)
+    }
     FileHandle.standardError.write(Data("krd: \(error)\n".utf8))
     exit(UsageError.status)
 }
