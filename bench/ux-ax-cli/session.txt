@@ -1,0 +1,202 @@
+# captured 2026-10-30T22:00:56Z at HEAD a438e9c
+
+$ krd --version
+krd 0.1.2
+
+$ krd --help
+krd -- macOS desktop inside a terminal pane (kitty graphics protocol)
+
+usage: krd [options]
+  --fps <n>           capture rate cap (default 20)
+  --display <i>       display index from --list (default: the one under the pointer)
+  --window <q>        capture a single window: numeric id or title substring
+  --zoom <f>          magnify: 2 shows half the source at twice the density, cropped on
+                      the capture side, so a zoomed frame costs fewer pixels, not more
+  --zoom-at <x,y>     source point the zoom is centred on (global points; default: pointer)
+  --zoom-follow       pan the crop when the pointer reaches the edge of the picture
+  --tile <c>x<r>      dirty-tile size in cells (default 8x4; 16x8 = fewer, bigger images)
+  --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
+  --cell <w>x<h>      cell size in px when the terminal does not report it (default 8x16)
+  --log <path>        write diagnostics to a file instead of over the picture
+  --scale <f|auto>    how many pixels to capture per side, terminal upscales (issue #60).
+                      auto (default) starts at 1 and steps down only while the pipe is behind,
+                      so a fast link never changes and a slow one stays smooth instead of
+                      freezing; 1 pins it, 0.5 is a quarter of the bytes and visibly softer
+                      (--bench, --record, --replay, --selftest always capture at 1)
+  --full-frame        disable tiling, always resend the whole frame
+  --ime <m>           how characters reach the target: auto (default), raw (physical keys
+                      only, the target's IME composes), unicode (inject the character)
+  --no-input          view only, do not inject events
+  --quality <0-100|auto>
+                      how much colour the picture may lose: 100 keeps every pixel, 80 (the
+                      default) is 5-6-5 on tiles that proved incompressible, 70 is 5-5-5 and
+                      50 is 4-4-4 for everything. Values in between round down to the next
+                      rung (79 is 80). Bit depth is the axis: on a photograph 70 costs 1.48x
+                      and 50 costs 1.69x less than 100 (docs/ENCODING.md). Only the mirror
+                      path encodes pixels, so the wall and --full-frame ignore it. 'auto' is
+                      the default: it spends colour first (80 -> 70 -> 50), then frame rate
+                      (20 -> 15 -> 10), and only then lets --scale auto take resolution.
+                      Give a number to pin it (--quality 80 is then exactly the old behaviour)
+  --no-quantise       same as --quality 100 (pinned, no ladder)
+  --clipboard <m>     clipboard bridge: off (default), in (target -> terminal via OSC 52),
+                      out (Ctrl-V: terminal -> target), both
+  --clipboard-paste <f>  put file <f> on the target pasteboard and post Cmd-V once
+                      (for terminals that cannot answer an OSC 52 read)
+  --cursor            draw the pointer into the picture (default: hidden ‚Äî the pane already
+                      follows the local pointer, and a drawn one dirties tiles as the mouse
+                      moves; --no-cursor is still accepted and means the same as the default)
+  --dpr <n>           device pixels per reported cell, i.e. picture quality (default: 2 when
+                      the terminal answered CSI 16t/14t in points, 1 when the pty reported pixels)
+  --demo             draw a test pattern instead of the desk (no capture, no permission)
+  --square           square corners on the wall's pictures (default: rounded)
+  --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
+                      pixel-sized placement. Default: one probe at startup, then the answer
+  --dry-run           parse input but only log it, never post CGEvent
+  --debug             geometry + per-second stats on stderr
+  --dev               TUI layer: status line + panels (stats, devices, settings, log, help)
+  --no-chrome         force the TUI layer off, e.g. for scripts
+  --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
+  --mirror            the whole display as one picture at --fps (the old behaviour; plain krd
+                      now opens the wall: the display on top, the three most recent windows
+                      below, both scrolling on the right bar)
+  --bar / --no-bar    the mirror's one-row macOS bar: window name, rate, clock, and the [ - ]
+                      button that shrinks it back into the wall. On by default for a window
+                      the wall handed over, off for a mirror you started yourself
+  --symbols <m>       the wall's glyphs: emoji (default) or ascii, for terminals that draw
+                      ‚ñ≤ ‚ñ£ ‚§¢ two cells wide
+  --mock              draw the desktop in process: no screen, no permission, runs forever
+  --mock-size WxH     size of the generated desktop (default 1920x1200)
+  --list              list displays and windows, then exit
+  -v, --version       print the version and exit
+
+wall internals (written by krd for krd; a reader has no reason to type them):
+  --wall-at <s>:<c>   where the shelf and the stage are. A wall starts there; a mirror this
+                      pane was handed to returns there when it leaves
+  --said <exit> <txt> the footer sentence of a mirror that failed, carried back to the wall
+
+test modes (no screen access, no terminal needed):
+  --selftest          paint a synthetic pattern through the tile pipeline
+  --bench             time the encoder on synthetic frames, then exit
+  --bench-wire <case> emit one case at --fps to stdout, per-frame JSON on stderr
+                      (bench/wire.py puts a rate-limited drain behind it)
+  --json              with --bench: results on stdout, table on stderr
+  --pane <c>x<r>      force the pane size in cells (bench/selftest only)
+  --source <w>x<h>    source aspect for --bench/--selftest (default 1440x2560)
+  --rounds <n>        measured rounds per bench case (default 30)
+  --seconds <n>       duration of --bench-wire (default 5)
+  --no-serial         skip the single-threaded reference run
+  --record <dir>      record captured frames for --replay
+  --record-frames <n> stop recording after n frames (default 60)
+  --replay <dir>      feed recorded frames through the real pipeline
+  --stats-json <path> per-second stats as NDJSON (implies the --debug stats)
+
+headless (text, no frames, no Screen Recording needed):
+  ax windows          list on-screen windows as text
+  ax tree --app <q>   accessibility tree of one window (--pid, --window, -d, -i, --all)
+  ax screen           one line per window, plus the focused element
+  ax doctor           check Accessibility and the window server, change nothing
+                      (`krd ax --help` for the full surface and the exit codes)
+
+keys: Ctrl-\ quits (Ctrl-C is forwarded to the remote desktop)
+
+$ krd ax --help
+usage: krd ax [options] <command>
+
+  windows                list on-screen windows (app, pid, index, title, frame)
+  tree                   accessibility tree of one window
+    --app <q>              app by name, bundle id, or pid (substring is enough)
+    --pid <n>              ‚Ä¶or address the app by pid
+    --window <i>           window index within the app (default 0)
+    -d, --depth <n>        depth limit (default 4)
+    -i, --interactive      only nodes that can be acted on
+    --all                  also emit unlabelled structure
+    --menubar              prepend the app's menu bar
+    --max <n>              node budget (default 400)
+  find <query>           nodes whose name/value/identifier/role contains <query>
+    --role <r>             ‚Ä¶and only that role (`button` or `AXButton`)
+  screen                 one line per window, plus the focused element
+  doctor                 check accessibility and the window server, change nothing
+
+Refs. Every node a dump prints has a handle (`@e7`) that stays valid across invocations:
+the dump is written under $TMPDIR/krd-ax and the ref is resolved by walking the same
+path again, verifying each step. If the UI moved on, the command fails and says so
+instead of acting on whatever sits at that index now.
+
+  press <ref>            send AXPress (a click without the mouse)
+  set <ref> --text <v>   write AXValue (`--text ""` clears a field)
+  --dry-run              say what a write would do and send nothing
+  --snapshot <id|path>   pin a write to the dump that printed the ref
+  --app <q>              ‚Ä¶or narrow a ref to one app
+
+  --json                 machine-readable output
+  --prompt               ask macOS for the Accessibility grant (opens the dialog)
+
+exit: 0 ok ¬∑ 2 usage ¬∑ 3 no accessibility permission ¬∑ 4 window server unreachable
+      5 nothing matched ¬∑ 6 node refused the action, or read back something else
+
+Reads are the default and need no flags; press/set are explicit subcommands, and every
+write prints the state it read back afterwards. This command never captures a frame, so
+it needs Accessibility but not Screen Recording. See docs/research-ax-text-channel.md.
+
+$ krd --list   (first 12 lines, cat -v)
+^[_Ga=d,d=i,i=31^[\    window 132129  @-15000,-15000 30000x30000  app=loginwindow  title=-
+    window 94243  @0,0 1728x1117  app=WindowManager  title=Wallpaper  (backdrop ‚M-^@M-^T use --display <n>)
+    window 108122  @-192,-1080 1920x1080  app=Wallpaper  title=Offscreen Wallpaper Window  (backdrop ‚M-^@M-^T use --display <n>)
+    window 132080  @-199,-515 66x82  app=WindowManager  title=App Icon Window
+    window 94233  @-176,-579 82x108  app=WindowManager  title=Gesture Blocking Overlay
+    window 53232  @15,433 92x100  app=iOA  title=
+    window 132116  @-7,673 66x82  app=WindowManager  title=App Icon Window
+    window 94249  @15,559 161x158  app=WindowManager  title=Gesture Blocking Overlay
+    window 128444  @15,559 161x158  app=Rex Beta  title=Shell - kkrt-wt-20261031-0519
+    window 78970  @-176,-579 82x108  app=Xcode  title=SurfaceANSIRendererTests.swift
+    window 132206  @1728,-1080 1440x2560  app=  title=Display 3 Shield
+    window 132205  @-192,-1080 1920x1080  app=  title=Display 2 Shield
+
+$ krd --list | head -c 64 | xxd
+00000000: 1b5f 4761 3d64 2c64 3d69 2c69 3d33 311b  ._Ga=d,d=i,i=31.
+00000010: 5c20 2020 2077 696e 646f 7720 3133 3231  \    window 1321
+00000020: 3239 2020 402d 3135 3030 302c 2d31 3530  29  @-15000,-150
+00000030: 3030 2033 3030 3030 7833 3030 3030 2020  00 30000x30000  
+
+$ krd ax doctor
+accessibility permission  granted
+accessibility answers     no (cannotComplete)
+window server             24 windows on screen
+first call in this process cannotComplete ‚Üí retry cannotComplete
+frontmost app             -
+
+krd ax: the accessibility API is not answering (cannotComplete)
+
+The binary is trusted, so this is the window server, not a permission: the Mac may
+be asleep or at the login window, or every app that could answer is hung.
+Run `krd ax doctor` to see which of the two it is.
+rc=4
+
+$ krd ax doctor --json
+{"answers":false,"error":"cannotComplete","firstCall":"cannotComplete","onScreenWindows":24,"sample":"-","trusted":true}
+
+rc=0
+
+$ krd ax windows --json
+krd ax: the accessibility API is not answering (cannotComplete)
+
+The binary is trusted, so this is the window server, not a permission: the Mac may
+be asleep or at the login window, or every app that could answer is hung.
+Run `krd ax doctor` to see which of the two it is.
+rc=4
+
+$ krd --nonsense  (perl alarm 8, stdin /dev/null)  -> stdout head, cat -v
+^[_Ga=d,d=i,i=31^[\^[_Ga=d,d=i,i=31^[\^[\^[[?2026l^[[?1003l^[[?1002l^[[?1006l^[[0m^[[?25h^[[?1049h^[[2J^[[H^[[?25l^[_Ga=d,d=a^[\^[[2J^[[1;1H^[[1;97m‚M-^V™ krd^[[2;37m    5 windows ¬∑ 3 displays ¬∑ most recently used first^[[0m                     ^[[2;37m‚M-^U∑^[[2;1H^[[0m                   ^[[2;37m‚M-^TM-^L‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^@‚M-^TM-^P^[[0m        
+(killed after 8s, rc=142)
+
+$ sh install.sh --help
+usage: install.sh [options]
+
+  --version <vX.Y.Z>   release to install (default: the latest one)
+  --prefix <dir>       where to put the binary (default: ~/bin)
+  --sign <identity>    codesign identity (default: your "Apple Development" cert if there
+                       is one, otherwise ad-hoc; pass --sign adhoc to force ad-hoc)
+  --from-source        clone and build with Swift instead of downloading a release
+  -h, --help           this text
+
+environment: KRD_REPO, KRD_VERSION, KRD_PREFIX, KRD_SIGN_IDENTITY
