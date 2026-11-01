@@ -40,13 +40,13 @@ final class ThemeFollowProcessTests: XCTestCase {
                       "the wall never enabled 2031 and installed its reader; \(run.terminal.describe)")
         // Let the startup settle (the first paint, the re-measure behind it, the `U=1` probe this
         // fake deliberately does not answer) before the mark: only bytes *after* it are the report's.
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
 
         FakeTerminal.mark("test1: started, \(run.terminal.stream.count) B before the report")
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light
         FakeTerminal.mark("test1: report sent")
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
         FakeTerminal.mark("test1: first drain done, \(run.terminal.stream.count) B")
 
         let repaint = run.terminal.repaint(since: mark)
@@ -56,13 +56,13 @@ final class ThemeFollowProcessTests: XCTestCase {
         XCTAssertLessThanOrEqual(repaint.count, 8192,
                                  "the repaint cost \(repaint.count) B, over §5.1's 8 KB budget for a "
                                  + "theme switch — it is no longer a text-layer repaint: "
-                                 + repaint.escaped)
+                                 + repaint.brief)
         XCTAssertTrue(repaint.contains(string: "38;2;59;111;154"),
                       "the window does not carry the light palette's accent (#3B6F9A), so either the "
-                      + "report never reached the desk or it was not re-derived: " + repaint.escaped)
+                      + "report never reached the desk or it was not re-derived: " + repaint.brief)
         XCTAssertFalse(repaint.contains(string: "\u{1B}_G"),
                        "the theme switch re-sent a picture (an APC in the repaint): a switch is the "
-                       + "text layer and nothing else: " + repaint.escaped)
+                       + "text layer and nothing else: " + repaint.brief)
 
         // The same scheme, again: a terminal is free to report it on every focus change, and the desk
         // must not spend a byte on it. Asserted against the *stream*, not against an internal flag,
@@ -70,11 +70,11 @@ final class ThemeFollowProcessTests: XCTestCase {
         FakeTerminal.mark("test1: checks done, second report now")
         let second = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light, twice
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
         FakeTerminal.mark("test1: second drain done, \(run.terminal.stream.count) B")
         XCTAssertEqual(run.terminal.repaint(since: second).count, 0,
                        "the second identical report wrote bytes; the same scheme reported twice must "
-                       + "cost 0 B (D6): " + run.terminal.repaint(since: second).escaped)
+                       + "cost 0 B (D6): " + run.terminal.repaint(since: second).brief)
     }
 
     // MARK: - 2. a mode nobody was asked about stays off the wire
@@ -93,15 +93,15 @@ final class ThemeFollowProcessTests: XCTestCase {
 
         XCTAssertTrue(run.terminal.pump(until: { $0.contains(string: "\u{1B}[?1003h") }, timeoutMs: 15_000),
                       "the wall never installed its reader; \(run.terminal.describe)")
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
 
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // a report nobody asked for
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
         XCTAssertEqual(run.terminal.repaint(since: mark).count, 0,
                        "a report repainted this pane even though 2031 was never enabled — the desk "
                        + "acted on a mode it did not ask for (D5): "
-                       + run.terminal.repaint(since: mark).escaped)
+                       + run.terminal.repaint(since: mark).brief)
 
         // ...and the whole session, both directions.
         let whole = run.terminal.stream
@@ -135,7 +135,7 @@ final class ThemeFollowProcessTests: XCTestCase {
             $0.contains(string: "\u{1B}[?2031h") && $0.contains(string: "\u{1B}[?1003h")
         }, timeoutMs: 15_000),
                       "the wall never enabled 2031 and installed its reader; \(run.terminal.describe)")
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
 
         // `Ctrl-\` is the documented way out, and in wall mode it is the *only* one the reader owns.
         run.terminal.send("\u{1C}")
@@ -200,7 +200,7 @@ final class ThemeFollowProcessTests: XCTestCase {
         // Freeze the picture: this is a session that reports focus-out, so the mock's frames stop
         // being drawn (`--unfocused-fps 0`) and every byte after the mark is the bar's.
         run.terminal.send("\u{1B}[O")
-        run.terminal.drainUntilQuiet()
+        run.terminal.settle()
 
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light
@@ -211,17 +211,17 @@ final class ThemeFollowProcessTests: XCTestCase {
                              "the bar did not repaint on the report: " + run.terminal.describe)
         XCTAssertLessThanOrEqual(repaint.count, 8192,
                                  "the bar's repaint cost \(repaint.count) B, over the 8 KB theme "
-                                 + "budget: " + repaint.escaped)
+                                 + "budget: " + repaint.brief)
         XCTAssertTrue(repaint.contains(string: "48;2;13;17;23"),
                       "the bar's title is not the light palette's foreground in the background plane "
-                      + "(#0D1117): " + repaint.escaped)
+                      + "(#0D1117): " + repaint.brief)
         let rows = repaint.cursorRows()
         XCTAssertFalse(rows.isEmpty,
                        "the repaint carries no cursor move at all, so it did not paint cells: "
-                       + repaint.escaped)
+                       + repaint.brief)
         XCTAssertEqual(Set(rows), [1],
                        "the repaint moved the cursor to rows \(Set(rows).sorted()), not just the bar's "
-                       + "row — a theme switch repainted cells outside the bar: " + repaint.escaped)
+                       + "row — a theme switch repainted cells outside the bar: " + repaint.brief)
     }
 
     // MARK: - the process under test
@@ -375,6 +375,24 @@ private final class FakeTerminal {
         }
     }
 
+    /// Drain until the pane has been quiet **and stayed** quiet.
+    ///
+    /// One quiet window is not enough on a loaded runner: the wall can pause for longer than
+    /// `quietMs` in the middle of its first frame (measured on CI: the write was still going at
+    /// 9.6 KB when a report was sent, and 125 KB arrived afterwards), so a window taken on a single
+    /// quiet claim attributes the rest of that frame to whatever came next. The loop repeats while
+    /// the stream keeps growing, bounded by an outer deadline: a pane that never settles has to fail
+    /// the assertion after the window, not hang here.
+    func settle(quietMs: Int = 800, timeoutMs: Int = 20_000) {
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
+        var last = -1
+        while Date() < deadline, stream.count != last {
+            last = stream.count
+            let left = max(200, Int(deadline.timeIntervalSinceNow * 1000))
+            drainUntilQuiet(quietMs: quietMs, timeoutMs: min(8_000, left))
+        }
+    }
+
     /// Read for a fixed stretch of wall clock. What the mirror's window uses: its bar is redrawn once
     /// a second by the diagnostics tick (the clock, the rates), so "silent for 800 ms" is not a state
     /// a mirror is ever in — and the tick's own cells are on the bar's row, which is what the caller
@@ -523,6 +541,15 @@ private extension Array where Element == UInt8 {
             }
         }
         return out
+    }
+
+    /// The first 480 B of `escaped`, then a count of what is left. A failure message is read inside a
+    /// CI log, and a 125 KB line is not read at all — GitHub drops it, which turns a failed assertion
+    /// into a silent one. The number is kept because that is what a budget test is about.
+    var brief: String {
+        let limit = 480
+        let head = Array(prefix(limit)).escaped
+        return count <= limit ? head : head + " … +\(count - limit) B"
     }
 
     /// Non-overlapping occurrences of a byte run.
