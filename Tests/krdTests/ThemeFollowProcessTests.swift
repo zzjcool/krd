@@ -421,8 +421,12 @@ private final class FakeTerminal {
             }
             let opened = lastIndex(open)
             let closed = lastIndex(close)
-            let pending = opened != nil && (closed == nil || opened! > closed!)
-            if !pending { return }
+            // Two conditions, and both are the reason this exists: a block must have **closed** (so
+            // the pane has painted a picture frame at all — on CI the mark used to land in the gap
+            // between the text skeleton and the first frame, where the pane is quiet and no block is
+            // open yet), and no block may be open now (so that frame is finished, not half written).
+            let frameFinished = closed != nil && (opened == nil || closed! > opened!)
+            if frameFinished { return }
             drain(forMs: 100)          // a block is open: the frame is still being written
         }
     }
