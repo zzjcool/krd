@@ -187,6 +187,22 @@ either direction.
 passthrough on it is wrapped like every other APC (§6.6); `?2026l`, `2J` and the input-mode resets
 are not.
 
+### 4.1 The wall's frame is one block
+
+Under the default `KRD_SYNC=frame`, `--wall` paints **one** `?2026` block per picture frame:
+`?2026h`, then the text layer — the borders and the captions (the cells that name the picture) —
+then the panels' APCs with their placeholder grid, then `?2026l`. The text is part of the frame,
+not a preamble to it: a caption names the picture under it, and a terminal that paused mid-paint
+must not show one without the other (#198). `KRD_SYNC=tile` keeps §2's per-panel blocks and opens
+none around the frame.
+
+A paint that carries no picture — a hover or a `Tab` repaint — sends text alone and **no** block;
+two escapes around text with nothing to synchronise would be 16 B of a 39–97 B hover budget for
+nothing. A block is never opened inside another (DEC 2026 is a flag, not a counter; §6.4's rule for
+tiles), and a queued `clear()` diff never lands inside an APC: it is deferred to the next
+`endFrame`. Cost: the same 16 B pair per picture frame, only earlier — a text-only paint costs
+nothing extra.
+
 ## 5. What krd deliberately never sends
 
 | Not sent | Why |
