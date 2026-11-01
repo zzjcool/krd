@@ -931,6 +931,24 @@ final class Desk {
     /// The single 1 Hz tick that samples rates and feeds the panel, the log line and the JSON.
     private var diagnosticsTimer: DispatchSourceTimer?
     private var chromeDirty = true
+
+    /// The two adopters' palettes, main queue only, like everything else the painter reads:
+    /// `prepareTheme` writes them before the first session byte, `applyColourScheme` is the only
+    /// other writer (it arrives from the reader thread and hops), and `paintWall`/`drawChrome` read
+    /// them at paint time.
+    ///
+    /// `nil` is a *decision*, not an absence: it means the terminal answered no `OSC 10`/`OSC 11`
+    /// (or answered something `RGB.parse` refused), so the wall and the chrome draw today's
+    /// hard-coded SGR table byte for byte (D4). Nothing here guesses a colour from a terminal that
+    /// did not say one.
+    private var themePalette: Palette?
+    /// Which scheme `themePalette`'s background *looks like* (`Palette.scheme`).
+    ///
+    /// The report and the answer are two different statements — `OSC 10`/`OSC 11` say what the two
+    /// colours are, `?997;Nn` says which scheme the terminal believes it is in — so the first report
+    /// has to be compared against what the colours already look like. Without this, a terminal that
+    /// starts light and reports light would be "re-derived" into its own inverse.
+    private var themeScheme: ColourScheme?
     private var chromeSampleBytes = 0
     private var chromeSampleQueue = 0
     private var chromeSampleTiles = 0
@@ -1325,6 +1343,13 @@ final class Desk {
             guard let layout = currentGrid() else {
                 throw DeskError.message("could not compute a tile layout")
             }
+            // This path asks the batch itself (`TermGeometry.query()` above) instead of going
+            // through `prepareGraphemeMode`, and its chrome row is a real one — the mock mirror is
+            // how the bar is driven without a screen grant (`testAMockMirrorDrawsItsBar`). So it is
+            // a session too and gets the palette, memoised answer in hand: the query above already
+            // wrote the questions, and this reads them, so no second probe. Without it the bar would
+            // be the one surface in the tree that never follows the terminal's theme (issue #213).
+            prepareTheme()
             writer.beginSession()
             startChrome()
             installSignalCleanup()
@@ -1485,6 +1510,10 @@ final class Desk {
         guard let layout = currentGrid() else { throw DeskError.message("could not compute a tile layout") }
 
         prepareGraphemeMode()
+        // The palette, from the same batched answer the line above just read (issue #213): the
+        // mirror bar's title and pill are drawn from it, and `?2031h` goes out in `beginSession`
+        // only when this set `followsColourScheme`.
+        prepareTheme()
         let writer = self.writer
         // A stream that stops by itself is not fatal and must not be silent: restart it, at most
         // 5 times with backoff, and say so in the log each time.
@@ -1674,6 +1703,10 @@ final class Desk {
         viewport = Viewport(pixelWidth: 0, pixelHeight: 0, cols: 0, rows: 0, sourceRect: .zero)
         stateLock.unlock()
         prepareGraphemeMode()
+        // The same write's other two answers (issue #213): the colours `OSC 10`/`OSC 11` reported
+        // and whether `?2031h` may go out. Before `beginSession`, so the first frame is already the
+        // palette's and the mode is on before the first cell.
+        prepareTheme()
         writer.beginSession()
         // Drop every image the terminal still holds, not just the text: the pane this wall lands on
         // may be one a mirror was just exec'ed out of (the `[ - ]` button, `Ctrl-\`), and a kitty
@@ -2294,10 +2327,17 @@ final class Desk {
         }
         // The link's symptom, read once per paint: the header's pill is a fact about the last tick,
         // and a paint that read the probe would be a second decision about the same series (#199).
+        // The terminal's own colours, in the three roles the wall's chrome row uses (issue #213,
+        // D7): `WallPalette.none` — today's hard-coded SGR table, cell for cell — unless the
+        // terminal answered both `OSC 10` and `OSC 11`. Nothing else in this function changes: the
+        // palette is applied *in the cell grid*, so an unchanged palette re-emits nothing and a
+        // changed one costs the tinted cells of the header and the footer.
+        let palette = themePalette.map(WallPalette.init(palette:)) ?? .none
         let text = canvas.draw(cols: pane.cols, rows: pane.rows, model: model,
                                layout: layout, focus: state.focus,
                                cellW: pane.cellW, cellH: pane.cellH, paints: paints,
-                               pointer: state.pointer, ring: state.ring, link: currentLinkVerdict())
+                               pointer: state.pointer, ring: state.ring, link: currentLinkVerdict(),
+                               palette: palette)
         // The canvas answers with no bytes when the frame it was asked for is the frame already on
         // the pane (its own diff). That is the normal idle answer, not a failure — but a *first*
         // paint that produced no bytes is a wall with nothing on it, and the caller needs to know.
@@ -2706,6 +2746,97 @@ final class Desk {
             : "left as the terminal had it"
         // One line, because the mode moves where every glyph lands and nothing else would say so.
         Log.write("krd: grapheme clustering (2027) was \(answer) — \(action)\n")
+    }
+
+    /// What the terminal's own colours are, and whether it will tell us when they change (issue #213).
+    ///
+    /// Called immediately after every `prepareGraphemeMode()`: same guard, same reason, and — the
+    /// whole point of #197 — **the same write**. `TermGeometry.terminalCaps()` is memoised, so this
+    /// reads the batch that call just asked for; a `TermCaps.probe` of its own would be a second
+    /// round trip (20–40 ms over ssh) in front of the first cell, which is exactly what the batch
+    /// exists to avoid (D1). It is also why this cannot be deferred to "when the report arrives":
+    /// the answers are read by the same read loop, and once the input reader is live that loop is the
+    /// reader's.
+    ///
+    /// Three facts, one line: the two colours (or "no answer"), the scheme they *look like*, and
+    /// whether `?2031h` is going out. One line because otherwise "why is my wall grey" has no answer
+    /// anywhere — the palette is derived from an `OSC` nobody can see, and a `nil` palette and a
+    /// wrong one draw the same header.
+    ///
+    /// Nothing is invented when the terminal says nothing: `caps.palette` requires *both* colours
+    /// (`TermCaps.palette`), and `nil` here means today's hard-coded table, byte for byte (D4).
+    /// Silent where there is no terminal to ask, for the same reason as `prepareGraphemeMode`:
+    /// `--bench`, `--selftest` and the listing modes read nothing from stdin, and a probe that reads
+    /// it there would eat their input.
+    private func prepareTheme() {
+        guard isatty(STDIN_FILENO) != 0,
+              !(options.bench || options.selftest || Self.listsOnly(options)) else { return }
+        let caps = TermGeometry.terminalCaps()
+        writer.followsColourScheme = caps.supportsColourSchemeFollow
+        themePalette = caps.palette
+        themeScheme = caps.palette?.scheme
+        // Before the first session byte, which is what makes the very first frame the palette's:
+        // `beginSession` writes `?2031h` and the wall is painted with these colours a moment later.
+        chrome.palette = themePalette
+        let colours = caps.palette.map {
+            "fg \(Self.hex($0.foreground)) bg \(Self.hex($0.background))"
+        } ?? "no answer"
+        let scheme = themeScheme.map(\.rawValue) ?? "unknown"
+        let follow = writer.followsColourScheme
+            ? "on for this session, off on the way out"
+            : "not asked for (DECRQM says the mode is not recognised)"
+        Log.write("krd: terminal colours (OSC 10/11) \(colours) — scheme \(scheme); 2031 \(follow)\n")
+    }
+
+    /// `#RRGGBB` — how a colour is written in the log, the design and this tree's tests.
+    private static func hex(_ rgb: RGB) -> String { String(format: "#%06X", rgb.hex) }
+
+    /// A `DEC mode 2031` report: the reader saw `CSI ? 997 ; N n` (issue #213).
+    ///
+    /// The one funnel a theme switch goes through, and every guard below is a *decision* from the
+    /// design rather than a defensive check:
+    ///
+    ///  * `followsColourScheme` (D5): the mode is only enabled when `DECRQM` said the terminal knows
+    ///    it, so a report arriving while we never asked means something *else* put 2031 on the wire —
+    ///    a multiplexer replaying, a stale sequence in a paste. Acting on it would repaint a pane on
+    ///    somebody else's word.
+    ///  * `scheme != themeScheme` (D6): the same scheme reported twice costs **0 bytes**. This is the
+    ///    "repaint once" half of the acceptance stated as a guard, not as a diff that happens to come
+    ///    out empty — a terminal may report the same scheme on every focus change, and the second one
+    ///    must not reach the writer at all.
+    ///  * `let base = themePalette`: nothing was derived, so nothing can be re-derived. A terminal
+    ///    that never answered `OSC 10`/`OSC 11` keeps today's table and writes nothing at all, on the
+    ///    report or after it.
+    ///
+    /// **Why `inverted()` and not a second probe.** A probe reads stdin, and once the input reader is
+    /// live stdin *is* the reader's: an `OSC 10;?` sent now would race the pointer reports the reader
+    /// is parsing in the same read and can steal a keystroke — which is why every probe in this process
+    /// runs before `startInput()` (`TermCaps.ask`). A theme switch is, in the overwhelming majority of
+    /// terminals, the same two colours with the roles exchanged, which is exactly what
+    /// `Palette.inverted()` names and what its doc comment argues. The follow-up — a safe re-probe on
+    /// a channel that is not the input reader's — is listed in the PR and not built here.
+    ///
+    /// **One repaint, text only.** Wall mode repaints the text layer through `drawWall(textOnly:)`:
+    /// never a picture frame, which is how the 8 KB budget (§5.1) holds and how "no picture bytes" is
+    /// true — the pictures on screen are still the right ones, only the two chrome rows are drawn in
+    /// different colours. Mirror mode only has the bar to redraw, so it marks the layer dirty and
+    /// draws it once.
+    private func applyColourScheme(_ scheme: ColourScheme) {
+        guard writer.followsColourScheme else { return }
+        guard scheme != themeScheme else { return }
+        guard let base = themePalette else { return }
+        themePalette = base.inverted()
+        themeScheme = scheme
+        chrome.palette = themePalette
+        // `wallState != nil` *is* wall mode (see its declaration), and this runs on the main queue,
+        // so it is the flag that needs no second copy. Wall mode has no chrome to redraw: every cell
+        // of the pane is `WallCanvas`'s.
+        if wallState != nil {
+            drawWall(textOnly: true)
+        } else {
+            chromeDirty = true
+            drawChrome()
+        }
     }
 
     /// Hand the pane over: stop owning it, then replace this process with the mirror.
@@ -4720,6 +4851,14 @@ final class Desk {
         // `noteFocus` is the one place that decides what a transition means. It is also called for
         // every human input event, so a lost `CSI I` still wakes the picture on the next keystroke.
         reader.onFocus = { [weak self] on in self?.noteFocus(on) }
+        // The colour-scheme report (`CSI ? 997;Nn`, DEC mode 2031 — issue #213). Same hop as the
+        // focus and the wall keys, for the same reason: what a report changes is a palette and a
+        // repaint, and both are the painter's state on the main queue. Installed in both modes,
+        // because both modes own an adopter (the wall's chrome row, the mirror bar's title and
+        // pill); `applyColourScheme` is what decides whether there is anything to do.
+        reader.onColourScheme = { [weak self] scheme in
+            DispatchQueue.main.async { [weak self] in self?.applyColourScheme(scheme) }
+        }
         reader.trace = options.debug
         reader.ime = options.ime
         if options.debug {

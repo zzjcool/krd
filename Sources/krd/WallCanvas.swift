@@ -535,6 +535,19 @@ struct WallStyle: Equatable {
 
     init(_ sgr: String) { self.sgr = sgr }
 
+    /// A colour from the terminal's own palette as a style: `38;2;r;g;b` (issue #213, adopter 1).
+    ///
+    /// The table below is the *terminal's* sixteen colours, which is why a wall on a light terminal
+    /// looked like a wall on a dark one: `1;97` is the terminal's bright white, so the wordmark and
+    /// the counts were whatever the theme made of them instead of a colour krd chose. A style built
+    /// from a `Palette` colour names its own colour and needs no theme to be right.
+    ///
+    /// `underlined` still works on one of these, and that is not luck: an SGR parameter list is a
+    /// set of independent attributes, so `38;2;94;184;255` + `;4` is that blue, underlined — which is
+    /// exactly what the focus ring does to the footer row when `Esc`/`Tab` puts the ring on it. No
+    /// palette style contains a reset (`0`) or any attribute that would undo the ones after it.
+    init(_ rgb: RGB) { self.sgr = rgb.foregroundSGR }
+
     static let plain = WallStyle(Chrome.Style.plain.sgr)
     static let dim = WallStyle(Chrome.Style.dim.sgr)
     static let bright = WallStyle(Chrome.Style.bright.sgr)
@@ -547,6 +560,57 @@ struct WallStyle: Equatable {
     /// parameter list is a set of independent attributes; nothing in it is order-sensitive the way a
     /// reset would be.
     var underlined: WallStyle { WallStyle(sgr + ";4") }
+}
+
+/// The wall's palette, in the four roles its own chrome row uses (issue #213, decision D7).
+///
+/// Four styles and not eight, because only four of them are drawn anywhere: the wordmark
+/// (`wordmark`), the header's link pill (`pill`), the demo note (`bright`, i.e. the palette's
+/// *foreground*) and every dim sentence — the counts, the footer's lead and its `N panels` tail
+/// (`dim`, i.e. the palette's dim text). The stage, the captions, the cards, the bar and the ring keep
+/// today's table on purpose: the palette arrived to fix two places where a fixed SGR is a *wrong*
+/// colour rather than an unambitious one, and the rest of the wall's adoption is a follow-up that can
+/// be reviewed on its own bytes.
+///
+/// `wordmark` and `pill` are separate roles even though a palette draws both in its accent, because
+/// with **no** palette they were two different SGRs (`1;97` for `▪ krd`, `36` for the pill) and
+/// `WallPalette.none` has to reproduce today's bytes cell for cell. Folding them into one role is the
+/// shortcut that would repaint one of the two the moment a terminal answered no `OSC 10`/`OSC 11`.
+struct WallPalette: Equatable {
+    var wordmark: WallStyle
+    var pill: WallStyle
+    var bright: WallStyle
+    var dim: WallStyle
+
+    init(wordmark: WallStyle, pill: WallStyle, bright: WallStyle, dim: WallStyle) {
+        self.wordmark = wordmark
+        self.pill = pill
+        self.bright = bright
+        self.dim = dim
+    }
+
+    /// The terminal's palette in the wall's four roles: both the wordmark and the pill are
+    /// `palette.accent`, `bright ← palette.foreground`, `dim ← palette.dimText`.
+    ///
+    /// The names `bright`/`dim` are the wall's (they are what the call sites already spelled) and the
+    /// colours are the palette's, which is the whole point: a role named `bright` drawn from a light
+    /// terminal's *foreground* is a dark colour, and that is correct — it is the colour that reads on
+    /// that terminal's background. A style named after a brightness would have had to lie here.
+    init(palette: Palette) {
+        let accent = WallStyle(palette.accent)
+        self.init(wordmark: accent, pill: accent, bright: WallStyle(palette.foreground),
+                  dim: WallStyle(palette.dimText))
+    }
+
+    /// Today's hard-coded table, role for role — what a wall with no palette draws.
+    ///
+    /// This is the whole of contract D4 in one value: a terminal that answered no `OSC 10`/`OSC 11`
+    /// gets exactly the bytes it got before #213 existed, which is why the four golden dumps and
+    /// `--selftest`'s sha256 can stay unmoved while the palette is real. Every role names the SGR the
+    /// call site it feeds was written with: `.bright` for `▪ krd` and the demo note, `.accent` (the
+    /// terminal's cyan, `36`) for the header's link pill, `.dim` (`2;37`) for the counts and the
+    /// footer.
+    static let none = WallPalette(wordmark: .bright, pill: .accent, bright: .bright, dim: .dim)
 }
 
 /// The text painter for `--wall`: a whole-pane cell grid plus a per-cell diff renderer.
@@ -693,15 +757,23 @@ final class WallCanvas {
     /// `ring` is `WallState.ring`, the keyboard's position: `nil` (nobody has pressed a key) draws
     /// exactly the wall PR #195 left behind, which is what keeps the four golden dumps byte for
     /// byte and the idle wall free.
+    ///
+    /// `palette` is the terminal's palette, in the three roles the wall's own chrome row uses. It is
+    /// `.none` by default and `.none` *is* today's table, so a caller that knows nothing about `OSC
+    /// 10`/`OSC 11` (and every test that predates the palette) draws the bytes it always drew. It is
+    /// consumed by `drawHeader` and `drawFooter` only (issue #213, D7): the palette is applied once
+    /// per frame, in the cell grid, so an unchanged wall re-emits nothing and a *changed* palette costs
+    /// one repaint of two rows — the diff does the rest.
     func draw(cols: Int, rows: Int, model: WallModel, layout: WallLayout,
               focus: WallState.Focus?, cellW: Double = 8, cellH: Double = 20,
               paints: WallSlotPaints = WallSlotPaints(),
               pointer: WallPointer = WallPointer(),
               ring: WallAction? = nil,
-              link: LinkVerdict = .unknown) -> [UInt8] {
+              link: LinkVerdict = .unknown,
+              palette: WallPalette = .none) -> [UInt8] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
                           cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring,
-                          link: link)
+                          link: link, palette: palette)
         return render(cells, cols: cols, rows: rows)
     }
 
@@ -716,10 +788,11 @@ final class WallCanvas {
                paints: WallSlotPaints = WallSlotPaints(),
                pointer: WallPointer = WallPointer(),
                ring: WallAction? = nil,
-               link: LinkVerdict = .unknown) -> [String] {
+               link: LinkVerdict = .unknown,
+               palette: WallPalette = .none) -> [String] {
         let cells = build(cols: cols, rows: rows, model: model, layout: layout, focus: focus,
                           cellW: cellW, cellH: cellH, paints: paints, pointer: pointer, ring: ring,
-                          link: link)
+                          link: link, palette: palette)
         var out: [String] = []
         out.reserveCapacity(max(0, rows))
         for y in 0..<max(0, rows) {
@@ -747,14 +820,15 @@ final class WallCanvas {
                        paints: WallSlotPaints = WallSlotPaints(),
                        pointer: WallPointer = WallPointer(),
                        ring: WallAction? = nil,
-                       link: LinkVerdict = .unknown) -> [Cell] {
+                       link: LinkVerdict = .unknown,
+                       palette: WallPalette = .none) -> [Cell] {
         var grid = Grid(cols: cols, rows: rows)
         guard grid.cols > 0, grid.rows > 0 else { return grid.cells }
         // Order matters only where two elements share a row: the footer and the band header place
         // their right-aligned tail first and draw the left-hand text second, into the budget the
         // tail leaves, so the tail keeps the cells it needs even if a degenerate pane makes them
         // collide.
-        drawHeader(&grid, model: model, layout: layout, link: link)
+        drawHeader(&grid, model: model, layout: layout, link: link, palette: palette)
         drawStage(&grid, model: model, layout: layout, cellW: cellW, cellH: cellH, paints: paints,
                   pointer: pointer)
         drawStageCaption(&grid, model: model, layout: layout, pointer: pointer)
@@ -763,7 +837,7 @@ final class WallCanvas {
         drawCards(&grid, model: model, layout: layout, paints: paints, pointer: pointer)
         drawCardCaptions(&grid, model: model, layout: layout, paints: paints, pointer: pointer)
         drawFooter(&grid, model: model, layout: layout, focus: focus, notice: paints.notice,
-                   demoNote: paints.demoNote, ring: ring)
+                   demoNote: paints.demoNote, ring: ring, palette: palette)
         drawBar(&grid, layout: layout)
         // The ring last, and as an attribute: it underlines what is already drawn, so it cannot
         // move a caption by one cell or re-truncate a title (issue #201).
@@ -788,8 +862,15 @@ final class WallCanvas {
     ///
     /// It goes on the right, and the counts keep their cells: a wall that drops "3 displays" to make
     /// room for a symptom has traded a fact for a warning.
+    ///
+    /// **The palette (issue #213, adopter 1).** This row and the footer are the only two places the
+    /// wall draws from the terminal's own palette; `palette` is `WallPalette.none` unless the terminal
+    /// answered `OSC 10`/`OSC 11`, so with no palette every cell below keeps the style it had. With
+    /// one, the wordmark and the pill are its accent and the counts its dim text: `1;97` is the
+    /// terminal's bright white, which on a light terminal is the same colour as the paper, and that
+    /// is the failure this adoption exists to fix.
     private func drawHeader(_ grid: inout Grid, model: WallModel, layout: WallLayout,
-                            link: LinkVerdict = .unknown) {
+                            link: LinkVerdict = .unknown, palette: WallPalette) {
         let content = min(layout.contentCols, grid.cols)
         var budget = content
         if let pill = link.pill {
@@ -798,15 +879,16 @@ final class WallCanvas {
             // pill that pushed the counts off the end would be the same class of bug as a chip that
             // clipped a title.
             if cells + 12 <= content {
-                grid.text(pill, row: layout.headerRow, col: content - cells + 1, .accent)
+                grid.text(pill, row: layout.headerRow, col: content - cells + 1, palette.pill)
                 budget = content - cells - 2
             }
         }
         let title = "\(symbols.bullet) krd"
-        let used = grid.text(title, row: layout.headerRow, col: 1, .bright, limit: budget)
+        let used = grid.text(title, row: layout.headerRow, col: 1, palette.wordmark, limit: budget)
         let counts = "    \(model.windows.count) windows\(symbols.dot)\(model.displays.count) displays"
             + "\(symbols.dot)most recently used first"
-        grid.text(counts, row: layout.headerRow, col: 1 + used, .dim, limit: max(0, budget - used))
+        grid.text(counts, row: layout.headerRow, col: 1 + used, palette.dim,
+                  limit: max(0, budget - used))
     }
 
     /// The stage. Phase 1 has no picture, so the panel's rectangle is a dim box with the display
@@ -1044,17 +1126,24 @@ final class WallCanvas {
     /// `ring` only decides one sentence: once the keyboard is in use the click hint gains its
     /// keyboard twin (issue #201). Not before — the opening frame says what a reader with a mouse
     /// needs, and it is the frame the four goldens hold.
+    ///
+    /// The second half of adopter 1: the lead sentence and the `N panels` tail are the palette's dim
+    /// text (today `2;37`) and the `--demo` note is its foreground (today `1;97`). The demo note is
+    /// the one sentence on this row that is *the point of the frame* rather than a hint, which is why
+    /// it is the one drawn in the bright role instead of the dim one — with a palette that role is the
+    /// terminal's own foreground, so it reads on any background instead of being white on white.
     private func drawFooter(_ grid: inout Grid, model: WallModel, layout: WallLayout,
                             focus: WallState.Focus?, notice: WallNotice? = nil,
-                            demoNote: String? = nil, ring: WallAction? = nil) {
+                            demoNote: String? = nil, ring: WallAction? = nil,
+                            palette: WallPalette) {
         let content = min(layout.contentCols, grid.cols)
         let budget = drawTail(&grid, row: layout.footerRow, content: content,
-                              "\(1 + layout.cards.count) panels", .dim)
+                              "\(1 + layout.cards.count) panels", palette.dim)
         // The demo's numbers come before everything: while they are up, that line *is* the point of
         // the frame, and the click hint can wait.
         if let demoNote {
             grid.text(DisplayWidth.truncate(demoNote, to: budget), row: layout.footerRow, col: 1,
-                      .bright, limit: budget)
+                      palette.bright, limit: budget)
             return
         }
         let lead: String
@@ -1086,8 +1175,8 @@ final class WallCanvas {
                 + "\(app) \(symbols.dash) \(title)"
                 + "\(symbols.dot)the mirror follows in the capture phase"
         }
-        grid.text(DisplayWidth.truncate(lead, to: budget), row: layout.footerRow, col: 1, .dim,
-                  limit: budget)
+        grid.text(DisplayWidth.truncate(lead, to: budget), row: layout.footerRow, col: 1,
+                  palette.dim, limit: budget)
     }
 
     /// The bar: two segments, a cap above and below each. The arrows are only drawn when the
