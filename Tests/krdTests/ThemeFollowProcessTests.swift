@@ -425,7 +425,10 @@ private final class FakeTerminal {
             // the pane has painted a picture frame at all — on CI the mark used to land in the gap
             // between the text skeleton and the first frame, where the pane is quiet and no block is
             // open yet), and no block may be open now (so that frame is finished, not half written).
-            let frameFinished = closed != nil && (opened == nil || closed! > opened!)
+            // A **pair**, not just a close: every session starts with a defensive `?2026l` that
+            // belongs to no `?2026h` of ours (the one a killed predecessor may have left open), so
+            // "a close exists" is true 24 B into the stream. Only `h … l` means a frame was painted.
+            let frameFinished = opened != nil && closed != nil && closed! > opened!
             if frameFinished { return }
             drain(forMs: 100)          // a block is open: the frame is still being written
         }
