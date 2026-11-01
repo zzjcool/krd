@@ -68,6 +68,7 @@ status line is written on the row underneath it:
 ```bash
 make dev-mock                          # a desktop drawn in process: no permission, never stops
 make dev-selftest                      # = krd --selftest --dev --pane 137x44 --cell 17x33
+krd --wall --mock --cell 17x33         # the landing screen and its text layer, no grant, no screen
 krd --selftest --dev --dev-panel stats # a panel pre-opened, for a screenshot or a bug report
 krd --selftest --dev --pane 137x60 --cell 17x33 > /tmp/tui.bin
 ```

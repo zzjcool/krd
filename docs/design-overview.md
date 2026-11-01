@@ -570,8 +570,11 @@ Restart-path facts already hit once (do not relearn them):
 - **Tiny pane** → the row width drops 3 → 2 (and to 1 on the narrowest panes) as the pane narrows; below
   two honoured widths the `⤢` is gone as well (there is nowhere to cycle to), a two-digit row width is never
   drawn, and the bar's own arrows are what scrolls.
-- **`--mock`** → a fixed fake window list, `MockCanvas` still frames (`Mock.swift:157`), no screen and no
-  permission needed; `KRD_DUMP` captures the bytes.
+- **`--wall --mock`** → a fixed fake window list (`WallSource.mockModel`: twelve cards, CJK and emoji
+  titles, one title withheld, one window with no pixels so its panel is a mask, two displays) with
+  the pictures drawn in process (`WallPictures.demo`), no screen and no permission needed;
+  `KRD_DUMP` captures the bytes. `--mock` *without* `--wall` is the mock mirror: the generated
+  desktop through the real tiles and encoder (`Mock.swift:157`).
 
 ## 11. Tests
 
@@ -585,7 +588,8 @@ Restart-path facts already hit once (do not relearn them):
 5. `--window` / `--display` with `KRD_DUMP` stays byte-identical to today. Two golden fixtures already exist
    (`Fixtures/selftest-80x24-17x33-l6.dump`, `Fixtures/input-trace.dump`); the wall's text layer should become the
    third — regenerate with `KRD_UPDATE_FIXTURE` and **never with `--filter`** (Swift 5.10 silently runs 0 tests).
-6. `--mock` snapshots at 137×44 and 60×24, plus one real `ssh -t` run.
+6. `--wall --mock` snapshots at 137×44 and 60×24 — a fake window list, so the text layer's pages and
+   its awkward titles are reachable with no grant — plus one real `ssh -t` run.
 
 ## 12. Phases
 
@@ -635,8 +639,10 @@ Restart-path facts already hit once (do not relearn them):
   reports as "the resolution changed" (TROUBLESHOOTING 23d).
 - **P4 done (2026-10-30)**: plain `krd` opens the wall. `--mirror` (or `--window <query>`, which asks for one
   window and so cannot mean the wall) takes the old default back; `wall` stays a symlink and `--wall` still
-  parses, because scripts spell it. `--list`, `--selftest`, `--bench`, `--mock` keep their own paths - they are
-  checked before the wall branch, and `--list` is the one that would otherwise have been swallowed.
+  parses, because scripts spell it. `--list`, `--selftest` and `--bench` keep their own paths - they are checked
+  before the wall branch, and `--list` is the one that would otherwise have been swallowed. `--mock`
+  is the mock mirror unless `--wall` was asked for, in which case it supplies the wall's window list
+  (§10, #114): one flag, two pages, decided by whether the wall was pinned.
 
 ## 13. What would change the answer
 

@@ -57,6 +57,7 @@ krd --selftest --fps 30 --tile 32x16   # fewer, bigger tiles
 ```bash
 make dev-mock                          # 进程内画出来的桌面：不需要权限，而且不会停
 make dev-selftest                      # = krd --selftest --dev --pane 137x44 --cell 17x33
+krd --wall --mock --cell 17x33         # 落地屏和它的文本层：不要授权、不要屏幕
 krd --selftest --dev --dev-panel stats # 面板预先打开，方便截图或报 bug
 ```
 

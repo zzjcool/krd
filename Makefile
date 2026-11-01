@@ -31,7 +31,8 @@ test:
 selftest: build
 	$(KRD) --selftest --pane 137x44 --cell 17x33 --source 1920x1200
 
-# The TUI layer. `make dev` is the normal way in: bare krd with chrome.
+# The TUI layer. `make dev` is the normal way in: the mirror with chrome (`--dev` selects it --
+# the wall owns every row, so `krd --wall --dev` is a usage error and says so).
 dev: build
 	$(KRD) --dev $(BENCH_ARGS)
 
@@ -44,7 +45,8 @@ dev-stats: build
 	$(KRD) --selftest --dev --dev-panel stats $(CONFIG)
 
 # ScreenCaptureKit replaced by a desktop drawn in process: same tiles, same encoder, same
-# placements, same chrome -- no screen-recording permission and no end.
+# placements, same chrome -- no screen-recording permission and no end. (`--mock` alone is the
+# mock *mirror*; with `--wall` the same flag supplies the landing screen's window list.)
 dev-mock: build
 	$(KRD) --mock --dev $(MOCK_ARGS)
 
