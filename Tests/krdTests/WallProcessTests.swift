@@ -537,6 +537,216 @@ final class WallProcessTests: XCTestCase {
         }
     }
 
+    /// One picture frame, one commit: the frame's **text layer** goes out inside the same `?2026`
+    /// block as its pictures (#198) — and a repaint that carries no picture opens no block at all.
+    ///
+    /// `paintWall` draws in two layers that used to commit a round trip apart: the canvas diff went
+    /// out through `writeChrome` (which flushes), and only afterwards did `beginFrame`/`endFrame`
+    /// wrap the panels. A reader on a slow link saw the new borders and captions over the previous
+    /// frame's pictures — the one moment the wall's two layers disagree. Since the pointer answers
+    /// (#195) every hover is a text-only repaint, so "the text is part of the frame" has to be a
+    /// property of the wire, not of how quickly one write happened to follow the other.
+    ///
+    /// Only a pty can see it: the canvas every other wall test looks at is the same canvas whichever
+    /// order the bytes leave in, and the ordering exists only in what the process wrote. `--demo`
+    /// supplies both halves of the frame — `WallSource.demoModel`'s four windows are the pictures
+    /// *and* the card captions (`▣ Demo — 16:9 win…`) — so the text layer and the pictures under it
+    /// name the same frame, which is exactly what a `?2026` block is asked to keep together.
+    ///
+    /// The same child then answers acceptance #2: a hover repaint carries no picture, so it must not
+    /// open a block. A wall that wrapped its text unconditionally would pay 16 B and one terminal
+    /// round trip for one reversed caption.
+    func testAPictureFrameCommitsItsTextAndItsPicturesInOneBlock() throws {
+        let binary = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("krd")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            XCTFail("no krd binary at \(binary.path) — run `swift build` before `swift test`")
+            return
+        }
+
+        let blockOpen = Array("\u{1B}[?2026h".utf8)
+        let blockClose = Array("\u{1B}[?2026l".utf8)
+        // The demo's caption row, as bytes: `▣ Demo — <title>`, one truncated run per card.
+        let caption = Array("▣ Demo".utf8)
+        // A panel's payload starts here: `ESC _ G f=32,s=…`, i.e. an APC that carries a picture.
+        let picture = Array("\u{1B}_Gf=".utf8)
+
+        /// Where `needle` first sits in `bytes`, at or after `from`. Offsets are what a failure about
+        /// *ordering* has to print: "before" is a number, and a number is what a reader can check
+        /// against the stream.
+        func first(_ needle: [UInt8], in bytes: [UInt8], from: Int = 0) -> Int? {
+            guard !needle.isEmpty, bytes.count >= needle.count else { return nil }
+            var i = max(0, from)
+            while i + needle.count <= bytes.count {
+                if Array(bytes[i..<(i + needle.count)]) == needle { return i }
+                i += 1
+            }
+            return nil
+        }
+
+        /// The **last** `needle` that ends before `limit`. A failure message about ordering has to
+        /// name the write that is on the wrong side of the block: the frame's own text is the run of
+        /// captions immediately in front of `?2026h`, not the first caption in the stream (that one
+        /// belongs to the placeholder paint, which carries no picture and is legitimately blockless).
+        func last(_ needle: [UInt8], in bytes: [UInt8], before limit: Int) -> Int? {
+            guard !needle.isEmpty else { return nil }
+            var found: Int?, i = 0
+            while i + needle.count <= min(limit, bytes.count) {
+                if Array(bytes[i..<(i + needle.count)]) == needle { found = i }
+                i += 1
+            }
+            return found
+        }
+
+        func count(_ needle: [UInt8], in bytes: [UInt8]) -> Int {
+            var n = 0, from = 0
+            while let at = first(needle, in: bytes, from: from) {
+                n += 1
+                from = at + needle.count
+            }
+            return n
+        }
+
+        let (master, slave) = try openPTY(cols: 60, rows: 24)
+        var stream: [UInt8] = []
+        let child = Process()
+        child.executableURL = binary
+        child.arguments = ["--wall", "--demo", "--pane", "60x24"]
+        let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        child.standardInput = pane
+        child.standardOutput = pane
+        child.standardError = pane
+        try child.run()
+        close(slave)
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            close(master)
+        }
+
+        // The picture frame is the paint that carries the demo's panels, and `?1003h` is written
+        // behind it (the input modes are installed once the first capture is in). So "both are
+        // here" means the frame has committed: one closed block, and the modes that follow it.
+        let ready = pump(master, into: &stream, timeoutMs: 5_000) { bytes in
+            guard let openAt = first(blockOpen, in: bytes),
+                  first(Array("\u{1B}[?1003h".utf8), in: bytes) != nil else { return false }
+            return first(blockClose, in: bytes, from: openAt + blockOpen.count) != nil
+        }
+        XCTAssertTrue(ready, "no picture frame + input install within 5 s; tail: "
+                      + String(decoding: stream.suffix(300), as: UTF8.self).debugDescription)
+        guard ready else { return }
+
+        // The heal (§1) closes a block that a killed predecessor may have left open, so the stream
+        // starts with a `?2026l` that belongs to no `?2026h` of ours. That is why the frame's own
+        // pair is read forwards — the first `?2026h`, and the first close *after* it — and never as
+        // "the last close, and the open before it".
+        guard let openAt = first(blockOpen, in: stream),
+              let closeAt = first(blockClose, in: stream, from: openAt + blockOpen.count) else {
+            XCTFail("no `?2026h … ?2026l` pair in \(stream.count) B; tail: "
+                    + String(decoding: stream.suffix(300), as: UTF8.self).debugDescription)
+            return
+        }
+        let body = Array(stream[(openAt + blockOpen.count)..<closeAt])
+
+        // A picture went out in the block...
+        XCTAssertNotNil(first(picture, in: body),
+                        "the block at \(openAt) carries no picture (\(picture.count) B signature "
+                        + "missing): the frame this test is about is the one with the panels in it")
+        // ...and so did the text that belongs to it. This is the assertion #198 is about: on
+        // `f457804` the whole caption row is written before `?2026h`, so a terminal is free to show
+        // it a round trip before the pictures it captions. The message names the frame's *own* caption
+        // — the last one before the block — because the stream's first caption belongs to the
+        // placeholder paint, which has no picture and may sit outside a block for good.
+        let captionInBody = first(caption, in: body)
+        let pictureCaptionAt = last(caption, in: stream, before: openAt)
+        XCTAssertNotNil(captionInBody,
+                        "the picture frame's caption went out \(openAt - (pictureCaptionAt ?? openAt)) B "
+                        + "before ?2026h (its last caption at \(pictureCaptionAt ?? -1), the block at "
+                        + "\(openAt), closing at \(closeAt)); this frame is one commit — text and the "
+                        + "pictures it names — and on f457804 none of it is inside the block")
+
+        // One frame is one block, and a block is never nested: a second `?2026h` inside one is
+        // undefined on some terminals (PROTOCOL.md §4), and 16 B is the price of the pair, not of
+        // each panel.
+        let blocks = count(blockOpen, in: stream)
+        XCTAssertNil(first(blockOpen, in: body), "a `?2026h` inside the block: the frame is nested")
+        XCTAssertEqual(blocks, 1, "one picture frame opened \(blocks) blocks")
+
+        // §4's other half: a queued diff must never land inside an APC. The payloads are base64
+        // (`m=1`), so inside an APC only the closing `ESC \` is allowed an ESC — anything else is a
+        // write that went out in the middle of a sequence, and the terminal would swallow the rest
+        // of the block behind it. The walk also has to end outside: a truncated APC eats the pane.
+        var i = 0, inAPC = false
+        while i < body.count {
+            guard body[i] == 0x1B, i + 1 < body.count else { i += 1; continue }
+            if inAPC {
+                guard body[i + 1] == 0x5C else {
+                    XCTFail("an ESC inside an APC body at \(openAt + blockOpen.count + i): "
+                            + "PROTOCOL.md §4 — a queued diff may not land inside an APC")
+                    return
+                }
+                inAPC = false
+                i += 2
+            } else {
+                inAPC = body[i + 1] == 0x5F          // `ESC _` opens one
+                i += 2
+            }
+        }
+        XCTAssertFalse(inAPC, "the block ends inside an APC (truncated): PROTOCOL.md §4")
+
+        // Acceptance #2 on the same child, so the "no block" answer is about a live wall that has
+        // just committed one rather than about a wall that never painted pictures at all. The cell
+        // is `layout.cards[0]` in the layout the child built: `--pane 60x24`, the demo's one display
+        // and four windows, three per row, the pty's 8x20 cell. A hover that lands on nothing asks
+        // for nothing, so the layout is what makes this a hover rather than a keystroke.
+        let layout = WallLayout.make(paneCols: 60, paneRows: 24, displayCount: 1, windowCount: 4,
+                                     per: 3, stageStart: 0, cardStart: 0,
+                                     stageAspect: 2560.0 / 1600.0, cellAspect: 2.5)
+        XCTAssertGreaterThanOrEqual(layout.cards.count, 1, "the demo's 4 windows must fill a card")
+        guard let card = layout.cards.first else { return }
+        let mark = stream.count
+        writeAll(master, Array("\u{1B}[<35;\(card.col + 1);\(card.row + 1)M".utf8))
+        let answered = pump(master, into: &stream, timeoutMs: 2_000) { bytes in
+            first(Array("\u{1B}]22;pointer".utf8), in: bytes, from: mark) != nil
+        }
+        XCTAssertTrue(answered, "the hover over the card asked for no shape within 2 s "
+                      + "(\(stream.count - mark) B arrived)")
+        // The shape rides the paint's own write, so a load that split the two would be a different
+        // bug; the settle is only there so the byte count below is the whole repaint.
+        _ = pump(master, into: &stream, timeoutMs: 100) { _ in false }
+        let hover = Array(stream[mark...])
+        // A paint with no picture sends text alone: no block, and no picture back out (the frame's
+        // pictures stay where they are — a hover is a repaint of the captions over them).
+        // The slice holds no probe byte: `runWall` is `refreshWall` → `probeBehindTheFirstPaint` →
+        // `startInput`, so the `U=1` probe's APCs are written before the `?1003h` the ready pump above
+        // waits for, and `mark` comes after both. `ESC _ G` stays the needle over `ESC _ Gf=` because
+        // it also catches a `placePanelAsPlaceholder` `a=p`.
+        XCTAssertNil(first(Array("\u{1B}[?2026".utf8), in: hover),
+                     "a hover carries no picture, so it must open no block — it wrote "
+                     + "\(hover.count) B with a `?2026` in them")
+        XCTAssertNil(first(Array("\u{1B}_G".utf8), in: hover),
+                     "a hover sent a picture back out: the frame's pictures are already on the pane")
+        XCTAssertLessThan(hover.count, 600, "the hover repaint cost \(hover.count) B (budget 600)")
+        XCTAssertEqual(count(blockOpen, in: stream), 1,
+                       "the hover opened a second block: \(count(blockOpen, in: stream)) `?2026h` so far")
+
+        // Leave the child the way the rest of this file does: `Ctrl-\`, a bounded drain, and a
+        // status. A wall that cannot hand the pane back is a wall that hung on its own block.
+        writeAll(master, [0x1C])
+        let deadline = Date().addingTimeInterval(5)
+        while child.isRunning && Date() < deadline {
+            _ = pump(master, into: &stream, timeoutMs: 50) { _ in false }
+        }
+        _ = pump(master, into: &stream, timeoutMs: 100) { _ in false }
+        guard !child.isRunning else {
+            XCTFail("the wall did not leave within 5 s of Ctrl-\\")
+            return
+        }
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationStatus, 0,
+                       "the wall exited \(child.terminationStatus) instead of 0")
+    }
+
     // MARK: pty plumbing
 
     /// One spawn of a returned wall (`--wall-at 0:2`), one way out, one assertion that it left.

@@ -2304,14 +2304,31 @@ final class Desk {
         if reusing == nil { wallLastPaints = paints }
         // Whether a frame went out (#183/#99): the text diff, or any picture bytes below.
         var sentBytes = !text.isEmpty
+        // One frame, one commit. The `?2026` block is what stops the terminal painting half a frame,
+        // and the frame is not only the pictures: the borders and the captions are the text layer of
+        // the *same* frame — they are the cells that name the picture — and a panel's placeholder
+        // grid rides with the panel. So the block opens before the text does; on f457804 the text was
+        // committed one round trip early, a caption on screen over the previous frame's picture
+        // (`docs/PROTOCOL.md` §2).
+        //
+        // A paint with no picture opens no block: a pointer repaint or a ring move is text only
+        // (`resendPictures`, #195/#201), and two escapes around text with nothing to synchronise
+        // would be 16 B of a 39-97 B hover budget for nothing — which is why the decision is made
+        // before the first byte goes out, where an unconditional `?2026h` could not be taken back.
+        let sendsPictures = resendPictures && !pictures.isEmpty
+        if sendsPictures { writer.beginFrame() }
+        // `writeChrome` flushes, and a flush is not a commit: the block stays open across it, which
+        // is how the panels below land inside it. A `clear()` arriving mid-block is already deferred
+        // to `endFrame` (`pendingClear`) — §4: no nesting, and a queued diff never lands inside an
+        // APC.
         writer.writeChrome(text)
         let emitStart = Date()
         var emitted = 0, skipped = 0, payloadBytes = 0
-        if resendPictures, !pictures.isEmpty {
-            // The same frame contract the tile path uses: `emitPanel` only appends, `endFrame`
-            // flushes. Without the pair the pictures would sit in the writer's buffer forever - which
-            // is exactly what the first live run looked like: blank panels and no bytes on the wire.
-            writer.beginFrame()
+        if sendsPictures {
+            // The closing half of the same frame contract the tile path uses: `emitPanel` only
+            // appends, `endFrame` flushes. Without it the pictures would sit in the writer's buffer
+            // forever — which is exactly what the first live run looked like: blank panels and no
+            // bytes on the wire.
             for picture in pictures {
                 // `panel.rect` is the picture's own rectangle (WallPanels.make), so mask, placeholder,
                 // caption and picture are one box, and the cells outside it stay unpainted.
