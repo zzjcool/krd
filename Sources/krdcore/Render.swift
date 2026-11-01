@@ -206,13 +206,19 @@ public final class ScreenWriter {
         // Grapheme clustering goes on in the *same* write, immediately after the alternate screen:
         // a terminal that lays flags out as two letters (Rex: 2027 reset) is told once, before the
         // first cell is drawn, and the arm flag below is what lets the teardown know it was ours.
+        // Colour-scheme follow (2031) goes on next, in that same write and for the same reason: the
+        // wall is painted with the palette this mode keeps true when the user switches theme, so it
+        // has to be on before the first cell -- and the second arm flag is what lets *both* ways out
+        // of a session take it back.
         graphemeModeArmed = graphemeClustering == .enableAndReset
+        colourSchemeArmed = followsColourScheme
         // The heal below resets the mouse modes unconditionally, and the recon measured that the
         // mouse-mode toggles are one of the things both terminals reset the *pointer shape* with —
         // so whatever the previous session in this process left is gone. Forget it here, or the first
         // hover of the new session would sit inside the same item class and emit nothing (#202).
         forgetPointerShape()
         write(healSequence + "\u{1B}[?1049h" + (graphemeModeArmed ? Self.graphemeEnable : "")
+              + (colourSchemeArmed ? Self.colourSchemeEnable : "")
               + "\u{1B}[2J\u{1B}[H\u{1B}[?25l")
     }
 
@@ -256,6 +262,54 @@ public final class ScreenWriter {
         guard graphemeModeArmed else { return }
         graphemeModeArmed = false
         write(Self.graphemeReset)
+    }
+
+    // MARK: colour-scheme follow (DEC mode 2031, issue #213)
+
+    /// Does this session want the terminal's colour-scheme conversation (`DECSET 2031`)?
+    ///
+    /// The mode carries two things: the terminal announces a scheme change (`CSI ?997;1n` dark /
+    /// `?997;2n` light, issue #212) and — on the terminals that implement the reporting half — the
+    /// interface is expected to follow it. krd wants the announcement, and it is only allowed to ask
+    /// for it when the probe said the terminal *recognises* the mode
+    /// (`TermCaps.supportsColourSchemeFollow`): a mode written into a pane whose parser never heard of
+    /// it is a mode nobody gives back, which is #134's bug class with a new writer in it.
+    ///
+    /// `false` is the default, and the default is what keeps every recorded byte stream identical —
+    /// the wall fixtures, the `--selftest` dumps and their sha256 see no `?2031h` unless a desk asked
+    /// for one. Same rule, same reason as `GraphemeMode.leave`.
+    public var followsColourScheme: Bool = false
+
+    /// `?2031h` / `?2031l`. Deliberately *not* in `inputModes`: those are the modes reported to the
+    /// *remote* desktop and reset in the order they were set, while 2031 is layout and theme, and only
+    /// ever touched when this process is the one that set it. Nor in `healSequence`: that one undoes
+    /// what a *killed predecessor* left behind, and there is no `DECRQM` answer that says "2031 was
+    /// ours" — the only honest source for that is the flag below.
+    static let colourSchemeEnable = "\u{1B}[?2031h"
+    static let colourSchemeReset = "\u{1B}[?2031l"
+
+    /// True while this session is the reason 2031 is on: set in `beginSession`, cleared by
+    /// `restoreColourSchemeMode`.
+    ///
+    /// The flag is the whole safety property, exactly as it is for 2027, and here it is the *only*
+    /// source of it: `DECRQM ?2031` reports whether the terminal knows the mode, not whether it was on
+    /// before krd started, so a terminal that had it on for its own reasons must not be told `?2031l`
+    /// on the way out — and a session that never asked must not write 8 B of reset into a byte
+    /// contract (the golden dump, `--selftest`'s sha256).
+    private var colourSchemeArmed = false
+
+    /// Give the colour-scheme mode back, if this session took it. Idempotent: a second call writes
+    /// nothing until the next `beginSession` re-arms it.
+    ///
+    /// Separate from `endSession` for the same reason `restoreGraphemeMode` is: `handOver` `exec`s the
+    /// mirror into this same process image, the alternate screen is deliberately left entered, and
+    /// `endSession` is never called — so a mode only the teardown reset would be handed to a process
+    /// that never asked for it, which then turns it off under a pane that is relying on it. Both ways
+    /// out go through `restoreSessionModes`, and 2031 is in that list.
+    public func restoreColourSchemeMode() {
+        guard colourSchemeArmed else { return }
+        colourSchemeArmed = false
+        write(Self.colourSchemeReset)
     }
 
     // MARK: pointer shape (OSC 22, issue #202)
@@ -304,14 +358,19 @@ public final class ScreenWriter {
     /// other is `handOver`, which `exec`s the mirror into this same process image and deliberately
     /// leaves the alternate screen entered, so the teardown never runs. A mode that only `endSession`
     /// resets is therefore a mode the hand-over leaves behind — for a process that never asked for it,
-    /// and for the shell behind it (#193 for 2027, #202 for the pointer shape). `endSession` and
-    /// `Desk.handOver` both call *this*, so a mode added here is given back by both by construction,
-    /// which is the same rule `inputModes` follows for the mouse modes.
+    /// and for the shell behind it (#193 for the layout modes 2027 **and** 2031, #202 for the pointer
+    /// shape). `endSession` and `Desk.handOver` both call *this*, so a mode added here is given back by
+    /// both by construction, which is the same rule `inputModes` follows for the mouse modes.
+    ///
+    /// The pointer shape's reset is `OSC 22`; the two layout modes are `DECRQM`-able but their
+    /// ownership book is ours either way (see `colourSchemeArmed`) — what they have in common is that
+    /// nobody else will undo them for us.
     ///
     /// Idempotent through and through: each half writes nothing when this session did not change the
     /// mode, so a failed `exec` that falls through to `endSession` adds no second reset.
     public func restoreSessionModes() {
         restoreGraphemeMode()
+        restoreColourSchemeMode()
         restorePointerShape()
     }
 
@@ -568,9 +627,10 @@ public final class ScreenWriter {
         writeLock.unlock()
         clear()
         // Before the alternate screen, so the shell behind us never draws a frame with 2027 off and
-        // then on, nor with a hand pointer it did not ask for: same write, reset first. Both modes go
-        // back through one call, which `handOver` also uses (a `exec`ed mirror is the other way out
-        // of a session, and `endSession` never runs there).
+        // then on, nor with a hand pointer it did not ask for, nor with 2031 gone from a pane that is
+        // about to have a different theme: same write, reset first. All three modes go back through
+        // one call, which `handOver` also uses (a `exec`ed mirror is the other way out of a session,
+        // and `endSession` never runs there).
         restoreSessionModes()
         write(Self.inputReset + "\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)

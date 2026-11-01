@@ -467,6 +467,57 @@ enum ChromeRoute: Equatable {
 }
 
 final class Chrome {
+    /// A colour a cell carries **in addition to** the sixteen-colour table, and the half of the SGR
+    /// it occupies (issue #213, adopter 2).
+    ///
+    /// **Why the plane exists** — it is the whole subtlety of the bar. The bar is reversed end to
+    /// end (SGR 7, `for x in 0..<cols { set(x, row, " ", .reverse) }`), and a reversed cell paints
+    /// its **background attribute as the glyph** and its **foreground attribute as the patch**. So
+    /// the two sites on the bar want opposite halves of the same colour pair:
+    ///
+    ///  * the title is *text on the bar*: the word the reader reads is the cell's background, so it
+    ///    takes the palette's foreground (`48;2;…`) and comes out dark-on-light on a light terminal
+    ///    and light-on-dark on a dark one — instead of today's fixed `1;97`, which is the terminal's
+    ///    bright white and simply disappears on a light terminal;
+    ///  * the link pill is a *lit capsule*: the capsule is the cell's background, and the letters
+    ///    inside it are the cell's foreground, so it takes the palette's accent (`38;2;…`) and reads
+    ///    as brand blue with the bar's own colour for its letters.
+    ///
+    /// A tint is an optional *extra* parameter list appended to whatever `Style.sgr(_:_:)` returns,
+    /// never a replacement (see `render`): a hovered pill has to keep the underline the hot state
+    /// adds, and a pressed one its reverse video.
+    struct Tint: Equatable {
+        /// Which SGR half the colour claims — the background attribute or the foreground one. Named
+        /// for the SGR plane, not for the caller: on a reversed row the background plane is the
+        /// glyph and the foreground plane is the patch, which is why `text`/`patch` below exist
+        /// rather than a bare `Tint(rgb:plane:)` at each site.
+        enum Plane: Equatable {
+            case foreground, background
+        }
+
+        var rgb: RGB
+        var plane: Plane
+
+        /// The parameter list this colour occupies, `38;2;r;g;b` or `48;2;r;g;b` — the same two forms
+        /// `RGB` already names, so the renderer never spells a colour out itself.
+        var sgr: String {
+            switch plane {
+            case .foreground: return rgb.foregroundSGR
+            case .background: return rgb.backgroundSGR
+            }
+        }
+
+        /// A word the reader reads on a reversed cell: the colour goes in the *background* half,
+        /// because that is what a reversed cell paints the glyph with. `palette.foreground` is what
+        /// a caller wants here — dark-on-light on a light terminal, light-on-dark on a dark one.
+        static func text(_ rgb: RGB) -> Tint { Tint(rgb: rgb, plane: .background) }
+
+        /// A filled patch (a capsule, a badge) on a reversed cell: the colour goes in the
+        /// *foreground* half, because that is the patch's own colour and the glyph stays the bar's.
+        /// `palette.accent` is what a caller wants here.
+        static func patch(_ rgb: RGB) -> Tint { Tint(rgb: rgb, plane: .foreground) }
+    }
+
     private struct Cell: Equatable {
         var ch: Character = " "
         var style: Style = .plain
@@ -482,6 +533,11 @@ final class Chrome {
         /// its own, never trimmed as a trailing blank, and never a widget's own first column.
         var continuation = false
         var wide = false
+        /// A palette colour riding on top of `style`, or nil for "the sixteen-colour table is the
+        /// whole look". Part of the diff because the cell's `==` includes it: changing the palette
+        /// and drawing again re-emits exactly the cells that carry a tint, which is what keeps a
+        /// theme switch to the two places D7 allows.
+        var tint: Tint? = nil
     }
 
     enum Style: UInt8 {
@@ -561,6 +617,20 @@ final class Chrome {
 
     /// The widgets this frame drew, in drawing order.
     var widgets: [ChromeWidget] { published.widgets }
+
+    /// The terminal's palette, when it answered `OSC 10`/`OSC 11` (issue #213, adopter 2).
+    ///
+    /// `nil` is today's table, byte for byte — a terminal that answered nothing gets exactly the
+    /// bytes it gets today (contract D4), and every existing test that pins chrome bytes keeps
+    /// passing without being touched. Set on the main queue before `draw`, like every other
+    /// per-frame input; the drawer reads it once per frame and stamps it onto the cells it means to
+    /// tint, so the reader thread never consults it.
+    ///
+    /// Exactly two sites in this layer adopt it (D7): the bar's title (`Tint.text`, the palette's
+    /// foreground) and the bar's link pill (`Tint.patch`, the palette's accent). The status line and
+    /// the panels keep today's table: they are the `--dev` layer, they sit under a picture that owns
+    /// the colours around them, and a palette there is a follow-up with its own byte review.
+    var palette: Palette?
 
     // MARK: the table
 
@@ -689,6 +759,15 @@ final class Chrome {
     ///
     /// The numbers share one ladder (`barNumbers`): fps > delay > clock > rate, so a narrow pane
     /// gives up the rate first and the delay outlives both the clock and the rate.
+    ///
+    /// **The palette (issue #213, adopter 2).** Two cells on this row and no others read
+    /// `self.palette`: the title and the pill, in opposite SGR planes — see `Tint` for why a reversed
+    /// row makes the title the palette's *foreground* (`48;2;…`) and the pill its *accent*
+    /// (`38;2;…`). With `palette == nil` (the default, and what a terminal that never answered
+    /// `OSC 10`/`OSC 11` gets) both draw `7;1;97` exactly as they do today, which is why the bar's
+    /// existing byte tests still pin the bytes they pinned before. The traffic lights, the numbers
+    /// and the two buttons deliberately keep the fixed table: a palette there is a follow-up, not a
+    /// silent part of this one.
     private func drawBar(row: Int, geometry: ChromeGeometry, m: ChromeMetrics) {
         guard row >= 0, row < rows, cols > 0 else { return }
         // The fill is not a widget of its own: it *is* the row's background (the row rule in
@@ -734,7 +813,15 @@ final class Chrome {
             // The title is a readout, not a control: what it names is the window, and a title that
             // hovered would make the hover's cost grow with the window's name (a 400-column pane
             // would blow the 600 B budget on one crossing). The dots and `[ - ]` are the way out.
-            paint("title", .furniture) { text(x, row, title, .barBright) }
+            //
+            // The palette (issue #213, adopter 2) goes in the *text* plane: on this reversed row the
+            // cell's background attribute is the glyph, so the palette's foreground is what the
+            // reader's eye reads as the word. Today's `7;1;97` is the terminal's bright white, which
+            // is the same colour as a light terminal's paper — the title was legible only on a dark
+            // theme, and that is the failure this line exists to fix (see `Tint`).
+            paint("title", .furniture) {
+                text(x, row, title, .barBright, tint: palette.map { Tint.text($0.foreground) })
+            }
         }
         var rx = cols - DisplayWidth.of(button)
         paint("shrink", .control(.shrink)) { text(rx, row, button, .barBright) }
@@ -746,8 +833,13 @@ final class Chrome {
             // row carries the sentence and the setting that fixes it (`LinkVerdict.advice`). A pill
             // that only says "something is wrong" is a worry; this one ends in a line of
             // `~/.ssh/config`. Its id is the name the hover answers; the behaviour is the action.
+            //
+            // The palette goes in the *patch* plane here — the opposite half from the title, because
+            // a reversed cell paints its foreground attribute as the patch and its background
+            // attribute as the glyph: the capsule is the patch (the palette's accent, so the pill is
+            // brand blue) and the letters inside it keep the bar's own colour (`Tint`, issue #213).
             paint("link", .control(.openPanel(.stats))) {
-                text(rx, row, "  " + pill, .barBright)
+                text(rx, row, "  " + pill, .barBright, tint: palette.map { Tint.patch($0.accent) })
             }
         }
         if !numbers.isEmpty {
@@ -900,22 +992,27 @@ final class Chrome {
         return pointer.down ? .pressed : .hover
     }
 
-    private func set(_ x: Int, _ y: Int, _ ch: Character, _ style: Style) {
+    /// One cell, with an optional palette tint on top of the table's style. The default `nil` is
+    /// "today's look": a call site that knows nothing about the palette writes the cell it always
+    /// wrote, and the diff cannot see a difference it was not told about.
+    private func set(_ x: Int, _ y: Int, _ ch: Character, _ style: Style, tint: Tint? = nil) {
         guard x >= 0, y >= 0, x < cols, y < rows else { return }
         let width = DisplayWidth.of(ch)
         if width == 2 {
             // A wide glyph needs the cell after it; at the right edge it would be clipped by the
             // terminal and drag the rest of the row left, so draw a blank there instead.
             guard x + 1 < cols else {
-                put(x, y, Cell(ch: " ", style: style, widget: stampWidget, hot: stampHot))
+                put(x, y, Cell(ch: " ", style: style, widget: stampWidget, hot: stampHot,
+                               tint: tint))
                 return
             }
-            put(x, y, Cell(ch: ch, style: style, widget: stampWidget, hot: stampHot, wide: true))
+            put(x, y, Cell(ch: ch, style: style, widget: stampWidget, hot: stampHot, wide: true,
+                           tint: tint))
             put(x + 1, y, Cell(ch: " ", style: style, widget: stampWidget, hot: stampHot,
-                               continuation: true))
+                               continuation: true, tint: tint))
             return
         }
-        put(x, y, Cell(ch: ch, style: style, widget: stampWidget, hot: stampHot))
+        put(x, y, Cell(ch: ch, style: style, widget: stampWidget, hot: stampHot, tint: tint))
     }
 
     /// Write one cell and extend the widget the paint belongs to. The two go together: a rect that
@@ -935,13 +1032,14 @@ final class Chrome {
         painted[stampWidget] = extent
     }
 
-    private func text(_ x: Int, _ y: Int, _ s: String, _ style: Style = .plain) {
+    private func text(_ x: Int, _ y: Int, _ s: String, _ style: Style = .plain,
+                      tint: Tint? = nil) {
         var cx = x
         for ch in s {
             let width = DisplayWidth.of(ch)
             if width == 0 { continue }          // a lone combining mark has nothing to attach to
             if cx + width > cols { break }
-            set(cx, y, ch, style)
+            set(cx, y, ch, style, tint: tint)
             cx += width
         }
     }
@@ -1397,7 +1495,15 @@ final class Chrome {
                     // overflowed its column and lost the box's border (#118). It is never a run of
                     // its own (see `Cell.continuation`), so it is never written at all.
                     if cell.continuation { continue }
+                    // The table's SGR for this cell's style *and* pointer state, then — only when
+                    // the cell carries one — the palette tint appended as one more parameter. The
+                    // two are a list, so `7;1;4;97;38;2;94;184;255` is "a hovered pill, in the
+                    // palette's accent": the tint rides on top of the hot state instead of
+                    // replacing it, which is what keeps a hovered *and* palette-tinted control
+                    // still visibly hovered. A cell without a tint is written with exactly the
+                    // bytes it was written with before the palette existed.
                     let want = Style.sgr(cell.style, cell.hot)
+                        + (cell.tint.map { ";" + $0.sgr } ?? "")
                     if sgr != want {
                         out.append(contentsOf: Array("\u{1B}[\(want)m".utf8))
                         sgr = want

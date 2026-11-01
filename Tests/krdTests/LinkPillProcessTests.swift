@@ -86,6 +86,16 @@ final class LinkPillProcessTests: XCTestCase {
         }
         let sawVerdict = pump(terminal, timeoutMs: 20_000) { _ in loggedVerdict() != nil }
         let verdict = loggedVerdict()
+        // The verdict reaches the log *before* the paint that draws the pill (the tick publishes,
+        // then the frame is written), so a snapshot taken the instant the log line appears is a
+        // snapshot of the previous frame. On a fast machine the two land in the same pump iteration
+        // and the race is invisible; on a loaded runner it is not — measured on `macos-15`: the wall
+        // logged `held` and the pill had not been painted yet. Wait for the paint the verdict asks
+        // for, bounded, instead of assuming the two are simultaneous. Nothing is asserted here: the
+        // assertion below still decides, and a pill that never comes still fails it.
+        if verdict == "held" {
+            _ = pump(terminal, timeoutMs: 10_000) { $0.text.contains(pill) }
+        }
         let seen = terminal.text
         let why = (try? String(contentsOfFile: log, encoding: .utf8))?.suffix(600) ?? ""
         XCTAssertTrue(sawVerdict,

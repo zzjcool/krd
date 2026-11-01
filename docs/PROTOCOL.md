@@ -23,6 +23,7 @@ ESC [ 0 m                            #   SGR reset
 ESC [ ? 25 h                         #   cursor visible during setup
 ESC [ ? 1049 h                       #   alternate screen (no scrollback, wheel events come to us)
 ESC [ ? 2027 h                       #   grapheme clustering ON, only if the terminal reported it off
+ESC [ ? 2031 h                       #   colour-scheme reporting ON, only if the terminal says it knows the mode
 ESC [ 2 J  ESC [ H                   #   clear + home
 ESC [ ? 25 l                         #   hide cursor for the whole session
 
@@ -50,14 +51,14 @@ whatever the pane's current focus is, because the mode may have been on a moment
 Re-running krd fixes such a pane automatically; by hand it is
 `printf '\033\\\033[?2026l\033[?25h'`.
 
-`?2027h` is conditional, and it is the only line here armed on a **probe**. 2027 is DEC's grapheme
-clustering: with it set the *terminal* decides where a cluster ends (VS16, ZWJ, skin tones,
+**Two lines in §1 are conditional, and both are armed on the same probe.** `?2027h` is DEC's
+grapheme clustering: with it set the *terminal* decides where a cluster ends (VS16, ZWJ, skin tones,
 regional-indicator flags), so `☰` and a flag occupy the cells their glyph does; with it reset every
 code point is laid out alone and a flag is two letters. Ghostty 1.4.0 starts with it **set**
 (`DECRQM 2027` answers `1`, permanently) and Rex starts with it **reset** (`2`), so krd asks once
 per process — `CSI ? 2027 $ p` rides in the startup capability batch (`CSI 16 t`, `CSI 14 t`,
-`DECRQM`, `CSI c` in one write, `DA1` terminating it because a terminal with no such mode answers
-nothing at all) — and:
+`CSI ? 2031 $ p`, `OSC 10 ; ?`, `OSC 11 ; ?`, `CSI c` in one write, `DA1` terminating it because a
+terminal with no such mode answers nothing at all) — and:
 
 | `DECRQM 2027` answered | `beginSession` sends | teardown sends |
 |---|---|---|
@@ -65,19 +66,39 @@ nothing at all) — and:
 | `1` (set, permanently) | nothing | nothing |
 | `0`, `3`, `4`, or no answer | nothing | nothing |
 
-The asymmetry is the safety property, not an optimisation: the mode belongs to the *pane*, not to
-krd, so a terminal that already had it on must keep it on after we leave — and an unconditional
-`?2027l` would also turn it off on a terminal that saved the reset state (`CSI ? 2027 s`/`r`: a
-restore with nothing saved turns Ghostty's 2027 **off**, measured). Only "we turned it on, so we turn
-it off" is true from both sides, which is what `ScreenWriter.graphemeModeArmed` records.
+`?2031h` is DEC mode 2031, the colour-scheme conversation: with it set the terminal *reports* a
+change of its own theme as `CSI ? 997 ; 1 n` (dark) / `CSI ? 997 ; 2 n` (light) — the report §7
+describes — and krd repaints its text layer in the palette that goes with the new scheme. The palette
+itself comes from the same batch: `OSC 10 ; ?` asks for the foreground, `OSC 11 ; ?` for the
+background, and both are answered as `rgb:RRRR/GGGG/BBBB` (xterm scales each channel from 1–4 hex
+digits) or `#RRGGBB`. A terminal that answers neither — or answers something that is not a colour —
+leaves krd on its hard-coded SGR table, byte for byte. Which is also why the mode is asked for and
+not assumed:
+
+| `DECRQM 2031` answered | `beginSession` sends | teardown sends |
+|---|---|---|
+| `1`, `2` or `3` (the terminal knows the mode) | `ESC [ ? 2031 h` | `ESC [ ? 2031 l` |
+| `4` (permanently reset), `0` (not recognised), or no answer | nothing | nothing |
+
+The asymmetry in both tables is the safety property, not an optimisation: 2027's mode belongs to the
+*pane*, not to krd, so a terminal that already had it on must keep it on after we leave — and an
+unconditional `?2027l` would also turn it off on a terminal that saved the reset state
+(`CSI ? 2027 s`/`r`: a restore with nothing saved turns Ghostty's 2027 **off**, measured). Only "we
+turned it on, so we turn it off" is true from both sides, which is what `ScreenWriter.graphemeModeArmed`
+records. 2031 has the same rule and a sharper reason: `DECRQM` says whether the terminal *knows* the
+mode, never whether it was already on, so the only honest source of ownership is our own book
+(`ScreenWriter.colourSchemeArmed`) — and a session that never enabled it writes nothing at all,
+including the `?2031l`. That idempotence is what keeps a report krd never asked for out of the byte
+contract: `--selftest`'s dump and its sha256 see no `?2031h` and no `?2031l`.
 
 **The `exec` boundary.** `handOver` replaces the process with the mirror and deliberately leaves the
-alternate screen entered, so `endSession` never runs there; the mode is handed back by
-`ScreenWriter.restoreGraphemeMode()` immediately before `execv` instead. Without it the next process
-would probe the terminal, read back *our* `?2027h`, conclude "it was already on, leave it alone", and
-the pane would keep a mode it never asked for long after krd is gone. Every process therefore leaves
-2027 exactly as it found it at every exit — teardown, `exec`, or a signal — and no exit path passes
-the state along out of band: each process asks the terminal.
+alternate screen entered, so `endSession` never runs there; every mode this session changed is handed
+back by `ScreenWriter.restoreSessionModes()` immediately before `execv` instead — 2027, 2031 and the
+pointer shape in one call, so a fourth mode cannot be handed over "by memory". Without it the next
+process would probe the terminal, read back *our* `?2027h`, conclude "it was already on, leave it
+alone", and the pane would keep a mode it never asked for long after krd is gone. Every process
+therefore leaves both modes exactly as it found them at every exit — teardown, `exec`, or a signal —
+and no exit path passes the state along out of band: each process asks the terminal.
 
 None of these is a kitty graphics APC — the leading `ESC \` is a bare `ST`, not an envelope — so
 tmux passthrough (§6.6) leaves §1 exactly as written.
@@ -163,6 +184,7 @@ end of session (ScreenWriter.endSession):
     ESC [ ? 1004 l  ESC [ ? 1016 l  ESC [ ? 1006 l  ESC [ ? 1002 l  ESC [ ? 1003 l
     ESC [ ? 25 h
     ESC [ ? 2027 l                               # grapheme clustering off — only if §1 turned it on
+    ESC [ ? 2031 l                               # colour-scheme reporting off — only if §1 turned it on
     ESC [ ? 1049 l                               # leave the alternate screen
 ```
 
@@ -178,10 +200,11 @@ a report that has already passed the check can still put one escape on the wire 
 write lock, and that needs a signal-driven shutdown to start inside the gap (nothing stops the reader) —
 while the resets are unaffected.
 
-`?2027l` comes **before** `?1049l` on purpose: the shell gets a screen whose mode is already the one
-it started with, so its first frame is laid out the way it expects. It is also the only line here
-armed on a probe (§1) — a terminal that had 2027 on when krd started never sees this sequence, in
-either direction.
+`?2027l` and `?2031l` come **before** `?1049l` on purpose: the shell gets a screen whose modes are
+already the ones it started with, so its first frame is laid out the way it expects — and a shell
+whose parser does not know 2031 never sees the pane announce a theme that is not its own. Both are
+armed on a probe (§1) — a terminal that had 2027 on when krd started never sees `?2027l`, and a
+terminal that does not know 2031 never sees either direction.
 
 `a=d,d=a` (delete all placements) is sent **only** at those two points, never between frames. With
 passthrough on it is wrapped like every other APC (§6.6); `?2026l`, `2J` and the input-mode resets
@@ -312,6 +335,7 @@ Deliberately **not** wrapped:
 | OSC 52 (§7.4) | the clipboard belongs to the terminal krd is attached to — tmux keeps its own buffers and relays with `set-clipboard`, and a read (`out`) sent beyond it could never be answered back on stdin |
 | OSC 22 (the pointer shape, #202) | **the mouse in that pane is tmux's own, so the shape must not be depended on** — the envelope could carry the sequence (it is a pure re-escaping), and krd deliberately does not wrap it for that reason: under a multiplexer the shape simply does not change |
 | `?2027h` / `?2027l` | the same shape of reason as the mouse modes: the question is asked of the terminal that will draw the cells, and a multiplexer that keeps its own idea of the mode would answer for a pane it composes itself |
+| `?2031h` / `?2031l` | the same reason, one step further: 2031 is about *this pane's* theme, and the colours krd derives come from the terminal it asked (`OSC 10`/`OSC 11`, §1). Sent past a multiplexer, the report would describe a screen krd is not drawing on |
 | the kitty keyboard protocol (`CSI > 15 u`, `CSI ? u`, `CSI < u`) | the answer is what krd gates on, and only tmux — the terminal it is actually talking to — can send one back |
 | the placeholder cells | they are ordinary text (`U+10EEEE` plus diacritics), not escapes: tmux rewrites them like any other cell, and it is the image they point at that needs the envelope |
 
@@ -417,8 +441,25 @@ The answer is `CSI 0n`, and **only** an `n` whose parameters do not begin with `
 mode 2031 makes the terminal announce a colour-scheme change with `CSI ? 997 ; 1 n` (dark) /
 `CSI ? 997 ; 2 n` (light) — the same final byte as the probe's answer, and **not** an answer to it: it
 becomes `Event.colourScheme` and adds no round trip (issue #212). Any other private `n`
-(`CSI ? 1 ; 2 n`) is a report krd never asked for and is dropped rather than counted as one. krd does
-not ask for 2031 yet, so nothing derives a colour from it — that is the theme issue (#213).
+(`CSI ? 1 ; 2 n`) is a report krd never asked for and is dropped rather than counted as one.
+
+**What krd does with that report (issue #213).** It asks for the mode in the startup batch
+(`CSI ? 2031 $ p`, §1) and turns it on only when the answer says the terminal knows it, so a report
+arriving while krd never asked means something else put the mode on the wire — a multiplexer
+replaying, a stale sequence in a paste — and is not acted on. When it is acted on, the desk derives
+`Palette(foreground:background:)` from the two `OSC` answers of the *same* batch and paints the text
+layer once in it: the wall's chrome row (wordmark = accent, counts = dim text) and the mirror bar's
+title (the palette's foreground, in the background plane of a reversed cell) and link pill (the
+accent). One repaint, text only — no picture is re-sent, a theme switch is budgeted at 8 KB (§5.1 of
+the UI design) — and the same scheme reported twice costs 0 bytes. A report is **not** an answer to
+a probe (no round-trip timestamp, `lastStatusReplyAt`) and **not** input (it must not wake a picture
+frozen by `--unfocused-fps 0`). A malformed or absent `OSC 10`/`OSC 11` answer keeps the hard-coded
+SGR table: no palette, no colour guessed from half a pair.
+
+The palette is re-derived from the pair krd already has (`Palette.inverted()`), never from a second
+probe: a probe reads stdin, and once the input reader is live stdin is the reader's — an `OSC 10 ; ?`
+sent then would race the pointer reports in the same read and can steal a keystroke. A theme switch
+is, in the overwhelming majority of terminals, the same two colours with their roles exchanged.
 
 ### 7.1 Cell vs pixel coordinates, and the downgrade rule
 

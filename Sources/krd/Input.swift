@@ -94,6 +94,18 @@ final class InputReader {
     /// focus simply never calls it, which is every terminal that was fine before this existed.
     var onFocus: ((Bool) -> Void)?
 
+    /// The terminal's colour-scheme report (`CSI ? 997 ; N n`, DEC mode 2031) — issue #213's desk half.
+    ///
+    /// A *reply*, not input, and not a round-trip answer either (issue #212): the two properties the
+    /// `.colourScheme` arm below has always kept are the reason this is a hook of its own and not a
+    /// `postKey`. Nothing here reaches the remote desktop, and nothing here is stamped into
+    /// `lastStatusReplyAt`.
+    ///
+    /// Called on the reader thread, like every other hook here. The receiver hops to the main queue:
+    /// what a scheme change does is re-derive a palette and repaint, and both of those are the
+    /// painter's, never the reader's.
+    var onColourScheme: ((ColourScheme) -> Void)?
+
     /// Is the chrome waiting for the second key of its chord (`Ctrl-\` then `s`/`d`/`f`/`l`/`?`/`q`)?
     ///
     /// The prefix state belongs to the chrome (`Desk.chromeKey` is its only writer, on this same
@@ -447,9 +459,18 @@ final class InputReader {
             statusReplies += 1
         case let .colourScheme(scheme):
             // DEC mode 2031's report (issue #212): a terminal *reply*, not input — and deliberately
-            // **not** stamped above, because a theme change is not a completed round trip. Nothing
-            // paints from it yet (deriving a palette is #213), and 2031 is not asked for.
+            // **not** stamped above, because a theme change is not a completed round trip. Both of
+            // those are load-bearing and neither is an oversight to be "fixed": (a) `lastStatusReplyAt`
+            // is the round-trip probe's clock, and a report nobody asked for is not a completed round
+            // trip — stamping it would fake an RTT the diagnostics tick then believes; (b) the switch
+            // above only wakes the picture for `.key`/`.press`/`.text`/`.control`/`.mouse`, because a
+            // reply is not a person, and a 1 Hz probe that counted as input would wake the picture
+            // forever (issue #110).
+            //
+            // What it *does* do since #213 is reach the desk: the palette is derived once from it
+            // (`Desk.applyColourScheme`), which is a repaint of the text layer and nothing else.
             if trace { log("colour scheme report \(scheme.rawValue)") }
+            onColourScheme?(scheme)
         case let .control(byte):
             handleControl(byte)
         case let .mouse(report):

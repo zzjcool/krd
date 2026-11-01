@@ -462,11 +462,13 @@ extension TermGeometry {
     /// `ws_xpixel`/`ws_ypixel`, which leaves the aspect ratio and mouse mapping guessed.
     /// `CSI 16 t` answers with the cell size in pixels, `CSI 14 t` with the window size.
     ///
-    /// The question is not asked here: `TermCaps.probe` sends `16t`, `14t`, `DECRQM 2027` and the
-    /// terminating `DA1` in **one** write (issue #197), so the three questions cost one round trip
-    /// between them — on a link where a round trip is 20–40 ms, that is the difference between one wait
-    /// and three. This function is that one answer read as a grid; `lastAnswer` still says which half
-    /// of it arrived.
+    /// The question is not asked here: `TermCaps.probe` sends all **seven** questions — `16t`, `14t`,
+    /// `DECRQM 2027`, `DECRQM 2031`, `OSC 10;?` (the foreground), `OSC 11;?` (the background) and the
+    /// terminating `DA1` — in **one** write (issue #197's batch, widened by #213's D1), so the seven
+    /// questions cost one round trip between them — on a link where a round trip is 20–40 ms, that is
+    /// the difference between one wait and seven. This function is that one answer read as a grid;
+    /// `lastAnswer` still says which half of it arrived, and the colours and the two modes are read
+    /// off the same memoised answer by their own callers (`prepareTheme`, `prepareGraphemeMode`).
     static func query(timeoutMs: Int = 250, refresh: Bool = false) -> TermGeometry? {
         // The grid, before any bytes: a pane without a size is not a pane to ask questions of, and
         // today's behaviour is no probe at all when TIOCGWINSZ fails.
