@@ -40,13 +40,13 @@ final class ThemeFollowProcessTests: XCTestCase {
                       "the wall never enabled 2031 and installed its reader; \(run.terminal.describe)")
         // Let the startup settle (the first paint, the re-measure behind it, the `U=1` probe this
         // fake deliberately does not answer) before the mark: only bytes *after* it are the report's.
-        run.terminal.settle()
+        run.terminal.settleFrame()
 
         FakeTerminal.mark("test1: started, \(run.terminal.stream.count) B before the report")
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light
         FakeTerminal.mark("test1: report sent")
-        run.terminal.settle()
+        run.terminal.settleFrame()
         FakeTerminal.mark("test1: first drain done, \(run.terminal.stream.count) B")
 
         let repaint = run.terminal.repaint(since: mark)
@@ -70,7 +70,7 @@ final class ThemeFollowProcessTests: XCTestCase {
         FakeTerminal.mark("test1: checks done, second report now")
         let second = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light, twice
-        run.terminal.settle()
+        run.terminal.settleFrame()
         FakeTerminal.mark("test1: second drain done, \(run.terminal.stream.count) B")
         XCTAssertEqual(run.terminal.repaint(since: second).count, 0,
                        "the second identical report wrote bytes; the same scheme reported twice must "
@@ -93,11 +93,11 @@ final class ThemeFollowProcessTests: XCTestCase {
 
         XCTAssertTrue(run.terminal.pump(until: { $0.contains(string: "\u{1B}[?1003h") }, timeoutMs: 15_000),
                       "the wall never installed its reader; \(run.terminal.describe)")
-        run.terminal.settle()
+        run.terminal.settleFrame()
 
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // a report nobody asked for
-        run.terminal.settle()
+        run.terminal.settleFrame()
         XCTAssertEqual(run.terminal.repaint(since: mark).count, 0,
                        "a report repainted this pane even though 2031 was never enabled — the desk "
                        + "acted on a mode it did not ask for (D5): "
@@ -135,7 +135,7 @@ final class ThemeFollowProcessTests: XCTestCase {
             $0.contains(string: "\u{1B}[?2031h") && $0.contains(string: "\u{1B}[?1003h")
         }, timeoutMs: 15_000),
                       "the wall never enabled 2031 and installed its reader; \(run.terminal.describe)")
-        run.terminal.settle()
+        run.terminal.settleFrame()
 
         // `Ctrl-\` is the documented way out, and in wall mode it is the *only* one the reader owns.
         run.terminal.send("\u{1C}")
@@ -200,7 +200,7 @@ final class ThemeFollowProcessTests: XCTestCase {
         // Freeze the picture: this is a session that reports focus-out, so the mock's frames stop
         // being drawn (`--unfocused-fps 0`) and every byte after the mark is the bar's.
         run.terminal.send("\u{1B}[O")
-        run.terminal.settle()
+        run.terminal.settleFrame()
 
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light
@@ -390,6 +390,40 @@ private final class FakeTerminal {
             last = stream.count
             let left = max(200, Int(deadline.timeIntervalSinceNow * 1000))
             drainUntilQuiet(quietMs: quietMs, timeoutMs: min(8_000, left))
+        }
+    }
+
+    /// Drain until a **frame is finished**: the pane is quiet and no `?2026` block is left open.
+    ///
+    /// This is the window a byte budget needs, and it is structural rather than timed. `settle()` alone
+    /// is not enough on a loaded runner: measured on CI (run 41348747078) the wall's first pictures
+    /// frame was still being written after a quiet window had already been declared, so the 125 KB
+    /// that arrived next was attributed to whatever the test did in between. Since #198 one frame is
+    /// one block, so "quiet *and* nothing open" is exactly "a frame ended" — and it holds whatever the
+    /// runner's speed is.
+    ///
+    /// Bounded: a pane that never closes its block fails the assertion after the window, with the
+    /// open block named, instead of hanging here.
+    func settleFrame(timeoutMs: Int = 25_000) {
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
+        let open = Array("\u{1B}[?2026h".utf8)
+        let close = Array("\u{1B}[?2026l".utf8)
+        while Date() < deadline {
+            settle(timeoutMs: min(20_000, max(400, Int(deadline.timeIntervalSinceNow * 1000))))
+            func lastIndex(_ needle: [UInt8]) -> Int? {
+                guard stream.count >= needle.count else { return nil }
+                var found: Int?, i = 0
+                while i + needle.count <= stream.count {
+                    if Array(stream[i..<(i + needle.count)]) == needle { found = i }
+                    i += 1
+                }
+                return found
+            }
+            let opened = lastIndex(open)
+            let closed = lastIndex(close)
+            let pending = opened != nil && (closed == nil || opened! > closed!)
+            if !pending { return }
+            drain(forMs: 100)          // a block is open: the frame is still being written
         }
     }
 
