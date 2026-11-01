@@ -33,12 +33,26 @@ public enum Event: Equatable {
     /// The terminal's answer to `CSI 5n`: the device status report the round-trip probe measures
     /// (issue #52). Not input — nothing is injected for it.
     case statusReport
+    /// DEC mode 2031's report — the terminal just switched colour scheme — which arrives as
+    /// `CSI ? 997 ; 1 n` (dark) / `CSI ? 997 ; 2 n` (light). Same final byte as `statusReport` and
+    /// emphatically not it: a theme change is not an answer to a probe that is in flight, and
+    /// counting it as one puts a round trip in the series that never happened (issue #212). Not
+    /// input either — nothing is injected for it.
+    case colourScheme(ColourScheme)
     /// A string-terminated sequence that is **not** input: an `APC G … ST` (the channel kitty's
     /// graphics protocol answers on), or a `DCS`/`SOS`/`PM` body such as a `tmux` passthrough
     /// (issue #109). `krd` counts it and says why a tile was refused; nothing is injected for it.
     case graphicReply(GraphicsReply)
     /// A parse-level diagnostic for `--debug` (e.g. an OSC that grew past the cap).
     case notice(String)
+}
+
+/// The two colour schemes DEC mode 2031 lets a terminal report, in the terminal's own words: `1` is
+/// dark (`CSI ? 997 ; 1 n`), `2` is light. A name rather than a `Bool`, because the report is the
+/// whole message and a reader of `Event.colourScheme(.dark)` cannot get the sense backwards.
+public enum ColourScheme: String, Equatable {
+    case dark
+    case light
 }
 
 /// One reply from a string-terminated sequence: `APC G i=31;OK ST`, `APC G i=31;EINVAL: … ST`, or
@@ -791,11 +805,40 @@ public final class InputParser {
         emit(.key(report))
     }
 
+    /// `CSI … n`: two different reports share the final byte, and only one of them is the probe's
+    /// answer.
+    ///
+    /// `CSI 0n` is the terminal telling us it is alive; the probe in `Desk` measures the round trip.
+    /// Emitted rather than swallowed so the timing lives in one place. A **private** (`?`) `n` is a
+    /// report of a mode, and krd asked for none of them: DEC mode 2031 makes the terminal announce a
+    /// colour-scheme change as `CSI ? 997 ; 1 n` (dark) / `CSI ? 997 ; 2 n` (light), which is what
+    /// `.colourScheme` is for — read as `.statusReport` it would answer a probe that is still in
+    /// flight, and the sample it added would be an instant one, the shape `LinkVerdict` takes for a
+    /// held link (issue #212). Any *other* private number is a report krd never asked for and emits
+    /// nothing at all: a phantom answer is worse than a dropped report.
+    private func handleStatusReport(_ params: String) {
+        // The old meaning, unchanged: every non-private `n` is the alive/DES answer. The private
+        // bodies (`?…`) are the ones that used to be miscounted.
+        guard params.hasPrefix("?") else {
+            emit(.statusReport)
+            return
+        }
+        // `?997;<scheme>` — the first parameter names the report and the second the scheme. A body
+        // with no scheme (`?997n`) names none, one with a third parameter (`?997;1;2n`) is not this
+        // report at all, and `?997;0` is "not recognised": none of the three is a colour we can act
+        // on, so none of them is an event.
+        let fields = params.dropFirst().split(separator: ";", omittingEmptySubsequences: false)
+        guard fields.count == 2, Int(fields[0]) == 997 else { return }
+        switch Int(fields[1]) {
+        case 1: emit(.colourScheme(.dark))
+        case 2: emit(.colourScheme(.light))
+        default: break
+        }
+    }
+
     private func handleCSI(params: String, final: UInt8) {
         if final == 0x6E {                                  // 'n': device status report
-            // `CSI 0n` is the terminal telling us it is alive; the probe in `Desk` measures the
-            // round trip. Emitted rather than swallowed so the timing lives in one place.
-            emit(.statusReport)
+            handleStatusReport(params)
             return
         }
         if final == 0x75 {                                  // 'u': kitty keyboard protocol
@@ -980,6 +1023,8 @@ extension Event {
             return "keyboardFlags \(flags.map(String.init) ?? "?")"
         case .statusReport:
             return "statusReport"
+        case let .colourScheme(scheme):
+            return "colourScheme \(scheme.rawValue)"
         case let .graphicReply(r):
             // The status text is the terminal's words about a payload, so the trace reports the
             // selector, the ids and the length — never the body (the `osc` rule).

@@ -413,8 +413,8 @@ final class InputReader {
         // (issue #110 I5). Any key, click or wheel counts, because a terminal that loses a `CSI I` --
         // a multiplexer, a resize, a pane that never got one -- would otherwise leave the picture
         // throttled until the terminal answered a report it does not send. Terminal *replies*
-        // (`keyboardFlags`, `statusReport`, `graphicReply`, `notice`, `osc`) are not input and must
-        // not count: a 1 Hz probe would then wake the picture forever.
+        // (`keyboardFlags`, `statusReport`, `colourScheme`, `graphicReply`, `notice`, `osc`) are not
+        // input and must not count: a 1 Hz probe would then wake the picture forever.
         switch event {
         case let .focus(on):
             onFocus?(on)
@@ -445,6 +445,11 @@ final class InputReader {
             // the 1 Hz diagnostics tick can compute an accurate round trip from it.
             lastStatusReplyAt = benchNowMs() / 1000
             statusReplies += 1
+        case let .colourScheme(scheme):
+            // DEC mode 2031's report (issue #212): a terminal *reply*, not input — and deliberately
+            // **not** stamped above, because a theme change is not a completed round trip. Nothing
+            // paints from it yet (deriving a palette is #213), and 2031 is not asked for.
+            if trace { log("colour scheme report \(scheme.rawValue)") }
         case let .control(byte):
             handleControl(byte)
         case let .mouse(report):

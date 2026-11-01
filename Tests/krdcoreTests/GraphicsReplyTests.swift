@@ -15,6 +15,9 @@ final class GraphicsReplyTests: XCTestCase {
             switch $0 {
             case .key, .press, .text, .control: return true
             case .mouse, .osc, .keyboardFlags, .statusReport, .graphicReply, .notice: return false
+            // A colour-scheme report (DEC mode 2031, issue #212) is a terminal reply about the
+            // theme: it reaches no desktop either.
+            case .colourScheme: return false
             // A focus report (`CSI I`/`CSI O`, issue #110) is about the picture's rate: it reaches
             // no desktop either.
             case .focus: return false

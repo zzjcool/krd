@@ -142,6 +142,21 @@ final class TermCapsTests: XCTestCase {
 
     // MARK: the bytes on the wire
 
+    /// DEC mode 2031's colour-scheme report (issue #212) arrives on the same wire and ends in `n`.
+    /// The read loop is still terminated by the `DA1` and by nothing else, and the three answers are
+    /// still found around it — one write, one round trip, one terminator (#197).
+    func testAColourSchemeReportEndsNothingAndHidesNoAnswer() {
+        XCTAssertFalse(TermCaps.isComplete("\u{1B}[?997;1n"), "a colour-scheme report is not the DA1")
+        let withScheme = "\u{1B}[?997;2n" + reply
+        XCTAssertTrue(TermCaps.isComplete(withScheme), "the DA1 after it still ends the read")
+        XCTAssertEqual(TermCaps.parse(withScheme), TermCaps.parse(reply),
+                       "the report neither adds a field nor hides one")
+        // Between two answers, not only in front of them: the parse must not be position-sensitive.
+        let interleaved = reply.replacingOccurrences(of: "\u{1B}[4;",
+                                                     with: "\u{1B}[?997;1n\u{1B}[4;")
+        XCTAssertEqual(TermCaps.parse(interleaved), TermCaps.parse(reply))
+    }
+
     /// The batch is one string *and* four questions in it: a shorter `query` would silently stop asking
     /// a question krd still needs, and the compiler would not say so.
     func testTheBatchIsFourQuestionsInOneString() {
