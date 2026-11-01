@@ -413,6 +413,13 @@ from the wall's own 1 Hz tick (`wallTick`), because the wall draws the link's pi
 diagnostics tick at all before issue #199. Same 4 bytes, never more than one probe outstanding, and
 both stop asking after three unanswered probes.
 
+The answer is `CSI 0n`, and **only** an `n` whose parameters do not begin with `?` is that answer. DEC
+mode 2031 makes the terminal announce a colour-scheme change with `CSI ? 997 ; 1 n` (dark) /
+`CSI ? 997 ; 2 n` (light) — the same final byte as the probe's answer, and **not** an answer to it: it
+becomes `Event.colourScheme` and adds no round trip (issue #212). Any other private `n`
+(`CSI ? 1 ; 2 n`) is a report krd never asked for and is dropped rather than counted as one. krd does
+not ask for 2031 yet, so nothing derives a colour from it — that is the theme issue (#213).
+
 ### 7.1 Cell vs pixel coordinates, and the downgrade rule
 
 A cell coordinate can never exceed the terminal's grid, so:

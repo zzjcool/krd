@@ -82,4 +82,48 @@ final class RTTProbeTests: XCTestCase {
         XCTAssertTrue(fresh.lastMs.isNaN, "before any answer the number must be unknown")
         XCTAssertFalse(fresh.lastMs > 250, "and unknown must not read as \"fine, 0 ms\"")
     }
+
+    /// The parser and the probe, wired the way `Desk` wires them: an event that *is* the answer feeds
+    /// `reply(at:)`, and nothing else does.
+    ///
+    /// DEC mode 2031 makes the terminal announce its colour scheme with `CSI ? 997 ; 1 n` (dark) /
+    /// `CSI ? 997 ; 2 n` (light) — the same final byte as the alive/DES answer this probe measures
+    /// (issue #212). Read as an answer, a theme change mid-probe is an *instant* round trip: a sample
+    /// that was never a round trip at all, and its shape (`min < 2 ms`) is exactly what the link
+    /// verdict reads as a held link. So the report has to land as something else, and the outstanding
+    /// probe has to still be waiting for its real answer.
+    func testAColourSchemeReportIsNotAnAnswerToTheProbe() {
+        var probe = RTTProbe(interval: 2, timeout: 2)
+        probe.sent(at: 10)                              // `CSI 5n` is on the wire
+        let parser = InputParser()
+        var traces: [String] = []
+        var statusReports = 0
+        parser.onEvent = { event in
+            traces.append(event.canonicalTrace)
+            switch event {
+            case .statusReport:
+                // 1 ms later: the phantom shape, and it consumes the probe if it is counted.
+                statusReports += 1
+                _ = probe.reply(at: 10.001)
+            default:
+                break
+            }
+        }
+
+        parser.feed(Array("\u{1B}[?997;1n".utf8))       // the terminal switched to dark
+        XCTAssertEqual(probe.answered, 0, "a `?997` report must not be counted as the probe's answer")
+        XCTAssertTrue(probe.series.isEmpty, "so the round-trip series did not grow")
+        XCTAssertTrue(probe.pendingSince == 10, "the probe is still in flight")
+        XCTAssertTrue(probe.isMeasuring)
+        XCTAssertEqual(traces, ["colourScheme dark"],
+                       "and it arrived as the theme report, not as silence")
+        XCTAssertEqual(statusReports, 0, "a colour-scheme report is not a device status report")
+
+        parser.feed(Array("\u{1B}[0n".utf8))            // the real answer still lands, exactly once
+        XCTAssertEqual(traces, ["colourScheme dark", "statusReport"])
+        XCTAssertEqual(statusReports, 1)
+        XCTAssertEqual(probe.answered, 1)
+        XCTAssertEqual(probe.series.count, 1)
+        XCTAssertTrue(probe.pendingSince == nil)
+    }
 }
