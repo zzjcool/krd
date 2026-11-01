@@ -42,9 +42,12 @@ final class ThemeFollowProcessTests: XCTestCase {
         // fake deliberately does not answer) before the mark: only bytes *after* it are the report's.
         run.terminal.drainUntilQuiet()
 
+        FakeTerminal.mark("test1: started, \(run.terminal.stream.count) B before the report")
         let mark = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light
+        FakeTerminal.mark("test1: report sent")
         run.terminal.drainUntilQuiet()
+        FakeTerminal.mark("test1: first drain done, \(run.terminal.stream.count) B")
 
         let repaint = run.terminal.repaint(since: mark)
         XCTAssertGreaterThan(repaint.count, 0,
@@ -64,9 +67,11 @@ final class ThemeFollowProcessTests: XCTestCase {
         // The same scheme, again: a terminal is free to report it on every focus change, and the desk
         // must not spend a byte on it. Asserted against the *stream*, not against an internal flag,
         // so a repaint that happens to produce an empty diff cannot pass this.
+        FakeTerminal.mark("test1: checks done, second report now")
         let second = run.terminal.stream.count
         run.terminal.send("\u{1B}[?997;2n")              // light, twice
         run.terminal.drainUntilQuiet()
+        FakeTerminal.mark("test1: second drain done, \(run.terminal.stream.count) B")
         XCTAssertEqual(run.terminal.repaint(since: second).count, 0,
                        "the second identical report wrote bytes; the same scheme reported twice must "
                        + "cost 0 B (D6): " + run.terminal.repaint(since: second).escaped)
@@ -452,13 +457,24 @@ private final class FakeTerminal {
     /// `answerIfAsked`, after the quiet window.
     private func drainAvailable() {
         var chunk = [UInt8](repeating: 0, count: 8192)
-        while true {
+        // Bounded on purpose: this is the one loop in this file with no deadline, so a pane that
+        // writes without pause (a 1 Hz probe plus a repaint, on a slow runner) would otherwise spin
+        // here appending megabytes and never give the test a chance to fail. 512 chunks is 4 MB in
+        // one answer window — far more than a burst, far less than a hang.
+        for _ in 0..<512 {
             var pfd = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
             guard poll(&pfd, 1, 0) > 0 else { return }
             let n = read(master, &chunk, chunk.count)
             if n <= 0 { return }
             stream.append(contentsOf: chunk[0..<n])
         }
+    }
+
+    /// One line to `stderr`, unbuffered, for the runner that has to say *where* a silent test died.
+    /// `print` goes through a buffer the CI log only flushes at exit, which is exactly the case this
+    /// exists for: a test that never reaches its own assertions shows nothing at all.
+    static func mark(_ what: String) {
+        FileHandle.standardError.write(Data("krd-test: \(what)\n".utf8))
     }
 
     private func writeAll(_ text: String) {
