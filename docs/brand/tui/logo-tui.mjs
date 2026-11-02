@@ -8,7 +8,7 @@
  * cannot be three different crabs if they are three renderers of one scene.
  *
  *   node logo-tui.mjs                      interactive: the card, animated, in this terminal
- *   node logo-tui.mjs --test               layout self-test (24..160 columns x 6..40 rows)
+ *   node logo-tui.mjs --test               layout self-test (8..160 columns x 4..40 rows)
  *   node logo-tui.mjs --frames             the eight beats, as the card draws them
  *   node logo-tui.mjs --art                the 46x23 character crab (docs, ASCII)
  *   node logo-tui.mjs --dump               both drawings, as half blocks
@@ -39,13 +39,49 @@ const arg = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] ?
 const has = n => argv.includes(n);
 
 /* ------------------------------------------------------------------ renderers */
-/** The sprite as dots: a dot is in when at least half of it is (`vector.mjs`'s `pixels`). */
+/**
+ * The sprite as dots, the way the *card* computes them: one point sample per dot on the card's own
+ * paper, then every dot snapped to a colour the drawing contains.
+ *
+ * That is `MascotRaster`'s `.mosaic` rule, and it is deliberately not `pixels()`: `pixels()` decides
+ * a dot by coverage (half of a 3x3 sample grid), which is the right rule for a 16 px mark and the
+ * wrong one at 36, where it washes the pupils out and breaks the shell's groove into dashes. The
+ * card in this lab has to be the card the binary paints, or the lab is another opinion.
+ */
+const PALETTE = new Map();
+function palette(scene) {
+  if (!PALETTE.has(scene)) {
+    const add = p => typeof p === 'string' ? [p] : (p.stops || []).map(([, h]) => h);
+    const all = new Set(['#080a10']);
+    for (const l of scene.layers) for (const p of [l.fill, l.stroke]) if (p) for (const h of add(p)) all.add(h);
+    PALETTE.set(scene, [...all].map(h => [...V.rgb(h), h]));
+  }
+  return PALETTE.get(scene);
+}
+function cardDots(scene, cols, rows, { pose = {}, lod = 'lo', view = null, aspect = 1 } = {}) {
+  const r = V.render(scene, { width: cols, height: rows, ss: 1, pose, lod, view, aspect });
+  const px = V.rgba8(r, '#080a10'), pal = palette(scene);
+  for (let i = 0; i < px.length; i += 4) {
+    let best = pal[0], bestD = Infinity;
+    for (const p of pal) {
+      const d = (px[i] - p[0]) ** 2 + (px[i + 1] - p[1]) ** 2 + (px[i + 2] - p[2]) ** 2;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    px[i] = best[0]; px[i + 1] = best[1]; px[i + 2] = best[2]; px[i + 3] = 255;
+  }
+  /* `px.map` on a Uint8ClampedArray returns another Uint8ClampedArray, i.e. it `v / 255`s every
+     channel back to 0 or 1; a Float32Array is what `rgba8` expects (premultiplied, 0..1) */
+  const f = new Float32Array(px.length);
+  for (let i = 0; i < px.length; i++) f[i] = i % 4 === 3 ? 1 : px[i] / 255;
+  return { width: cols, height: rows, px: f };
+}
+/** The mark and the ASCII art: coverage, because at 16 px a half-covered dot is a dot. */
 function dots(scene, cols, rows, { pose = {}, lod = 'lo', view = null, aspect = 1 } = {}) {
   return V.pixels(scene, { width: cols, height: rows, pose, lod, ss: 3, view, aspect });
 }
 /** Dots -> half-block cells: one cell is two dot rows, fg above, bg below. */
-export function blocks(scene, cols, rows, opts = {}) {
-  const r = dots(scene, cols, rows * 2, opts), px = V.rgba8(r), out = [];
+function blocks(scene, cols, rows, opts = {}) {
+  const r = cardDots(scene, cols, rows * 2, opts), px = V.rgba8(r), out = [];
   for (let y = 0; y < rows; y++) {
     const line = [];
     for (let x = 0; x < cols; x++) {
@@ -62,13 +98,17 @@ const GLYPHS = [
   [[244, 132, 90], 'x'], [[253, 232, 214], '+'], [[34, 15, 8], ' '], [[59, 36, 22], '.'],
   [[94, 184, 255], 'b'], [[28, 20, 32], '@'],
 ];
-export function chars(scene, cols, rows, opts = {}) {
-  const r = dots(scene, cols, rows, opts), px = V.rgba8(r), out = [];
+function chars(scene, cols, rows, opts = {}) {
+  const r = cardDots(scene, cols, rows, opts), px = V.rgba8(r), out = [];
   for (let y = 0; y < rows; y++) {
     const line = [];
     for (let x = 0; x < cols; x++) {
       const q = (y * cols + x) * 4;
-      if (px[q + 3] < 128) { line.push({ ch: ' ' }); continue; }
+      /* the card's paper is not a material: a character version of the card leaves it blank */
+      if (px[q + 3] < 128 || (Math.abs(px[q] - 8) + Math.abs(px[q + 1] - 10) + Math.abs(px[q + 2] - 16)) < 12) {
+        line.push({ ch: ' ' });
+        continue;
+      }
       let best = GLYPHS[0], bestD = Infinity;
       for (const [c, ch] of GLYPHS) {
         const d = (px[q] - c[0]) ** 2 + (px[q + 1] - c[1]) ** 2 + (px[q + 2] - c[2]) ** 2;
@@ -98,9 +138,12 @@ const SGR = row => {
 };
 
 /* ------------------------------------------------------------------- the card */
-/* The card is the product's: 36 columns of sprite, 18 rows, then the two captions. It is laid out
-   here exactly as `LoadingView` lays it out, so the lab cannot disagree with the binary about what
-   the card looks like. */
+/* The card is the product's: 36 columns of sprite, 18 rows, then the two captions — 20 rows, no
+   blank row between them (`LoadingView.labels()` starts at `originRow + cellRows + 1`). The sprite
+   starts one column right of the card's own left edge, exactly as `originCol` does, so a screenshot
+   of the lab and a screenshot of the binary line up. Where the terminal is narrower than the card
+   the product *wraps* (its row is a fixed 37 columns whatever the pane) and this truncates: a lab
+   that showed a wrapped row would be showing a bug as if it were the design. */
 const CARD_COLS = 36, CARD_ROWS = 18;
 const BLANK = { ch: ' ' };
 const wide = ch => /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60]/.test(ch) ? 2 : 1;
@@ -122,19 +165,20 @@ const centre = (s, fg, w) => fit([...blanks(Math.floor((w - width(s)) / 2)), ...
 const NOTE = [140, 150, 170], DIMTXT = [88, 98, 118];
 
 /** The card at `beat`, in `cols` x `rows` cells: the sprite, centred, then the two captions. */
-export function card(cols, rows, beat, mode = 'solid') {
+function card(cols, rows, beat, mode = 'solid') {
   cols = Math.max(8, cols); rows = Math.max(4, rows);
   const pose = M.beat(beat), view = M.spriteView();
   const art = mode === 'plain'
     ? chars(M.scene(), CARD_COLS, CARD_ROWS, { pose, view, aspect: 1.25 })
     : blocks(M.scene(), CARD_COLS, CARD_ROWS, { pose, view, aspect: 1.25 });
   const top = Math.max(0, Math.floor((rows - (CARD_ROWS + 2)) / 2));
-  const left = Math.max(0, Math.floor((cols - CARD_COLS) / 2));
+  /* the product's `originCol` is `(cols - 36) / 2 + 1`: the sprite is indented one column, so the
+     mosaic's 36 dots start there and the picture is placed on the same column */
+  const left = Math.max(0, Math.floor((cols - CARD_COLS) / 2)) + 1;
   const out = [];
   for (let k = 0; k < top; k++) out.push(fit([], cols));
   const label = 'waiting for first frame' + '.'.repeat(beat % 4);
   for (let y = 0; y < CARD_ROWS; y++) out.push(fit([...blanks(left), ...art[y]], cols));
-  out.push(fit([], cols));
   out.push(fit([...blanks(left), ...centre(label, NOTE, CARD_COLS)], cols));
   out.push(fit([...blanks(left), ...centre('krd · connecting', DIMTXT, CARD_COLS)], cols));
   while (out.length < rows) out.push(fit([], cols));
@@ -208,6 +252,18 @@ function selfTest() {
             const w = l.reduce((n, c) => n + wide(c.ch), 0);
             if (w !== cols) bad.push(`${cols}x${rows} ${mode} beat ${beat} row ${i}: width ${w}`);
           });
+          /* the two rows that are the card and not the sprite: a card sized as if it were one row
+             shorter drops `krd · connecting` off the bottom, which is invisible to the checks above */
+          const text = f.map(l => l.map(c => c.ch).join('')).join('\n');
+          /* only where the card can fit at all: below 36 columns the product's row wraps and
+             the lab truncates on purpose, so a missing caption there is the terminal's size
+             rather than the card's arithmetic */
+          if (rows >= CARD_ROWS + 2 && cols >= CARD_COLS) {
+            if (!text.includes('waiting for first frame'))
+              bad.push(`${cols}x${rows} ${mode} beat ${beat}: no first caption`);
+            if (!text.includes('krd · connecting'))
+              bad.push(`${cols}x${rows} ${mode} beat ${beat}: no second caption`);
+          }
         }
   return bad;
 }

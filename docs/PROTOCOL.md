@@ -397,7 +397,7 @@ ESC [ ? 2026 l
 ```
 
 Then **nothing**: the animated card has no timer at all, so a 3 s window costs what the first write
-cost — **6,934 B = 2.31 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 625,320 B
+cost — **8,580 B = 2.86 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 625,320 B
 for the mosaic in the same window. `stop()` clears the card's 20 rows and deletes the image
 (`a=d,d=i,i=<id>`): a pixel-sized placement is not part of the text grid, so clearing cells would
 leave the mascot floating over the frame that just arrived.
@@ -410,7 +410,8 @@ Rules that are not decoration:
 - **`s=3,v=1`** is "run normally, loop for ever". `s=2` is loading mode (the terminal stops at the end
   of the frames and waits for more) and `v=0` is "as if not specified".
 - **Four frames, 220 ms each**: the even steps of the same blink curve, so the cycle is still 880 ms.
-  Bytes are the whole reason — eight anti-aliased frames are 6.9 KB, four are 3.5 KB.
+  Bytes are the whole reason: four frames, their placement and the two captions are 8.6 KB together,
+  and eight would be the same again — for animation this card plays once per connect.
 - **`C=1`, not `U=1`**: the placeholder grid over the card's 36×18 cells is 648 cells ≈ 2.8 KB — four fifths
   of the whole card — and it would make the card depend on a second capability. A card has no cells to
   belong to; it is deleted by id instead. (The icon cache below does implement the `U=1` transport,

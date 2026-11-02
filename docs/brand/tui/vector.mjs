@@ -23,7 +23,6 @@ import { deflateSync } from 'node:zlib';
 export const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 const clamp8 = v => Math.max(0, Math.min(255, Math.round(v)));
 export const hex = c => '#' + c.slice(0, 3).map(v => clamp8(v).toString(16).padStart(2, '0')).join('');
-export const mix = (a, b, t) => { const x = rgb(a), y = rgb(b); return hex(x.map((v, i) => v + (y[i] - v) * t)); };
 
 /* ------------------------------------------------------------------- paths */
 /* A path is an array of commands in absolute user units:
@@ -46,14 +45,6 @@ export function poly(pts, closed = true) {
   return closed ? [...p, ['Z']] : p;
 }
 
-export function roundRect(x, y, w, h, r) {
-  r = Math.min(r, w / 2, h / 2);
-  const k = r * (1 - K);
-  return [['M', x + r, y], ['L', x + w - r, y], ['C', x + w - k, y, x + w, y + k, x + w, y + r],
-          ['L', x + w, y + h - r], ['C', x + w, y + h - k, x + w - k, y + h, x + w - r, y + h],
-          ['L', x + r, y + h], ['C', x + k, y + h, x, y + h - k, x, y + h - r],
-          ['L', x, y + r], ['C', x, y + k, x + k, y, x + r, y], ['Z']];
-}
 
 /** A smooth curve through every point (Catmull-Rom as cubics). `t` < 1 tightens it. */
 export function smooth(pts, closed = true, t = 1) {
@@ -73,7 +64,6 @@ export const mapPath = (path, f) => path.map(([op, ...v]) => {
   for (let i = 0; i < v.length; i += 2) o.push(...f(v[i], v[i + 1]));
   return o;
 });
-export const move = (path, dx, dy) => mapPath(path, (x, y) => [x + dx, y + dy]);
 
 /** Split into subpaths of {start, segs: [[...ctrl, x, y]], closed}. */
 function subpaths(path) {

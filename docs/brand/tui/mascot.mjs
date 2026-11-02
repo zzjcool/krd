@@ -234,7 +234,7 @@ export function scene() {
      every surface. At the card's 36 dots a soft band is a smudge and a 1.7-dot leg is a
      scribble — so the terminal gets its own drawing, made of the same shell curve, the same
      head, the same eyes and the same claw, with the detail spent on the two things a 36-dot
-     crab has: a bold spiral, and a face you can read. One `pose()` moves both. */
+     crab has: a bold spiral, and a face you can read. One `beat(i)` moves both. */
   for (const l of L) l.lod = 'hi';
   sprite(add, lined, grad);
 
@@ -320,35 +320,6 @@ function sprite(add, lined, grad) {
       lo({ stroke: INK.mouth, w: 7, group: 'crab' }));
 }
 
-/**
- * The 16 px mark: the same shell and the same two eyes, no body and no mouth.
- *
- * A browser tab is 16 dots; a body there is four dots of coral that reads as a smudge, and the
- * eyes have to keep their white. Everything else is gone — which is also why the mark is a
- * *drawing* and not `--svg --px 16` of the sprite: scaling 36 dots down to 16 is a different
- * picture, not a smaller one.
- */
-export function fold() {
-  const L = [];
-  const add = (d, o = {}) => L.push({ d, ...o });
-  const lined = (d, fill, o = {}) => add(d, { fill, stroke: INK.line, w: OUT, minPx: OUTPX, under: true, ...o });
-  const lo = o => ({ lod: 'lo', ...o });
-  shellLo(add, lined, lo);
-  faceLo(add, lined, () => INK.coral, lo, false, FOLD_EYES, false);
-  return { view: VIEW, groups: scene().groups, layers: L };
-}
-
-/** The mark's eyes: on the shell's mouth, closer together than the card's, so 16 px holds them. */
-const FOLD_EYES = [{ c: [154, 84] }, { c: [192, 78] }];
-
-/** The mark's box: its own ink plus a margin, tighter than the card's. */
-export function foldView(margin = 0.05) {
-  const s = fold();
-  const [x0, y0, x1, y1] = bounds(s, { lod: 'lo' });
-  const m = Math.max(4, margin * Math.max(x1 - x0, y1 - y0));
-  return [x0 - m, y0 - m, x1 - x0 + 2 * m, y1 - y0 + 2 * m];
-}
-
 /** everything except the shell's body: the crab may be over the lip and the hole, or outside */
 function crabClip() {
   const [x, y, w, h] = VIEW, m = 96;
@@ -357,14 +328,6 @@ function crabClip() {
 }
 
 /* ------------------------------------------------------------------- poses */
-/** A pose: how far each group moves (user units) or turns (degrees), and whether the eyes are shut */
-export const REST = { move: {}, turn: {}, eyes: 'open' };
-export const pose = ({ duck = 0, look = [0, 0], snip = 0, wave = 0, eyes = 'open' } = {}) => ({
-  move: { crab: [-5 * duck, 5 * duck], eyes: [0, 24 * duck], look },
-  turn: { dactyl: -snip, claw: wave },
-  eyes,
-});
-
 /* ------------------------------------------------------------------ the card */
 /**
  * The pose the loading card plays: how far the crab is out of its shell, one frame per beat.
