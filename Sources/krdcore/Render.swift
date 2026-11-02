@@ -1197,6 +1197,10 @@ public final class ScreenWriter {
     /// - which drags every placement on it up one row. The wall avoids that cell entirely (its pictures
     /// are never at the pane's last cell); a mirror's tiles are, so the wrap is cancelled here instead.
     func appendPlaceholderGrid(id iid: Int, row: Int, col: Int, cols: Int, rows: Int) {
+        // The grid is text, not an APC, but it is a *picture*: a chrome repaint landing between two
+        // of its rows leaves a hole in the middle of a picture the terminal is still assembling.
+        writeLock.lock()
+        defer { writeLock.unlock() }
         let r = (iid >> 16) & 0xFF, g = (iid >> 8) & 0xFF, b = iid & 0xFF
         let colour = "\u{1B}[38;2;\(r);\(g);\(b)m"
         for line in 0..<rows {
@@ -1350,8 +1354,14 @@ public final class ScreenWriter {
     @inline(__always)
     private var apcClose: String { GraphicsAPC.close }
 
+    /// One complete APC, appended **under the write lock**: the frame's own tile writes run on the
+    /// capture queue and the chrome's paints on the main queue, and a chrome write that lands inside
+    /// another APC's `ESC _` … `ESC \` ends it early — the terminal aborts the open string and prints
+    /// the rest of the frame's base64 as text (measured on the tart VM, issue #235).
     @inline(__always)
     func appendAPC(_ body: String) {
+        writeLock.lock()
+        defer { writeLock.unlock() }
         append(GraphicsAPC.sequence(body))
     }
 
@@ -1366,8 +1376,16 @@ public final class ScreenWriter {
     /// 4096 characters, it does not re-encode a megabyte of picture.
     @inline(__always)
     func appendTransmitChunk(_ header: String, _ payload: ArraySlice<UInt8>) {
+        // One chunk, one lock: see `appendAPC`. Chunking still happens (a multiplexer wraps 4096
+        // characters), but no other writer can put its bytes between these three appends — and the
+        // lock is recursive, so a caller that already holds it (a frame batch) pays nothing.
+        writeLock.lock()
+        defer { writeLock.unlock() }
         append(apcOpen)
         append(header)
+        // Test seam (issue #235): where the chrome's repaint used to land, between a transmit's header
+        // and its payload. Nil in production, and the check is one branch per 4 KB chunk.
+        transmitSeam?()
         out.append(contentsOf: payload)
         append(apcClose)
     }
@@ -1440,6 +1458,11 @@ public final class ScreenWriter {
     }
     public var quietLabel: String { quiet }
 
+    /// Test-only seam, called inside a transmit chunk between its header and its payload — the window
+    /// another writer used to be able to slip through (issue #235). Set by
+    /// `ChromeInsideTransmitTests`; the lock above is what makes the window unwritable.
+    var transmitSeam: (() -> Void)?
+
     /// Chunks that reached the sink without a complete tmux envelope while `--passthrough` was on
     /// (issue #107). Zero is the only correct value: non-zero means a graphics APC went round
     /// `GraphicsAPC` — or a chrome write split one. Written under `writeLock`, read by tests.
@@ -1449,11 +1472,12 @@ public final class ScreenWriter {
         guard !out.isEmpty else { return }
         // The sink's own guard (issue #107): with passthrough on, a chunk that is not a run of
         // complete envelopes is a bypass, and it is counted rather than asserted. Counted because
-        // `flushLocked` can legitimately be reached with a frame half-appended: `writeChrome` flushes
-        // this same buffer from the main queue while the capture queue is inside `appendTransmitChunk`
-        // (an unsynchronised window that predates this flag), and a flush that lands between an APC's
-        // open and its close is not something to abort a running krd over. The count is what the
-        // tests assert on, and it is the number a future `--debug` stats line should surface.
+        // `flushLocked` can legitimately be reached with a frame half-*emitted* -- `endFrame` commits
+        // after `beginFrame`, and both flush -- but never with one APC half-appended: every APC
+        // (`appendAPC`, `appendTransmitChunk`, the placeholder grid) is appended under this same
+        // lock, which is what issue #235 fixed. Before that, a chrome write could put its own
+        // `ESC _` inside a tile's transmit and the terminal aborted the string, printing the rest of
+        // the base64. The count is what the tests assert on.
         if passthrough, !GraphicsAPC.isFullyEnveloped(out) { envelopeViolations += 1 }
         frameWireBytes += out.count
         if let sink {
