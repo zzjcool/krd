@@ -66,6 +66,25 @@ struct TermGeometry {
         }
         return (TermGeometry.fallbackCell.w, TermGeometry.fallbackCell.h)
     }
+
+    /// One cell of a **picture** at `scale` device pixels per reported pixel — the cell a frame is
+    /// made of, as opposed to the cell the terminal answered with.
+    ///
+    /// `cellSize` is in the units the terminal *reported*: device pixels when the pty fills
+    /// `ws_xpixel`, points when the terminal answers `CSI 16t` in points (Rex does), and the 8x16
+    /// fallback when it says nothing. A frame is made of device pixels, so a picture multiplies the
+    /// reported cell by `dpr` (`PaneGeometry.devicePixelRatio`) — exactly what the wall does with
+    /// `PaneGeometry.pictureCell(scale:)`. Both pages of one pane have to agree about this: the
+    /// mirror framed `cells x cellSize` and covered 47.06 % x 48.48 % of its cell box on a pane that
+    /// reported points (issue #206).
+    ///
+    /// Not folded into `cellSize` itself: the mouse path divides the terminal's own pixel
+    /// coordinates by the *reported* cell (`InputReader.cell(forPixel:cellSize:)`), and a cell
+    /// doubled there would land every click on the wrong cell.
+    func pictureCell(scale: Double) -> (w: Double, h: Double) {
+        let reported = cellSize
+        return (reported.w * scale, reported.h * scale)
+    }
 }
 
 /// One snapshot of the terminal a wall draws into: the grid, and what one cell is worth.
@@ -108,6 +127,18 @@ struct PaneGeometry: Equatable {
     /// One cell at `scale` device pixels per reported pixel: what a picture is captured against.
     func pictureCell(scale: Double) -> (w: Double, h: Double) {
         (w: cellW * scale, h: cellH * scale)
+    }
+
+    /// Device pixels per reported pixel: `--dpr` if the operator pinned one, else 1 when the cell
+    /// already arrived in device pixels (the pty's own `ws_xpixel`, or an operator's `--cell`) and 2
+    /// when only an ANSI answer was available (a terminal that reports its cell in points).
+    ///
+    /// **One rule, both pages.** `measure` below is the wall's caller and `Desk.mirrorDpr` is the
+    /// mirror's, and the two used to disagree: the wall captured at `cell x dpr` and the mirror at
+    /// `cell`, so one pane drew two pictures of different sizes (issue #206). A rule written twice is
+    /// how that happens, so it is written here once.
+    static func devicePixelRatio(explicit: Double?, deviceCell: Bool) -> Double {
+        explicit ?? (deviceCell ? 1 : 2)
     }
 }
 
@@ -348,7 +379,8 @@ extension PaneGeometry {
         // keeps a full-width stage inside a terminal's image budget. The pixel-sized path has no
         // fitting, so there the picture must be asked for in device pixels or it is drawn small.
         let pane = PaneGeometry(cols: cols, rows: rows, cellW: cellW, cellH: cellH,
-                                dpr: dpr ?? (deviceCell ? 1 : 2), source: source)
+                                dpr: PaneGeometry.devicePixelRatio(explicit: dpr, deviceCell: deviceCell),
+                                source: source)
         log("krd: wall cell \(Int(cellW))x\(Int(cellH)) px, \(source)\(deviceCell ? "" : " (not device pixels)") - "
             + "\(cols)x\(rows) cells, \(pane.dpr)x pictures\n")
         return pane
@@ -592,12 +624,18 @@ extension TileGrid {
     /// off `geometry`'s own grid, which is the terminal's. That split is the whole of issue #146; the
     /// old shape (a `TermGeometry` whose `rows` had been reassigned) fed the chrome budget into
     /// `cellH` and made the frame a fraction of a row taller than the cells it covers.
+    ///
+    /// `dpr` is device pixels per *reported* pixel, i.e. the cell a frame is made of (issue #206):
+    /// 1 when the terminal's cell already arrived in device pixels (`ws_xpixel`, `--cell`), 2 when it
+    /// answered in points, `--dpr` when the operator pinned one. The default of 1 is the "the cell is
+    /// already device pixels" case, which is what every caller that predates this asked for.
     static func make(geometry: TermGeometry, rows pictureRows: Int? = nil,
                      aspect: Double, tileCols: Int, tileRows: Int,
                      bpp: Int = 3, scale: Double = 1, fillsCells: Bool = false,
                      source: CGSize = CGSize(width: 0, height: 0),
-                     area: (top: Int, left: Int, cols: Int, rows: Int)? = nil) -> TileGrid {
-        let cell = geometry.cellSize
+                     area: (top: Int, left: Int, cols: Int, rows: Int)? = nil,
+                     dpr: Double = 1) -> TileGrid {
+        let cell = geometry.pictureCell(scale: dpr)
         return make(paneCols: geometry.cols, paneRows: max(1, pictureRows ?? geometry.rows),
                     cellW: cell.w, cellH: cell.h, aspect: aspect,
                     tileCols: tileCols, tileRows: tileRows, bpp: bpp, scale: scale,

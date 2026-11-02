@@ -274,7 +274,9 @@ func usage() -> String {
                           follows the local pointer, and a drawn one dirties tiles as the mouse
                           moves; --no-cursor is still accepted and means the same as the default)
       --dpr <n>           device pixels per reported cell, i.e. picture quality (default: 2 when
-                          the terminal answered CSI 16t/14t in points, 1 when the pty reported pixels)
+                          the terminal answered CSI 16t/14t in points, 1 when the pty reported
+                          pixels). The mirror frames its cell with it too, so on a points pane it
+                          is also how many pixels the picture has (issue #206)
       --demo             draw a test pattern instead of the desk (no capture, no permission)
       --square           square corners on the wall's pictures (default: rounded)
       --placeholders      force kitty unicode placeholders (U=1); --no-placeholders forces the
@@ -2677,8 +2679,31 @@ final class Desk {
     /// said `--cell`. That is the terminal that draws an image one image pixel per device pixel.
     static func cellIsInDevicePixels(_ options: Options) -> Bool {
         if options.cell != nil { return true }
+        // A *pinned* cell is device pixels whichever way it was pinned. `--cell` is the operator's
+        // (above); the other pin is a recording's header, which `runReplay` installs so that a replay
+        // reproduces the layout it was made at — and a replay whose cell is doubled by `dpr` renders
+        // twice the frame its own recording holds (issue #206).
+        if TermGeometry.pinnedCell != nil { return true }
         let pty = TermGeometry.read()
         return pty.pixelWidth > 0 && pty.pixelHeight > 0
+    }
+
+    /// Device pixels per *reported* pixel for the mirror's pictures — the mirror's half of the wall's
+    /// `options.dpr ?? pane.dpr` (`wallPanels`), and the same rule (`PaneGeometry.devicePixelRatio`).
+    ///
+    /// WHY it exists: the mirror framed `cells x cellSize`, the cell the terminal *reported*, so on a
+    /// pane whose cell arrives in points the picture covered `1/dpr` of its cell box — measured as
+    /// 47.06 % x 48.48 % of it, anchored top-left, on a 141x56 pane of 17x33 device px — while the
+    /// wall framed `pictureCell(scale: dpr)`. Two pages of one pane disagreeing about what a cell is
+    /// worth is the whole of issue #206, and it also left `--dpr` documented as "device pixels per
+    /// reported cell, i.e. picture quality" with no effect on the page that draws the live picture.
+    ///
+    /// 1 when the cell already arrived in device pixels (nothing to multiply), 2 when only an ANSI
+    /// answer was available, and `--dpr` overrides both. So a terminal that reports its window in
+    /// pixels — the sshd-pty case — is untouched by this: `1` is what it always effectively had.
+    static func mirrorDpr(_ options: Options) -> Double {
+        PaneGeometry.devicePixelRatio(explicit: options.dpr,
+                                      deviceCell: cellIsInDevicePixels(options))
     }
 
     /// The flags that say *how the picture is drawn*, which both pages of one pane have to agree on.
@@ -3714,6 +3739,11 @@ final class Desk {
         // the geometry. Dividing the pty's pixel height by `pictureRows` is what built a 33.46 px cell
         // out of a 33 px one, i.e. a frame 20 px taller than the cells it is drawn on.
         let area = (top: 1 + barRows, left: 1, cols: geometry.cols, rows: pictureRows)
+        // The cell a *frame* is made of: the terminal's cell at `dpr` device pixels per reported pixel
+        // (issue #206). `cellSize` is what the terminal answered; a frame is device pixels, so the
+        // picture's cell is `pictureCell(scale: dpr)` — the wall's arithmetic, on the wall's rule.
+        let dpr = Self.mirrorDpr(options)
+        let cell = geometry.pictureCell(scale: dpr)
         // The source's own size, so the grid never asks for a box bigger than the source
         // (issue #69: ScreenCaptureKit pads that with black instead of upscaling).
         let layout = TileGrid.make(geometry: geometry, rows: pictureRows, aspect: aspect,
@@ -3721,16 +3751,21 @@ final class Desk {
                                    bpp: writer.format.bytesPerPixel, scale: effectiveScale,
                                    fillsCells: placeholderFillsCells,
                                    source: Viewport.layoutSource(crop: crop, full: fullRect),
-                                   area: area)
+                                   area: area, dpr: dpr)
         // `chromeAvailable`, not `chromeEnabled`: the bar alone is enough reason to lay the chrome
         // out (a handed-over mirror runs `--bar` with no `--dev`), and gating on the `--dev` flag
         // here left `chromeGeometry` nil, so `drawChrome` bailed and the bar never appeared. Caught
         // by `testAMockMirrorDrawsItsBar`; the merge of #76 is where this gate regressed.
         // One line that makes the mirror's geometry answerable without a screenshot: the pane, the
         // cell, the source, and what the fit made of them. "The display page is smaller than the
-        // pane" has to be diagnosable by reading a number, not by looking at a picture.
+        // pane" has to be diagnosable by reading a number, not by looking at a picture — and "the
+        // picture does not fill its box" is answered by the cell's *own* history: what the terminal
+        // reported and what it was multiplied by (issue #206).
+        let reported = geometry.cellSize
+        let cellNote = dpr == 1 ? ""
+            : " (\(Int(reported.w))x\(Int(reported.h)) reported x\(Self.trim(dpr)))"
         Log.write("krd: mirror grid \(layout.paneCols)x\(layout.paneRows) cells at "
-                  + "\(Int(geometry.cellSize.w))x\(Int(geometry.cellSize.h)) px, "
+                  + "\(Int(cell.w))x\(Int(cell.h)) px\(cellNote), "
                   + "pane \(geometry.cols)x\(geometry.rows), src "
                   + "\(Int(layout.sourceW))x\(Int(layout.sourceH)) px, "
                   + "fit \(String(format: "%.3f", layout.fit)), "
