@@ -32,6 +32,104 @@ enum PanelCaptureError: Error, Equatable {
     case failed(String)    // anything else, message only
 }
 
+/// Who macOS asks for the Screen Recording grant when a capture is refused (issue #219).
+///
+/// TCC does not ask the process that calls ScreenCaptureKit. It asks that process's **responsible
+/// process** — the app the user started, or the login session it runs in — and a child inherits it,
+/// so one grant covers everything a session runs. Two measurements from this tree:
+///
+///  * a shell inside a terminal app: the grant is the *terminal app's*. The TCC log line for an
+///    access request krd itself made reads `from Sub:{com.superlogical.rex.server}`
+///    `Resp:{… responsible_path=…/Rex Server.app/Contents/MacOS/rex}`, and a freshly built,
+///    never-granted ad-hoc binary captures from that shell — the answer was Rex's, not krd's.
+///  * an SSH login session: `sshd` runs it under `/usr/libexec/sshd-keygen-wrapper`, which is the
+///    path that answers. Measured on the tart VM: its TCC database grants `kTCCServiceScreenCapture`
+///    to that path and has **no** krd row at all, and a never-granted binary copied there captures
+///    over SSH.
+///
+/// So the binary's own identifier and signature decide nothing here — which is also why
+/// `tccutil reset ScreenCapture com.kkrt.macdesk` answers `-10814 No such bundle identifier`: that
+/// command resolves *bundle* identifiers through LaunchServices, and a bare executable's identifier
+/// is not one of them. What the sentences below name is the process a reader has to grant.
+enum CaptureAuthority: Equatable {
+    /// The GUI terminal app a shell runs under (`TERM_PROGRAM`).
+    case terminalApp(String)
+    /// The process an SSH login session runs under: `sshd`'s session wrapper.
+    case sshLoginSession
+    /// Neither fact is available (no SSH, no `TERM_PROGRAM`): the sentences stay generic.
+    case unknown
+
+    /// What System Settings lists when an SSH session is the thing being granted. `sshd` runs every
+    /// login session under this path, so granting it covers `ssh host krd` and everything else that
+    /// session starts — including a binary that was never granted and never will be.
+    static let sshLoginProcess = "/usr/libexec/sshd-keygen-wrapper"
+
+    /// Which session this process is in, from the two facts a session puts in its environment.
+    ///
+    /// SSH first: an SSH session's shell is not a child of the terminal app on the reader's desk, so
+    /// `TERM_PROGRAM` — which the client forwards, and which names the *client's* terminal — is not
+    /// the process that answers for it. `SSH_CONNECTION`/`SSH_TTY` are what `sshd` sets in every
+    /// login session.
+    static func current(_ environment: [String: String]) -> CaptureAuthority {
+        if environment["SSH_CONNECTION"] != nil || environment["SSH_TTY"] != nil {
+            return .sshLoginSession
+        }
+        if let program = environment["TERM_PROGRAM"], !program.isEmpty {
+            return .terminalApp(program)
+        }
+        return .unknown
+    }
+
+    /// `Apple_Terminal` is the identifier; the row in System Settings says `Terminal`, so that one
+    /// is spelled out. (`WallNotice` maps the same pair, for a caller that hands it a verbatim
+    /// `TERM_PROGRAM`.)
+    private static func shown(_ program: String) -> String {
+        program == "Apple_Terminal" ? "Terminal" : program
+    }
+
+    /// The name to grant, or `nil` when krd cannot tell who that is (a footer then says "your
+    /// terminal").
+    var grantTarget: String? {
+        switch self {
+        case let .terminalApp(program): return Self.shown(program)
+        case .sshLoginSession: return Self.sshLoginProcess
+        case .unknown: return nil
+        }
+    }
+
+    /// The `next` line of a failed `--list`: which process needs the grant, and where to give it.
+    /// The framework's own words ("The user declined TCCs …") do not say whose grant is missing,
+    /// and "this binary" — what this line used to say — is the one answer that is never right.
+    var grantAdvice: String {
+        switch self {
+        case let .terminalApp(program):
+            return "grant Screen Recording to \(Self.shown(program)) in System Settings > Privacy "
+                + "& Security > Screen Recording, then re-run"
+        case .sshLoginSession:
+            return "grant Screen Recording to \(Self.sshLoginProcess) (the process an SSH session "
+                + "runs under) in System Settings > Privacy & Security > Screen Recording, then "
+                + "reconnect and re-run"
+        case .unknown:
+            return "grant Screen Recording to the app krd was started from in System Settings > "
+                + "Privacy & Security > Screen Recording, then re-run"
+        }
+    }
+
+    /// The one line a refused capture says on stderr — and in the wall's footer, when a mirror hands
+    /// the pane back with `--said`. The terminal case keeps the sentence it has always had: the
+    /// reader is looking at that terminal, and a footer has one row. The SSH case cannot: there is no
+    /// terminal there, so it names the process that actually answers.
+    var deniedSentence: String {
+        switch self {
+        case .terminalApp, .unknown:
+            return "Screen Recording is off for this terminal"
+        case .sshLoginSession:
+            return "Screen Recording is off for this SSH session - grant it to "
+                + Self.sshLoginProcess + " in System Settings"
+        }
+    }
+}
+
 /// One picture of one panel, once — the landing screen's whole capture path.
 ///
 /// `Capture.swift` is not touched from here on purpose. It owns the mirror's single long-lived

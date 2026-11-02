@@ -394,11 +394,15 @@ krd: frame 1920x1200 px, grid wants 1920x1200 px (118x38 cells of 17.0x33.0 px, 
 
 ### 23b. 每块面板都是 `no picture`，页脚让你去给屏幕录制权限
 
-**原因。** macOS 的屏幕录制权限是发给「负责的应用」的。krd 从终端里启动时，这个权限属于那个终端
-（Terminal、WezTerm、iTerm、Ghostty），不属于 krd——在系统设置里「加 krd」没有用。没有权限时
-`SCScreenshotManager` 对每块面板都返回 `-3801`（`userDeclined`），墙就画成遮罩。
-**解决。** 系统设置 → 隐私与安全性 → 屏幕录制 → 勾上你运行 krd 的那个终端，然后重启该终端。
-有权限之后 `krd --list` 就能列出窗口。
+**原因。** macOS 的屏幕录制权限是发给「负责的应用」的（issue #219）。krd 从终端里启动时，这个权限属于那个
+终端（Terminal、WezTerm、iTerm、Ghostty），不属于 krd——在系统设置里「加 krd」没有用。走 **SSH** 时负责进程是
+`sshd` 跑会话的那个进程 `/usr/libexec/sshd-keygen-wrapper`，所以那里要授权的就是那个路径，给 krd 重签多少
+次都没用。没有权限时 `SCScreenshotManager` 对每块面板都返回 `-3801`（`userDeclined`），墙就画成遮罩。
+**解决。** 系统设置 → 隐私与安全性 → 屏幕录制 → 勾上你运行 krd 的那个终端（然后重启该终端），**或者**
+用 `+` 把 `/usr/libexec/sshd-keygen-wrapper` 加进去（`Cmd-Shift-G` 可以直接输路径）并重连 —— 之后这个 SSH
+会话里任何 krd 都能采集，签名无所谓。krd 会把它需要的那个名字说出来：页脚是
+`no picture - grant Screen Recording to …`，`--list` 和起不来的 `--mirror` 会写在 stderr 上。
+有权限之后 `krd --list` 就能列出窗口。完整的表在 DEPLOY.md §3。
 
 ### 23d. 回到墙之后，某个窗口的画面还盖在上面
 
@@ -438,11 +442,18 @@ krd: frame 1920x1200 px, grid wants 1920x1200 px (118x38 cells of 17.0x33.0 px, 
 
 ### 26. `-3801 user declined`，或者重编一次权限就没了
 
-**根因。** TCC 把屏幕录制授权记在**代码签名**上。ad-hoc 签名（`codesign -s -`）每次重编都产生新的 cdhash，
-系统看到的是另一个 App，旧授权自然对不上。
-**对策。** 装到固定路径、用稳定身份签 —— `install.sh` 默认就是这么做的（或
-`KRD_SIGN_IDENTITY="Apple Development: …" ./install.sh`）。identifier `com.kkrt.macdesk` 必须冻住 ——
-改它等于新建一条 TCC 记录，得重新授权。
+**根因。** 两件不同的事，krd 现在写出的句子会把它们分开（§23b）：
+
+- **常见的那种**是：授权从来没给过「负责进程」—— 终端 App，或者 SSH 下的
+  `/usr/libexec/sshd-keygen-wrapper`。重编不会丢这种授权：一个刚编出来的 `Signature=adhoc` 二进制，
+  从已授权的终端里能采集，从已授权的 SSH 里也能采集（实测，issue #219）。什么都不用重签，去授权 krd 报出的
+  那个进程。
+- **少见的那种**是：授权记在二进制**自己**身上（用 `+` 加的，或 `launchd` 那种，也就是 krd 自己就是负责进程
+  的情况）。这种记录按代码要求（csreq）匹配，所以 ad-hoc 签名（`codesign -s -`，每次编译新 cdhash）会让它
+  失效。
+**对策。** 按二进制记的那种：装到固定路径、用稳定身份签 —— `install.sh` 默认就是这么做的（或
+`KRD_SIGN_IDENTITY="Apple Development: …" ./install.sh`），identifier `com.kkrt.macdesk` 必须冻住，
+因为记录挂在它上面。常见的那种完全不用签名：去授权终端 App 或 sshd wrapper（DEPLOY.md §3）。
 
 ### 27. 画面正常，但点击和按键没反应
 

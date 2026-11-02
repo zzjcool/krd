@@ -1365,7 +1365,7 @@ extension WallCanvasTests {
         let layout = makeLayout(fixtureState(), cols: 137, rows: 44, model)
         var paints = WallSlotPaints()
         for slot in 0...3 { paints.mark(slot: slot, .mask) }
-        paints.notice = .screenRecordingDenied(terminal: "Apple_Terminal")
+        paints.notice = .screenRecordingDenied(grantTo: "Apple_Terminal")
         let lines = canvas.lines(cols: 137, rows: 44, model: model, layout: layout, focus: nil,
                                  paints: paints)
         let footer = lines[layout.footerRow - 1]   // footerRow is 1-based
@@ -1385,12 +1385,17 @@ extension WallCanvasTests {
     }
 
     func testAnUnknownTerminalGetsTheGenericSentence() {
-        let notice = WallNotice.screenRecordingDenied(terminal: nil)
+        let notice = WallNotice.screenRecordingDenied(grantTo: nil)
         XCTAssertEqual(notice.text(bullet: "-", dash: " - "),
                        "- no picture - grant Screen Recording to your terminal")
         // A named one keeps its own name: iTerm and friends are what the grant is actually given to.
-        XCTAssertEqual(WallNotice.screenRecordingDenied(terminal: "WezTerm").text(bullet: "-", dash: " - "),
+        XCTAssertEqual(WallNotice.screenRecordingDenied(grantTo: "WezTerm").text(bullet: "-", dash: " - "),
                        "- no picture - grant Screen Recording to WezTerm")
+        // An SSH session has no terminal app to name, so the name is the login wrapper's path — the
+        // one string a reader can find in System Settings (issue #219).
+        XCTAssertEqual(WallNotice.screenRecordingDenied(grantTo: CaptureAuthority.sshLoginProcess)
+                        .text(bullet: "-", dash: " - "),
+                       "- no picture - grant Screen Recording to /usr/libexec/sshd-keygen-wrapper")
     }
 
     func testWithoutANoticeTheFooterStillExplainsTheClick() {

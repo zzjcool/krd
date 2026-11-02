@@ -158,10 +158,13 @@ enum WallNotice: Equatable {
     /// one terminal rather than a probe - krd does not ask a terminal what it supports, and the
     /// alternative here is an empty wall with no explanation.
     case terminalCannotShowPictures(terminal: String)
-    /// Every panel in the frame failed with `denied`: the terminal app krd runs under has not been
-    /// granted Screen Recording. `terminal` is `TERM_PROGRAM` when the terminal says (Terminal
-    /// writes `Apple_Terminal`), because "grant it to this app" is only actionable with a name.
-    case screenRecordingDenied(terminal: String?)
+    /// Every panel in the frame failed with `denied`: the process macOS asks for the Screen
+    /// Recording grant has not been granted it. `grantTo` is the name a reader has to find in System
+    /// Settings (`CaptureAuthority.grantTarget`): a terminal app — `TERM_PROGRAM`, where `Terminal`
+    /// writes `Apple_Terminal`, which is why that one is spelled out below — or, in an SSH session,
+    /// `/usr/libexec/sshd-keygen-wrapper`. `nil` when krd cannot tell, and the sentence says "your
+    /// terminal".
+    case screenRecordingDenied(grantTo: String?)
     /// The child mirror krd spawned for a clicked picture exited without doing its job: the code and
     /// whatever it said on stderr. Without this the click looks like a no-op - the pane blinks and
     /// the wall comes straight back - and the reason is only in a log file nobody opens.
@@ -173,8 +176,8 @@ enum WallNotice: Equatable {
         case let .terminalCannotShowPictures(terminal):
             return "\(bullet) \(terminal) cannot draw pictures\(dash)use rex, Ghostty, kitty "
                 + "or WezTerm"
-        case let .screenRecordingDenied(terminal):
-            let name = terminal.map { $0 == "Apple_Terminal" ? "Terminal" : $0 } ?? "your terminal"
+        case let .screenRecordingDenied(grantTo):
+            let name = grantTo.map { $0 == "Apple_Terminal" ? "Terminal" : $0 } ?? "your terminal"
             return "\(bullet) no picture\(dash)grant Screen Recording to \(name)"
         case let .mirrorStopped(code, message):
             if let message, !message.isEmpty {
