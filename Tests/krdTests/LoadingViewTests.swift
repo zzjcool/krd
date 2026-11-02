@@ -194,10 +194,12 @@ final class LoadingViewTests: XCTestCase {
 
     // MARK: - the fallback
 
-    /// The card a terminal without `a=f` gets is the card it always got — byte for byte — and it
-    /// still costs what it always cost. This is the "before" half of the issue's measurement, taken
-    /// with the same instrument as the "after" half.
-    func testWithoutAnimationFramesTheCardIsExactlyTodays() {
+    /// The card a terminal without `a=f` gets is still the mosaic on its 110 ms timer, and it still
+    /// costs what it always cost — this is the "before" half of the issue's measurement, taken with
+    /// the same instrument as the "after" half. The *drawing* inside it changed when the mascot
+    /// became one generated geometry (it is the same crab as the picture now, at `lo`); the
+    /// transport, which is what #217 is about, did not.
+    func testWithoutAnimationFramesTheCardIsStillTheMosaicAtItsOldCost() {
         let (card, sink) = view(animates: false)
         card.start()
         XCTAssertFalse(sink.text.contains("\(esc)_"), "no kitty graphics at all on this path")

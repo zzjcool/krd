@@ -377,7 +377,9 @@ The mascot shown while the first frame is in flight used to be re-rasterised and
 half-blocks every 110 ms: **22,631 B per tick** on a 137×44 pane, i.e. ~206 KB/s while it is up
 (measured through the card's own sink and confirmed on a pty — the design's older `188 KiB/s` figure
 was the same card, so it was in the right place and the picture data is only 3,888 B of those 22.6 KB:
-the per-cell 24-bit SGR is the rest).
+the per-cell 24-bit SGR is the rest). The drawing inside it has since been replaced by the brand's
+generated one (`MascotArt`, §"the mascot" in `docs/brand/tui/README.md`); the transport below is what
+this section is about, and it did not change. The numbers below are the current ones.
 
 It is now four frames transmitted **once** and played by the terminal. One `?2026` block, written by
 `LoadingView.start()`, every APC carrying `q=2` so no reply can land on stdin after `startInput()`:
@@ -395,7 +397,7 @@ ESC [ ? 2026 l
 ```
 
 Then **nothing**: the animated card has no timer at all, so a 3 s window costs what the first write
-cost — **3,418 B = 1.14 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 633,789 B
+cost — **6,934 B = 2.31 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 625,320 B
 for the mosaic in the same window. `stop()` clears the card's 20 rows and deletes the image
 (`a=d,d=i,i=<id>`): a pixel-sized placement is not part of the text grid, so clearing cells would
 leave the mascot floating over the frame that just arrived.

@@ -206,7 +206,7 @@ krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检
 ## 吉祥物
 
 <p align="center">
-  <img src="docs/media/mascot.png" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="680">
+  <img src="docs/media/mascot.svg" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="680">
 </p>
 
 **一只寄居蟹** —— 不只是因为它在那几版草稿里最可爱。
@@ -218,8 +218,10 @@ krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检
 其余的地方也对得上：钳子是一次抓屏，一次一帧；两根眼柄上的眼睛是它必须盯着的两样东西
 （它在读的那块屏、它在画的那个终端）；壳上那圈螺纹，和发送到线上去的 tile 用同一种圆角格子画。
 
-**同一份几何，由终端自己画两遍** —— 拟物版是 24-bit 半块像素，字符版是每格一个 ASCII 字符 ——
-所以这个 logo 和产品本身是同一个材料做的。`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。
+**只画一遍**：路径写在 `docs/brand/tui/mascot.mjs`，三个渲染器读它 —— 上面这张 SVG、lab 打印的终端
+精灵图（24-bit 半块，或每格一个 ASCII 字符）、以及 `MascotRaster`：krd 在首帧到达前那张加载卡背后的
+CoreGraphics 渲染器。所以这一页上的蟹**就是**加载卡里那只，不是亲戚：同一份几何生成成 Swift
+（`MascotArt.swift`），两边没法走样。`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。
 
 ## 联系
 
