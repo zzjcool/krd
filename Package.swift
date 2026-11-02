@@ -84,17 +84,20 @@ var targets: [Target] = [
 // the release binary is the same size with the variable set and unset — measured in the PR).
 if headlessVT {
     targets.append(contentsOf: [
-        // Local, unpinned: the artifact this machine built. Once `ghostty-vt.xcframework.zip` is
-        // published as a release asset, pinning it is one edit — delete the `path:` line below and
-        // uncomment the five under it (and then `KRD_VT_XCFRAMEWORK` only has to be non-empty, so CI
-        // can pass any value):
-        //
-        //     .binaryTarget(
-        //         name: "KrdVT",
-        //         url: "https://github.com/zzjcool/krd/releases/download/vt-v1.4.0/ghostty-vt.xcframework.zip",
-        //         checksum: "c0c9a32bf0ce5c56a7a1f7b13f10125740553e8c62ed6d878b707dd5d0b950ce"
-        //     ),
-        .binaryTarget(name: "KrdVT", path: localFrameworkPath()),
+        // Two forms, one switch. A **path** (`…/ghostty-vt.xcframework`, what
+        // `scripts/build-vt-xcframework.sh` prints) links the artifact this machine built; any other
+        // non-empty value links the published one **pinned by URL and checksum**, which is what CI
+        // passes (`KRD_VT_XCFRAMEWORK: pinned` in `.github/workflows/ci.yml`). The checksum is the
+        // sha256 of the asset at that URL, produced by that script from ghostty tag `v1.4.0` with
+        // Zig 0.17.0 — `scripts/build-vt-xcframework.sh` normalises the zip'"'"'s timestamps, so a rebuild
+        // gives this same number rather than "a checksum nobody can check" (docs/TESTING.md §13).
+        vtSetting.contains("/")
+            ? .binaryTarget(name: "KrdVT", path: localFrameworkPath())
+            : .binaryTarget(
+                name: "KrdVT",
+                url: "https://github.com/zzjcool/krd/releases/download/vt-v1.4.0/ghostty-vt.xcframework.zip",
+                checksum: "c0c9a32bf0ce5c56a7a1f7b13f10125740553e8c62ed6d878b707dd5d0b950ce"
+            ),
         .target(name: "KrdHeadlessVT", dependencies: ["KrdVT"], path: "Sources/KrdHeadlessVT"),
     ])
 }

@@ -375,7 +375,12 @@ footer 的暗色 `2;37` 会变成 `2;37;4`，同一行右侧的 `N panels` 仍�
 ```bash
 scripts/build-vt-xcframework.sh                          # 约 1 分钟，需要 xcodebuild；会打印 sha256
 KRD_VT_XCFRAMEWORK=.artifacts/ghostty-vt.xcframework swift test --filter HeadlessRender
+KRD_VT_XCFRAMEWORK=pinned swift test --filter HeadlessRender   # 已发布资产，URL 与 sha256 固定
 ```
+
+这个变量装的是**两种东西之一**。路径（含 `/`）链接你刚构建的产物；其它任何非空值链接以 `vt-v1.4.0`
+发布的资产，**在 `Package.swift` 里用 URL 与 sha256 钉住**——CI 传的就是它，所以格子断言在每个 PR 上都跑，
+而不只在一台构建过它的机器上跑（`ci.yml` 的 `Run tests` 步骤）。
 
 **没有这份产物时什么都不会发生，这正是设计。** `KRD_VT_XCFRAMEWORK` 未设置时，`Package.swift` 既不声明
 `KrdVT` 二进制目标也不声明 `KrdHeadlessVT` 包装层，测试文件整个主体都在 `#if KRD_HEADLESS_VT` 里、编译成

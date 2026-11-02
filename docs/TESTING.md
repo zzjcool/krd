@@ -506,7 +506,13 @@ attribute, not a byte.
 ```bash
 scripts/build-vt-xcframework.sh                          # ~1 min, needs xcodebuild; prints the sha256
 KRD_VT_XCFRAMEWORK=.artifacts/ghostty-vt.xcframework swift test --filter HeadlessRender
+KRD_VT_XCFRAMEWORK=pinned swift test --filter HeadlessRender   # the published asset, URL+sha256
 ```
+
+The variable carries **one of two things**. A path (anything containing `/`) links the artifact you
+just built. Any other non-empty value links the artifact published as the `vt-v1.4.0` release asset,
+**pinned by URL and sha256 in `Package.swift`** — that is what CI passes, so the cell assertions run
+on every PR rather than only on a machine that built them (`ci.yml`, the `Run tests` step).
 
 **Without the artifact nothing happens, and that is the design.** With `KRD_VT_XCFRAMEWORK` unset,
 `Package.swift` declares neither the `KrdVT` binary target nor the `KrdHeadlessVT` wrapper, the test
