@@ -33,9 +33,6 @@ enum MascotRaster {
         case picture
     }
 
-    /// How a dot is decided, once the samples are in.
-    private enum Combine { case average, majority }
-
     /// One pose, drawn into `width x height` pixels: RGB triplets, `paper` behind everything.
     ///
     /// `aspect` is how much taller than wide one *output pixel* is: 1 for the picture (square
@@ -44,19 +41,25 @@ enum MascotRaster {
                        style: Style, paper: MascotRGB) -> [UInt8] {
         switch style {
         case .mosaic:
-            return render(pose: pose, width: width, height: height, aspect: aspect,
-                          samples: 1, antialias: false, combine: .majority, paper: paper)
+            /* one sample per dot, no antialiasing: a half-block cell holds a colour, and a
+               blended edge is a colour nobody chose */
+            return draw(pose: pose, width: width, height: height, aspect: aspect,
+                        samples: 1, antialias: false, snap: true, paper: paper)
         case .picture:
-            return render(pose: pose, width: width, height: height, aspect: aspect,
-                          samples: samples, antialias: true, combine: .average, paper: paper)
+            /* the terminal scales this one, so a soft edge is the edge that survives scaling */
+            return draw(pose: pose, width: width, height: height, aspect: aspect,
+                        samples: samples, antialias: true, snap: false, paper: paper)
         }
     }
 
     /// The same, with the sampling spelled out.
-    private static func render(pose: Int, width: Int, height: Int, aspect: Double,
-                               samples: Int, antialias: Bool, combine: Combine,
-                               paper: MascotRGB) -> [UInt8] {
-        let p = MascotArt.poses[pose % MascotArt.poses.count]
+    private static func draw(pose: Int, width: Int, height: Int, aspect: Double,
+                             samples: Int, antialias: Bool, snap: Bool,
+                             paper: MascotRGB) -> [UInt8] {
+        /* the card increments a counter, but `render` is internal: a negative pose must not be an
+           Array trap on the one path that is painted before anything else is proven */
+        let n = MascotArt.poses.count
+        let p = MascotArt.poses[((pose % n) + n) % n]
         let view = MascotArt.view
         let vx = view[0], vy = view[1], vw = view[2], vh = view[3]
         let ss = max(1, samples), W = width * ss, H = height * ss
@@ -86,27 +89,23 @@ enum MascotRaster {
             ctx.scaleBy(x: CGFloat(kx), y: CGFloat(ky))
             ctx.translateBy(x: CGFloat(-vx), y: CGFloat(-vy))
 
-            /* A pixel-art dot has no room for a hairline: below about a dot and a half a stroke
-               falls between dot centres and comes out dashed, which is what a 36-dot shell's
-               groove did before this floor. */
-            let floor = combine == .majority ? 1.6 * Double(ss) : 0
             for layer in MascotArt.layers {
                 if let only = layer.only, (only == "shut") != p.shut { continue }
-                draw(layer, pose: p, scale: s, minStroke: floor, ctx: ctx)
+                draw(layer, pose: p, scale: s, ss: ss, ctx: ctx)
             }
         }
-        return fold(buffer, width: width, height: height, samples: ss, combine: combine,
-                    palette: combine == .majority ? MascotArt.palette.map(MascotRGB.init(hex:)) : [])
+        return fold(buffer, width: width, height: height, samples: ss, snap: snap,
+                    palette: snap ? MascotArt.palette.map(MascotRGB.init(hex:)) : [])
     }
 
     /// Fold the samples down to one colour per dot.
     ///
-    /// The picture averages, because the terminal will scale it and a soft edge is the one that
-    /// survives scaling. The mosaic takes the *majority* colour instead: a half-block cell is one
-    /// colour, an averaged edge is a third colour nobody chose, and a 36-dot sprite is mostly
-    /// edges. Ties go to the colour nearest the average, so the result is stable.
+    /// One colour per dot. The picture averages its samples, because the terminal will scale it;
+    /// the mosaic has one sample to begin with, so its dot *is* that sample — then snapped to the
+    /// drawing's own palette, because a half-block cell should show a colour the drawing contains
+    /// (the alternative is an antialiased edge that no one chose, on a sprite that is mostly edge).
     private static func fold(_ buffer: [UInt8], width: Int, height: Int, samples ss: Int,
-                             combine: Combine, palette: [MascotRGB]) -> [UInt8] {
+                             snap: Bool, palette: [MascotRGB]) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: width * height * 3)
         let n = ss * ss
         for y in 0..<height {
@@ -118,31 +117,9 @@ enum MascotRaster {
                         r += Int(buffer[q]); g += Int(buffer[q + 1]); b += Int(buffer[q + 2])
                     }
                 }
-                let avg = MascotRGB(r: UInt8((r + n / 2) / n), g: UInt8((g + n / 2) / n),
-                                    b: UInt8((b + n / 2) / n))
-                var c = avg
-                if case .majority = combine {
-                    var counts: [Int: Int] = [:]
-                    for j in 0..<ss {
-                        for i in 0..<ss {
-                            let q = ((y * ss + j) * width * ss + x * ss + i) * 4
-                            counts[(Int(buffer[q]) << 16) | (Int(buffer[q + 1]) << 8) | Int(buffer[q + 2]),
-                                   default: 0] += 1
-                        }
-                    }
-                    let best = counts.max { a, b in
-                        a.value == b.value ? keyDistance(a.key, avg) > keyDistance(b.key, avg)
-                                           : a.value < b.value
-                    }
-                    if let best {
-                        c = MascotRGB(r: UInt8((best.key >> 16) & 0xff), g: UInt8((best.key >> 8) & 0xff),
-                                      b: UInt8(best.key & 0xff))
-                    }
-                    /* and to the drawing's own palette: one colour per dot means the dot shows a
-                       colour the drawing actually contains, which is what makes a 36-dot sprite look
-                       drawn rather than resampled */
-                    c = nearest(c, in: palette)
-                }
+                var c = MascotRGB(r: UInt8((r + n / 2) / n), g: UInt8((g + n / 2) / n),
+                                  b: UInt8((b + n / 2) / n))
+                if snap { c = nearest(c, in: palette) }
                 let o = (y * width + x) * 3
                 out[o] = c.r; out[o + 1] = c.g; out[o + 2] = c.b
             }
@@ -150,16 +127,10 @@ enum MascotRaster {
         return out
     }
 
-    private static func keyDistance(_ key: Int, _ c: MascotRGB) -> Int {
-        let dr = ((key >> 16) & 0xff) - Int(c.r), dg = ((key >> 8) & 0xff) - Int(c.g),
-            db = (key & 0xff) - Int(c.b)
-        return dr * dr + dg * dg + db * db
-    }
-
     // MARK: one layer
 
-    private static func draw(_ layer: MascotLayer, pose: MascotPose, scale: Double,
-                             minStroke: Double, ctx: CGContext) {
+    private static func draw(_ layer: MascotLayer, pose: MascotPose, scale: Double, ss: Int,
+                             ctx: CGContext) {
         let path = cgPath(layer.d)
         ctx.saveGState()
         /* A group's clip lives in its *parent's* space, so it is applied before the group's own
@@ -179,7 +150,7 @@ enum MascotRaster {
         ctx.setAlpha(CGFloat(layer.alpha))
 
         let rule: CGPathFillRule = layer.evenOdd ? .evenOdd : .winding
-        let width = strokeWidth(layer, scale, minStroke: minStroke)
+        let width = strokeWidth(layer, scale, ss: ss)
         if layer.under, let stroke = layer.stroke {
             apply(stroke, path: path, strokeWidth: width, rule: rule, ctx: ctx)
         }
@@ -192,11 +163,20 @@ enum MascotRaster {
         ctx.restoreGState()
     }
 
-    /// The stroke's width in *buffer* pixels: the drawing's own width, and never thinner than one
-    /// output pixel — the lab's `minPx`, which is what keeps a 6.4-unit outline visible at 36 dots.
-    private static func strokeWidth(_ layer: MascotLayer, _ scale: Double,
-                                    minStroke: Double) -> Double {
-        max(layer.width * scale, minStroke)
+    /// The stroke's width in **user units**, which is what `setLineWidth` takes: the drawing's own
+    /// width, floored at `minPx` output pixels.
+    ///
+    /// The division is the whole point. `minPx` is in *output* pixels (`vector.mjs` masks a stroke
+    /// by radius in buffer pixels: `max(w * s, minPx) * ss / 2`), and the context here already
+    /// carries `scale`, so a width handed to `setLineWidth` is multiplied by the scale on its way
+    /// into the buffer. Without dividing, a 2.1-px floor became 2.1 *user units* — 0.24 buffer
+    /// pixels on the mosaic, 1.2 on the picture — i.e. a hairline: the mosaic kept its outline only
+    /// because a non-antialiased hairline still lands on some dot centres (which is why it looked
+    /// dashed), and the picture lost every outline it had.
+    private static func strokeWidth(_ layer: MascotLayer, _ scale: Double, ss: Int) -> Double {
+        guard scale > 0 else { return layer.width }
+        let buffer = max(layer.width * scale, layer.minPx * Double(ss))
+        return buffer / scale
     }
 
     /// Paint the current path: a colour fills or strokes it; a gradient is drawn through it as a
@@ -267,7 +247,7 @@ enum MascotRaster {
     private static var pathCache: [String: CGPath] = [:]
 
     /// `M x y`, `L x y`, `C x1 y1 x2 y2 x y`, `Z` — the only commands vector.mjs emits.
-    static func cgPath(_ d: String) -> CGPath {
+    private static func cgPath(_ d: String) -> CGPath {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         if let hit = pathCache[d] { return hit }

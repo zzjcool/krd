@@ -188,6 +188,38 @@ final class MascotArtTests: XCTestCase {
         return n
     }
 
+    /// The ink is *in* the picture, in the middle of the graphic, at the sizes the card uses.
+    ///
+    /// This is the one assertion with a bug behind it: `setLineWidth` takes user units and the
+    /// context already carries the drawing's scale, so a width computed in buffer pixels came out
+    /// 8x too thin — the mosaic kept a dashed outline (a hairline still lands on some dot centres)
+    /// and the picture lost every stroke it had: shell rim, spiral, eye rims, mouth. Every layer
+    /// was still painted and every byte still accounted for, so nothing else here noticed. Counting
+    /// ink is the cheap way to notice a drawing that has quietly become filled shapes only.
+    func testTheMosaicAndThePictureBothGetTheirStrokes() {
+        let dots = MascotRaster.render(pose: 2, width: 36, height: 36, aspect: 1.25,
+                                       style: .mosaic, paper: paper)
+        let picture = MascotRaster.render(pose: 2, width: 36, height: 45, aspect: 1,
+                                          style: .picture, paper: paper)
+        // measured 156 and 55; the broken build had 0 in the picture and 20 in the mosaic
+        XCTAssertGreaterThan(ink(dots), 100, "the 36-dot crab has no outline")
+        XCTAssertGreaterThan(ink(picture), 30, "the picture's crab has no outline")
+    }
+
+    /// Pixels within 24 of one colour, RGB-summed — loose enough for antialiasing, tight enough
+    /// that a blend of sand and paper does not count as ink.
+    private func ink(_ bytes: [UInt8], _ colour: MascotRGB) -> Int {
+        stride(from: 0, to: bytes.count, by: 3).reduce(0) { n, i in
+            let d = abs(Int(bytes[i]) - Int(colour.r)) + abs(Int(bytes[i + 1]) - Int(colour.g))
+                + abs(Int(bytes[i + 2]) - Int(colour.b))
+            return d <= 24 ? n + 1 : n
+        }
+    }
+
+    private func ink(_ bytes: [UInt8]) -> Int {
+        ink(bytes, MascotRGB(hex: "#3b2416"))
+    }
+
     /// How much of the picture is sclera: the blink turns the whites into the lid's coral.
     private func cream(_ bytes: [UInt8]) -> Int {
         let sclera = MascotRGB(hex: "#fffaf2")

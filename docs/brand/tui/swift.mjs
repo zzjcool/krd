@@ -62,6 +62,7 @@ export function emitSwift(scene, { lod = 'lo', beats, view, source = 'docs/brand
       `fill: ${l.fill ? str(paint(l.fill)) : 'nil'}`,
       `stroke: ${l.stroke ? str(paint(l.stroke)) : 'nil'}`,
       `width: ${num(l.w || 0)}`,
+      `minPx: ${num(l.minPx || 0)}`,
       `alpha: ${num(l.alpha ?? 1, 3)}`,
       `evenOdd: ${l.rule === 'evenodd'}`,
       `under: ${!!l.under}`,
@@ -89,6 +90,9 @@ struct MascotLayer {
     let fill: String?
     let stroke: String?
     let width: Double
+    /// The stroke's floor in *output* pixels (the drawing's \`minPx\`): at 36 dots a 6.4-unit
+    /// outline is 0.9 px and would vanish on the dot it lands between.
+    let minPx: Double
     let alpha: Double
     let evenOdd: Bool
     /// Paint the stroke before the fill (SVG's \`paint-order: stroke\`): an outline that only shows

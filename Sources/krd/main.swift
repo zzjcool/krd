@@ -2000,8 +2000,8 @@ final class Desk {
         }
         // One line about the first thing on screen, because "the mascot does not move" has no other
         // explanation anywhere: the two transports draw different things, and which one ran is a
-        // probe's answer rather than a build's. The `a=f` card is the one that costs ~1.2 KB and
-        // then nothing (#217); the mosaic is the 110 ms card, unchanged.
+        // probe's answer rather than a build's. The `a=f` card is the one that costs one transmit
+        // (~6.9 KB over its four frames) and then nothing (#217); the mosaic is the 110 ms card.
         Log.write("krd: loading card " + (card.animates
             ? "as an a=f animation (the terminal plays the mascot, krd sends it once)\n"
             : "as the still mosaic (the terminal did not answer the a=f probe)\n"))

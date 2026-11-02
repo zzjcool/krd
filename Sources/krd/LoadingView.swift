@@ -69,7 +69,7 @@ final class LoadingView {
     /// Which transport this card got, decided once by the probe before the card exists (D5). Never
     /// re-decided here: the picture path and the mosaic path draw different things, and a mid-flight
     /// switch would leave the terminal holding an image nobody deletes.
-    private(set) var animates: Bool
+    let animates: Bool
     /// The cell the caller measured. Only the animated path reads it (`pictureHeight`); the mosaic is
     /// expressed in cells and needs no pixel size.
     private let cell: (w: Double, h: Double)
@@ -96,7 +96,11 @@ final class LoadingView {
     }
 
     private var originRow: Int { max(0, (paneRows - (Self.cellRows + 2)) / 2) }
-    private var originCol: Int { max(0, (paneCols - Self.cellCols) / 2) + 1 }
+    /// The card's left edge, one-based. The mosaic indents with `originCol` spaces and the picture
+    /// is placed on `originCol + 1`, so both transports start on the same column — they did not
+    /// before this: the mosaic sat one cell left of the picture, which is invisible until a
+    /// screenshot of one is laid over the other.
+    private var originCol: Int { max(0, (paneCols - Self.cellCols) / 2) }
 
     func start() {
         guard timer == nil, !painted else { return }
@@ -177,7 +181,7 @@ final class LoadingView {
         for row in 0..<(Self.cellRows + 2) {
             out += "\u{1B}[\(originRow + row + 1);1H\u{1B}[2K"
         }
-        out += "\u{1B}[\(originRow + 1);\(originCol)H"
+        out += "\u{1B}[\(originRow + 1);\(originCol + 1)H"
         out += emit.bytes
         out += "\u{1B}[?2026l"
         out += labels()
@@ -210,12 +214,19 @@ final class LoadingView {
     /// a `c`/`r` placement to fill the box and one that fits it with the aspect preserved then agree
     /// with each other, and both agree with the mosaic the fallback draws.
     ///
-    /// The guard is not arithmetic paranoia: `Int(_:)` traps on infinity, so a `0 x 0` cell (a pane
-    /// that has not been measured yet) would crash the one card that is painted *before* anything
-    /// else is proven. 45 is the 8×20 cell's own answer, which is what an unmeasured pane gets.
+    /// The guard is not arithmetic paranoia: `Int(_:)` traps on NaN and on infinity, so a cell that
+    /// is not a size — `0 x 0` from an unmeasured pane, or `inf` from `--cell` — would crash the one
+    /// card that is painted *before* anything else is proven. 45 is the 8×20 cell's own answer,
+    /// which is what an unmeasured pane gets.
     private static func pictureHeight(cellW: Double, cellH: Double) -> Int {
-        guard cellW > 0, cellH > 0 else { return 45 }
-        return max(1, Int((Double(dotW) * cellH / (2 * cellW)).rounded()))
+        /* `Int(_:)` traps on NaN, on ±infinity and on anything out of range, and this is the one
+           line that runs before anything else in the process is proven. `--cell 17xinf` parses
+           (`Double("inf")`), so "a cell nobody measured" is not the only way to get here with a
+           number that is not a size. */
+        guard cellW.isFinite, cellH.isFinite, cellW > 0, cellH > 0 else { return 45 }
+        /* and a cell narrow enough asks for a picture thousands of rows tall: four frames of that
+           is gigabytes, allocated synchronously inside `start()` */
+        return min(max(1, Int((Double(dotW) * cellH / (2 * cellW)).rounded())), 2160)
     }
 
     // MARK: the mosaic (the card animates it)
@@ -267,7 +278,8 @@ final class LoadingView {
     /// decided by the majority of its samples, because an averaged half-block edge is a third colour
     /// nobody chose and this sprite is mostly edges.
     static func mosaicDots(pose: Int, cell: (w: Double, h: Double)) -> [UInt8] {
-        let aspect = cell.w > 0 && cell.h > 0 ? cell.h / (2 * cell.w) : 1.25
+        let sane = cell.w.isFinite && cell.h.isFinite && cell.w > 0 && cell.h > 0
+        let aspect = sane ? cell.h / (2 * cell.w) : 1.25
         return MascotRaster.render(pose: pose, width: dotW, height: dotH, aspect: aspect,
                                    style: .mosaic, paper: paper)
     }
