@@ -95,7 +95,8 @@ enum MascotRaster {
                 draw(layer, pose: p, scale: s, minStroke: floor, ctx: ctx)
             }
         }
-        return fold(buffer, width: width, height: height, samples: ss, combine: combine)
+        return fold(buffer, width: width, height: height, samples: ss, combine: combine,
+                    palette: combine == .majority ? MascotArt.palette.map(MascotRGB.init(hex:)) : [])
     }
 
     /// Fold the samples down to one colour per dot.
@@ -105,7 +106,7 @@ enum MascotRaster {
     /// colour, an averaged edge is a third colour nobody chose, and a 36-dot sprite is mostly
     /// edges. Ties go to the colour nearest the average, so the result is stable.
     private static func fold(_ buffer: [UInt8], width: Int, height: Int, samples ss: Int,
-                             combine: Combine) -> [UInt8] {
+                             combine: Combine, palette: [MascotRGB]) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: width * height * 3)
         let n = ss * ss
         for y in 0..<height {
@@ -140,7 +141,7 @@ enum MascotRaster {
                     /* and to the drawing's own palette: one colour per dot means the dot shows a
                        colour the drawing actually contains, which is what makes a 36-dot sprite look
                        drawn rather than resampled */
-                    c = nearest(c, in: MascotArt.palette.map(MascotRGB.init(hex:)))
+                    c = nearest(c, in: palette)
                 }
                 let o = (y * width + x) * 3
                 out[o] = c.r; out[o + 1] = c.g; out[o + 2] = c.b
