@@ -3,7 +3,8 @@
  *
  * `scene()` is the one drawing everything else is made from — the README's SVG, the lab's half
  * blocks and characters, the favicon, and the loading card krd paints before its first frame (the
- * Swift copy, Sources/krd/MascotArt.swift, is generated from this file by `node build.mjs`).
+ * Swift copy, Sources/krd/MascotArt.swift, is generated from this file by
+ * `node docs/brand/tui/logo-tui.mjs --swift`, i.e. `make mascot`).
  * Change a number here and every output moves with it.
  *
  * Space: 256 x 224 user units, y down, light from the upper left.
