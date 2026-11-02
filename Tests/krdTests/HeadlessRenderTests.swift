@@ -183,6 +183,12 @@ final class HeadlessRenderTests: XCTestCase {
         // Nothing else was written on the row either: the cells past the text are blank, and the
         // only other glyph on it is the bar's cap in the last column. (This is also the assertion
         // that reads a cell nothing wrote to, i.e. that a blank cell reads as blank.)
+        // The range has to be non-empty or this loop asserts nothing at all — the comment below
+        // used to *say* that, and saying it is not the same as being told. A caption that grew to
+        // the bar's cap would turn the assertion into silence, which reads exactly like a pass.
+        XCTAssertLessThan(DisplayWidth.of(expected), layout.barCol - 1,
+                          "\(DisplayWidth.of(expected)) columns of caption in a \(layout.barCol) cell bar "
+                          + "leaves no blank cell to check")
         for col in DisplayWidth.of(expected)..<(layout.barCol - 1) {
             XCTAssertTrue(isBlank(terminal.cell(col: col, row: rect.row - 1)),
                           "row \(rect.row) col \(col + 1) is a leftover the caption did not paint")
