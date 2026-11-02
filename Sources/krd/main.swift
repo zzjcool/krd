@@ -770,6 +770,11 @@ final class Desk {
     /// Written once, in `run()` before anything starts: a reproducible path pins the scale
     /// (issue #73). Nothing else mutates it, so the closure reads are not a race.
     private var options: Options
+    /// Who macOS will ask for the Screen Recording grant this process needs (issue #219): the
+    /// terminal app that owns the shell, or `sshd`'s session wrapper over SSH. Read once from the
+    /// environment, because a session does not change mid-process, and every sentence about a
+    /// refused capture has to name the same process.
+    static let captureAuthority = CaptureAuthority.current(ProcessInfo.processInfo.environment)
     /// `internal`, not `private`, together with the five chrome members below: `PanelWheelRealPathTests`
     /// drives the wheel the way the product does -- reader decision, then `chromeClick`, then the hop
     /// to the main queue, then `scrollPanel` -- and that needs the state `applyLayout`/the 1 Hz tick
@@ -1395,19 +1400,28 @@ final class Desk {
             // act on.
             let granted = CGPreflightScreenCaptureAccess()
             let message = "\(error)".split(whereSeparator: \.isNewline).joined(separator: " ")
+            // Only the not-granted half gets the new advice: "grant to this binary" was wrong in
+            // every context (TCC asks the *responsible* process — the terminal app, or `sshd`'s
+            // session wrapper; issue #219), and the sentence now names that process.
+            let advice = granted
+                ? "the Mac did not answer its window list (asleep, at the login window, or the "
+                    + "window server is gone); retry when it is awake, `krd ax doctor` says which"
+                : Self.captureAuthority.grantAdvice
             let output = ListOutput.failure(
                 code: granted ? "environment" : "permission",
                 exit: granted ? AXExit.environment.rawValue : AXExit.permission.rawValue,
                 message: message,
-                next: granted
-                    ? "the Mac did not answer its window list (asleep, at the login window, or the "
-                        + "window server is gone); retry when it is awake, `krd ax doctor` says which"
-                    : "grant Screen Recording to this binary in System Settings > Privacy & Security "
-                        + "> Screen Recording, then re-run")
+                next: advice)
             if options.benchJSON {
                 FileHandle.standardOutput.write(Data(output.stdout.utf8))
             }
             FileHandle.standardError.write(Data(output.stderr.utf8))
+            // The text path has no object for `next` to ride in, and the framework's own words
+            // ("The user declined TCCs …") do not say whose grant is missing: the advice is a
+            // second stderr line, once. `--json` carries it in the object instead.
+            if !options.benchJSON {
+                FileHandle.standardError.write(Data("krd: \(advice)\n".utf8))
+            }
             exit(output.exit)
         }
 
@@ -2322,7 +2336,9 @@ final class Desk {
             if program == "Apple_Terminal" {
                 paints.notice = .terminalCannotShowPictures(terminal: "Terminal")
             } else if panels.allSatisfy({ denied($0.slot, failures) }) {
-                paints.notice = .screenRecordingDenied(terminal: program)
+                // The process that has to be granted, not "your terminal": over SSH there is no
+                // terminal app in the chain, and the name it needs is the login wrapper (issue #219).
+                paints.notice = .screenRecordingDenied(grantTo: Self.captureAuthority.grantTarget)
             }
         }
         // The link's symptom, read once per paint: the header's pill is a fact about the last tick,
@@ -3179,7 +3195,10 @@ final class Desk {
         // pulled. Every retry fails identically — five of them cost the reader 23 s of a frozen
         // picture — and when this process is a wall's child the wall is blocked on `waitpid` for
         // exactly that long with no way out but `Ctrl-\`. Say why and leave instead.
-        guard framesSinceStreamStart > 0 else { failCapture(Self.setupFailure(error)); return }
+        guard framesSinceStreamStart > 0 else {
+            failCapture(Self.setupFailure(error, authority: Self.captureAuthority))
+            return
+        }
         streamStopAttempts += 1
         let attempt = streamStopAttempts
         guard attempt <= 5 else {
@@ -3229,12 +3248,18 @@ final class Desk {
     /// What a mirror that never showed a frame says before it exits, in the words of the same four
     /// failure modes a wall's mask uses (`PanelCapture.classify`) — one vocabulary for both, so the
     /// footer's sentence and a card's mask can never disagree about why.
-    static func setupFailure(_ error: Error) -> String {
+    ///
+    /// `authority` is passed in rather than read here: the sentence names the process the *reader*
+    /// has to grant, and that fact belongs to the session this process was started in
+    /// (`Desk.captureAuthority`), not to an error value.
+    static func setupFailure(_ error: Error, authority: CaptureAuthority) -> String {
         switch PanelCapture.classify(error) {
         case .windowGone:
             return "the window closed before it could be shown"
         case .denied:
-            return "Screen Recording is off for this terminal"
+            // `-3801`/`-3803` are the TCC answer; *which process* was asked is the one fact the
+            // framework's words never carry, and the reader cannot act without it (issue #219).
+            return authority.deniedSentence
         case .noPixelBuffer:
             return "the capture produced no frames"
         case .failed(let message):
@@ -3831,7 +3856,7 @@ final class Desk {
                 // the main queue because `failCapture` tears the session down, and that is the
                 // queue every other teardown runs on.
                 guard self.framesSinceStreamStart > 0 else {
-                    let message = Desk.setupFailure(error)
+                    let message = Desk.setupFailure(error, authority: Desk.captureAuthority)
                     DispatchQueue.main.async { self.failCapture(message) }
                     self.captureRestarting = false
                     return
@@ -5476,13 +5501,23 @@ Task {
     do {
         try await desk.run()
     } catch {
-        Log.write("krd: \(error)\n")
+        // A refused Screen Recording grant is the one failure whose reason is outside krd and
+        // actionable: the enumeration that discovers it is the first call that can report it, and
+        // the reader gets a sentence naming the process macOS asks — on stderr, and in the wall's
+        // footer on the way back — instead of the framework's raw NSError, or nothing at all (a
+        // `--mirror` typed by hand used to exit 1 with the reason only in a log file; issue #219).
+        // Every other failure keeps the line it has always had.
+        var denied = false
+        if case .denied = PanelCapture.classify(error) { denied = true }
+        let said = denied ? Desk.setupFailure(error, authority: Desk.captureAuthority) : "\(error)"
+        Log.write("krd: \(said)\n")
+        if denied { FileHandle.standardError.write(Data("krd: \(said)\n".utf8)) }
         // A mirror that never started still owes the reader their wall back: same sentence, same
         // footer, instead of an exit that leaves them looking at a terminal that is no longer krd's.
         // A wall that failed has no wall to go back to, and re-exec'ing it here was an infinite
         // remount of the same failure (`returnsToWall`).
         if Desk.returnsToWall(options), let at = options.wallAt {
-            Desk.execSelf(Desk.wallArguments(at: at, exit: 1, said: "\(error)",
+            Desk.execSelf(Desk.wallArguments(at: at, exit: 1, said: said,
                                              sticky: Desk.stickyArguments(options)))
         }
         exit(1)

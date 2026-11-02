@@ -94,8 +94,8 @@ Screen Recording and Accessibility are separate grants, and both are per-machine
 | Accessibility | `CGEvent` injection (mouse, keyboard) | picture is fine, nothing responds to input |
 
 Do this **once, on the target Mac, from its own GUI terminal** (Terminal.app or whatever is
-installed there), not from an SSH session — macOS may not attribute a prompt to a process started
-by `sshd`, and a prompt you cannot see is a prompt you cannot approve:
+installed there), not from an SSH session — macOS does not run a prompt for a process started by
+`sshd`, and a prompt you cannot see is a prompt you cannot approve:
 
 ```bash
 ~/bin/krd --list        # triggers the Screen Recording prompt → approve
@@ -103,10 +103,59 @@ by `sshd`, and a prompt you cannot see is a prompt you cannot approve:
 # Ctrl-\ to quit
 ```
 
-If macOS never asks, add the binary by hand: System Settings → Privacy & Security →
-**Screen Recording** → `+` → select `~/bin/krd` (press `Cmd-Shift-G` in the file dialog to type the
-path) → enable it; then the same under **Accessibility**. Both panes list the binary once it has
-been granted; a stale entry can be removed with `−`.
+### macOS 26+: the grant goes to the *responsible process*, never to krd
+
+TCC does not ask the process that calls ScreenCaptureKit. It asks that process's **responsible
+process** — the app the user started, or the login session it runs in — and one grant covers
+everything that session runs. Measured on this tree (issue #219); the evidence is in the PR.
+
+| krd started from | the process that has to be granted | how krd behaves there |
+|---|---|---|
+| a GUI terminal app (Terminal, WezTerm, iTerm, Ghostty, Rex) | **that terminal app** | one prompt the first time; every krd in it, and every rebuild, captures |
+| an SSH session | **`/usr/libexec/sshd-keygen-wrapper`** — the process `sshd` runs the session under | nothing prompts (no GUI session); every binary in the session captures, whatever its signature |
+| a `launchd` job, a CI step with no GUI session | **the binary itself** | this is the only case where signing the binary matters |
+
+So over SSH the grant is not krd's to get, and no amount of re-signing changes the answer. Grant the
+wrapper instead — once per machine, and every later krd over SSH works:
+
+```
+System Settings → Privacy & Security → Screen Recording → +
+  → Cmd-Shift-G → /usr/libexec/sshd-keygen-wrapper → Open → enable it
+  → reconnect (`sshd` re-reads the grant per session) and run `ssh host ~/bin/krd --list`
+```
+
+What krd says when it is refused is now the name from that table — not "this binary", which was the
+answer that could never be given:
+
+```
+krd: grant Screen Recording to rex in System Settings > Privacy & Security > Screen Recording, then re-run
+krd: grant Screen Recording to /usr/libexec/sshd-keygen-wrapper (the process an SSH session runs under)
+     in System Settings > Privacy & Security > Screen Recording, then reconnect and re-run
+```
+
+The wall's footer says the same thing in one row (`no picture - grant Screen Recording to …`), and a
+`--mirror` that cannot start prints `Screen Recording is off for this SSH session - grant it to …`
+rather than exiting silently.
+
+**`tccutil reset ScreenCapture com.kkrt.macdesk` is not a check.** It answers `-10814 No such bundle
+identifier` because it resolves *bundle* identifiers through LaunchServices, and a bare executable's
+identifier is not one — while the grant (a path client such as `/usr/libexec/sshd-keygen-wrapper`) is
+right there. The reporter of issue #219 read that message as "krd has no TCC entry", which is true
+and irrelevant: neither machine below has a krd row, and both capture.
+
+**`+` → `~/bin/krd` does not help in a terminal or over SSH** — macOS never asks krd there. It is only
+worth doing for the third row of the table (no GUI ancestor at all).
+
+**The tmux trick (a tmux server started from a granted GUI terminal, then `ssh -t host 'tmux attach'`)
+is unverified here.** It is consistent with the rule — a child inherits the app that started the chain,
+and a tmux server started from a terminal is that terminal's child — but this lane could not run it
+end to end (no sshd on the host, and the test VM's SSH session is already granted at the wrapper, which
+cannot be undone without writing to a TCC database). Granting the wrapper is the verified fix; treat
+tmux as unmeasured.
+
+If macOS never asks for **Accessibility**, add the binary by hand: System Settings → Privacy &
+Security → **Accessibility** → `+` → select `~/bin/krd` (press `Cmd-Shift-G` to type the path) →
+enable it. A stale entry can be removed with `−`.
 
 A grant can also be reset from the command line when it gets stuck:
 
@@ -115,26 +164,32 @@ tccutil reset ScreenCapture com.kkrt.macdesk
 tccutil reset Accessibility com.kkrt.macdesk
 ```
 
-(`tccutil` needs no sudo; the identifier is the one `install.sh`/`deploy.sh` freeze.)
+(`tccutil` needs no sudo; the identifier is the one `install.sh`/`deploy.sh` freeze. It only reaches
+grants recorded against a *bundle* identifier, so on macOS 26 it usually reports that there is
+nothing to reset — see above.)
 
 `--debug` logs `krd: accessibility trusted=true|false` and, if capture fails, the exact error in
 the log file — check that before guessing.
 
-## 4. Signature stability (the part that breaks silently)
+## 4. Signature stability (what it is and is not good for)
 
-macOS records these grants against the **code signature**, not the path. Consequences:
+The grants above belong to the **responsible process** (§3), so on macOS 26 a stable signature is not
+what decides whether a session can capture: a freshly built `Signature=adhoc` binary captures from a
+granted terminal app and from a granted SSH wrapper (both measured). What signing still decides:
 
-- **Do not ad-hoc sign** (`codesign -s -`). Every build gets a new cdhash, the TCC record stops
-  matching, and ScreenCaptureKit returns `-3801` (or the pane goes black with no error on screen).
-  `install.sh`/`deploy.sh` fall back to ad-hoc only if no identity exists, and they warn.
-- **Keep the identifier frozen** (`com.kkrt.macdesk`). TCC keys the record on it; changing it —
-  even to "something nicer" — makes macOS treat the binary as a new app and ask again.
-- **Keep the installed path stable.** Replacing the file in place is fine; moving it to another
-  directory is not (you will get a second TCC entry, and the first one points at nothing).
+- **A grant recorded against the binary itself** (the `+` route, or the `launchd` row of the table)
+is matched by code requirement, so ad-hoc signing breaks it: every build is a new cdhash and the
+record stops matching. `install.sh`/`deploy.sh` therefore still sign with your identity when one
+exists, and warn when they fall back to ad-hoc.
+- **The identifier** (`com.kkrt.macdesk`) is what such a record is keyed on; changing it — even to
+  "something nicer" — makes macOS treat the binary as a new app and ask again.
+- **The installed path** should stay put too, for the same reason: a second copy is a second record,
+  and the first one then points at nothing.
 - **Never `strip`, re-sign or `xattr` the binary on the target.** Rebuild locally, re-sign locally,
   copy again.
-- Updating is therefore: stop krd → `./deploy.sh user@host` → run again. The grant survives,
-  because the identity and the identifier did not change.
+- Updating is therefore: stop krd → `./deploy.sh user@host` → run again. Nothing to re-approve in the
+  terminal or SSH cases, and nothing to re-approve in the per-binary case either, because the
+  identity and the identifier did not change.
 - The copy is written to `krd.new` and **renamed** into place, never `cat >` onto the existing
   file. Truncating in place keeps the inode, AMFI still has the old binary's validation result
   cached for it, and the new binary is killed at exec (`Killed: 9`, exit 137, not a word
@@ -193,5 +248,6 @@ for host in mac-mini@10.0.0.11 macbook@10.0.0.12; do
 done
 ```
 
-Each one still needs its own one-time TCC approval (§3) — grants are per machine and are not
-transferable, even with the same signing identity.
+Each one still needs its own one-time grant (§3) — grants are per machine and are not transferable —
+but note *who* is granted: the terminal app on that Mac if you ever run krd there from a window, and
+`/usr/libexec/sshd-keygen-wrapper` if you only ever run it over SSH.

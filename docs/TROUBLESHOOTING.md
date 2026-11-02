@@ -454,12 +454,18 @@ the wall back on the page it was left on - that is the way out of a window mirro
 
 ### 23b. Every panel says `no picture`, and the footer asks for Screen Recording
 
-**Cause.** macOS grants Screen Recording per *responsible* application. When krd is started from a
-terminal, the grant belongs to that terminal (Terminal, WezTerm, iTerm, Ghostty) - not to krd, so
-"add krd" in System Settings does nothing. Without it `SCScreenshotManager` fails with `-3801`
+**Cause.** macOS grants Screen Recording per *responsible* application (issue #219). When krd is
+started from a terminal, the grant belongs to that terminal (Terminal, WezTerm, iTerm, Ghostty) - not
+to krd, so "add krd" in System Settings does nothing. Over **SSH** the responsible process is the
+process `sshd` runs the session under, `/usr/libexec/sshd-keygen-wrapper` - so there the grant has to
+be that path, and re-signing krd cannot help. Without it `SCScreenshotManager` fails with `-3801`
 (`userDeclined`) for every panel, which the wall draws as a mask.
 **Fix.** System Settings → Privacy & Security → Screen Recording → enable the terminal you run krd
-in, then restart that terminal. `krd --list` prints windows once the grant is there.
+in (then restart that terminal), **or** add `/usr/libexec/sshd-keygen-wrapper` there with `+`
+(`Cmd-Shift-G` to type the path) and reconnect - after that every krd in an SSH session captures,
+whatever its signature. krd names the one it needs: the footer says
+`no picture - grant Screen Recording to …`, `--list` and a dying `--mirror` say it on stderr.
+`krd --list` prints windows once the grant is there. DEPLOY.md §3 has the full table.
 
 ### 23d. Back on the wall, a window's picture is still on top of it
 
@@ -504,12 +510,19 @@ anything else. `KRD_NO_NSAPP=1` reproduces the failure on purpose.
 
 ### 26. `-3801 user declined`, or the permission is gone after a rebuild
 
-**Cause.** TCC records Screen Recording against the **code signature**. Ad-hoc signing
-(`codesign -s -`) yields a new cdhash on every build, so the OS sees a different app and the old
-grant no longer matches.
-**Fix.** Install to a fixed path and sign with a stable identity — `install.sh` does that by
-default (or `KRD_SIGN_IDENTITY="Apple Development: …" ./install.sh`). Keep the identifier `com.kkrt.macdesk`
-frozen — changing it creates a new TCC record and requires a new approval.
+**Cause.** Two different things, and the sentence krd prints now tells them apart (§23b):
+
+- **the usual one** is a grant that was never given to the *responsible process* - the terminal app,
+  or `/usr/libexec/sshd-keygen-wrapper` over SSH. A rebuild does not lose that grant: a freshly built
+  `Signature=adhoc` binary captures from a granted terminal and from a granted SSH session (measured,
+  issue #219). Do not re-sign anything; grant the process krd names.
+- **the rare one** is a grant recorded against the binary *itself* (added with `+`, or a `launchd`
+  job, i.e. the cases where krd is its own responsible process). That record is matched by code
+  requirement, so ad-hoc signing (`codesign -s -`, a new cdhash per build) makes it stop matching.
+**Fix.** For a per-binary record: install to a fixed path and sign with a stable identity -
+`install.sh` does that by default (or `KRD_SIGN_IDENTITY="Apple Development: …" ./install.sh`) -
+and keep the identifier `com.kkrt.macdesk` frozen, because that is what the record is keyed on. For
+the usual case, no signing at all: grant the terminal app or the sshd wrapper (DEPLOY.md §3).
 
 ### 26b. After an update the remote binary dies instantly: `Killed: 9`, exit 137, no output
 

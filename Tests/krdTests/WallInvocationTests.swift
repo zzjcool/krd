@@ -200,16 +200,20 @@ final class DeskSetupFailureTests: XCTestCase {
         ])
     }
 
+    /// The session every sentence here is said in. Which process macOS asks for the grant is the
+    /// one fact the error value cannot carry, so the caller supplies it (issue #219).
+    private let wezterm = CaptureAuthority.terminalApp("WezTerm")
+
     func testAWindowThatLeftSaysSoInItsOwnWords() {
-        XCTAssertEqual(Desk.setupFailure(streamError(-3813)),
+        XCTAssertEqual(Desk.setupFailure(streamError(-3813), authority: wezterm),
                        "the window closed before it could be shown")
     }
 
     func testARefusedGrantNamesTheSettingTheReaderHasToOpen() {
         // -3801 (the TCC answer) and -3803 (the same answer with no dialog) are one situation.
-        XCTAssertEqual(Desk.setupFailure(streamError(-3801)),
+        XCTAssertEqual(Desk.setupFailure(streamError(-3801), authority: wezterm),
                        "Screen Recording is off for this terminal")
-        XCTAssertEqual(Desk.setupFailure(streamError(-3803)),
+        XCTAssertEqual(Desk.setupFailure(streamError(-3803), authority: wezterm),
                        "Screen Recording is off for this terminal")
     }
 
@@ -217,8 +221,10 @@ final class DeskSetupFailureTests: XCTestCase {
         // -3805 ("application connection being interrupted") is what a VM's window server says when
         // it will not stream at all: nothing to translate, so the line the user reads is the line
         // the framework wrote.
-        XCTAssertEqual(Desk.setupFailure(streamError(-3805)), "the framework's own words")
-        XCTAssertEqual(Desk.setupFailure(DeskError.message("display 3 is not in the shareable list")),
+        XCTAssertEqual(Desk.setupFailure(streamError(-3805), authority: wezterm),
+                       "the framework's own words")
+        XCTAssertEqual(Desk.setupFailure(DeskError.message("display 3 is not in the shareable list"),
+                                         authority: wezterm),
                        "display 3 is not in the shareable list")
     }
 }

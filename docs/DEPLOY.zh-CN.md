@@ -89,17 +89,61 @@ ssh user@host '~/bin/krd --version'      # 应该是 X.Y.Z
 | 辅助功能 | `CGEvent` 注入（鼠标、键盘） | 画面正常，但任何操作都没反应 |
 
 这一步请**在目标 Mac 上、用它自己的图形界面终端**（Terminal.app 之类）做一次，不要从 SSH 会话里做 ——
-macOS 未必会把弹窗归给一个由 `sshd` 拉起的进程，而你看不见的弹窗等于没法点「允许」：
+macOS 不会给一个由 `sshd` 拉起的进程弹授权框，而你看不见的弹框等于没法点「允许」：
 
 ```bash
-~/bin/krd --list        # 触发「屏幕录制」弹窗 → 允许
-~/bin/krd --fps 20      # 触发「辅助功能」弹窗 → 允许（画面会立刻出来）
+~/bin/krd --list        # 触发「屏幕录制」弹框 → 允许
+~/bin/krd --fps 20      # 触发「辅助功能」弹框 → 允许（画面会立刻出来）
 # Ctrl-\ 退出
 ```
 
-如果 macOS 压根不弹窗，就手动加：系统设置 → 隐私与安全性 → **屏幕录制** → `+` → 选中 `~/bin/krd`
-（文件对话框里按 `Cmd-Shift-G` 可以直接输路径）→ 打开开关；然后到**辅助功能**里同样加一次。授权成功后
-两个面板里都会列出这个二进制；过期的条目用 `−` 删掉。
+### macOS 26+：授权发给「负责的进程」，永远不会发给 krd
+
+TCC 不问调用 ScreenCaptureKit 的那个进程，而是问它的**负责进程**（responsible process）—— 用户实际启动的
+那个 App，或者这个会话登录所在的进程 —— 一份授权覆盖这个会话里跑的所有东西。本仓库实测（issue #219，证据在
+PR 里）：
+
+| krd 是从哪里启动的 | 需要被授权的是谁 | 在那里 krd 的表现 |
+|---|---|---|
+| 图形界面终端（Terminal、WezTerm、iTerm、Ghostty、Rex） | **那个终端 App** | 第一次弹一次框；之后这个终端里的每个 krd、每次重编都能采集 |
+| SSH 会话 | **`/usr/libexec/sshd-keygen-wrapper`** —— `sshd` 跑会话的那个进程 | 不会弹框（没有图形会话）；这个会话里任何二进制都能采集，签名什么都无所谓 |
+| `launchd` 任务、没有图形会话的 CI 步骤 | **二进制自己** | 只有这一种情况下「给二进制签名」才有意义 |
+
+所以走 SSH 时，授权不是 krd 自己能拿到的，重签多少次都改不了这个答案。改去授权那个 wrapper —— 每台机器一次，
+之后所有 SSH 里的 krd 都能用：
+
+```
+系统设置 → 隐私与安全性 → 屏幕录制 → +
+  → Cmd-Shift-G → /usr/libexec/sshd-keygen-wrapper → 打开 → 勾上
+  → 重连 SSH（`sshd` 每个会话重新读一次授权），再跑 `ssh host ~/bin/krd --list`
+```
+
+被拒时 krd 现在就说上表里的那个名字 —— 不再是「this binary」，那是永远给不出去的答案：
+
+```
+krd: grant Screen Recording to rex in System Settings > Privacy & Security > Screen Recording, then re-run
+krd: grant Screen Recording to /usr/libexec/sshd-keygen-wrapper (the process an SSH session runs under)
+     in System Settings > Privacy & Security > Screen Recording, then reconnect and re-run
+```
+
+墙的页脚用一行说同一件事（`no picture - grant Screen Recording to …`）；`--mirror` 起不来时会说
+`Screen Recording is off for this SSH session - grant it to …`，而不是一声不响地退出。
+
+**`tccutil reset ScreenCapture com.kkrt.macdesk` 不是检查手段。** 它回 `-10814 No such bundle identifier`，
+是因为它只经 LaunchServices 解析 **bundle** identifier，而裸可执行文件的 identifier 根本不在那一类里 ——
+同时授权（`/usr/libexec/sshd-keygen-wrapper` 这种按路径记的 client）好端端地就在那里。issue #219 的报告者
+把这句话读成了「krd 没有 TCC 记录」，这句话本身对，但和能不能采集无关：下文两台机器都没有 krd 的记录，两台都能采集。
+
+**在终端里、以及在 SSH 下，`+` 加 `~/bin/krd` 没有用** —— macOS 在那儿根本不问 krd。只有表里第三行
+（完全没有图形祖先）才值得这么做。
+
+**tmux 那个偏方（从有授权的图形终端里起一个 tmux server，然后 `ssh -t host 'tmux attach'`）本车道没能验证。**
+它和规则是一致的 —— 子进程继承「启动整条链的那个 App」，而从终端里起的 tmux server 就是那个终端的子进程 ——
+但没法端到端跑：宿主机的 sshd 没开，测试 VM 的 SSH 会话已经由 wrapper 授权（要撤销就得写 TCC 数据库）。
+已验证的解法是授权 wrapper；tmux 请当作未测。
+
+如果 **辅助功能** 压根不弹框，就手动加：系统设置 → 隐私与安全性 → **辅助功能** → `+` → 选中 `~/bin/krd`
+（按 `Cmd-Shift-G` 可以直接输路径）→ 打开开关。过期条目用 `−` 删掉。
 
 授权卡住时，也可以用命令行把记录清掉重来：
 
@@ -108,24 +152,27 @@ tccutil reset ScreenCapture com.kkrt.macdesk
 tccutil reset Accessibility com.kkrt.macdesk
 ```
 
-（`tccutil` 不需要 sudo；这里的 identifier 就是 `install.sh`/`deploy.sh` 冻住的那个。）
+（`tccutil` 不需要 sudo；这里的 identifier 就是 `install.sh`/`deploy.sh` 冻住的那个。它只能碰到记在
+**bundle** identifier 上的授权，所以在 macOS 26 上它通常只会告诉你「没东西可重置」—— 见上。）
 
 `--debug` 会在日志里记 `krd: accessibility trusted=true|false`，采集失败也会把具体错误写进日志 ——
 先看日志，别猜。
 
-## 4. 签名稳定性（无声失效的那一半）
+## 4. 签名稳定性（它管什么、不管什么）
 
-macOS 把这些授权记在**代码签名**上，不是路径上。于是：
+上文的授权属于**负责进程**（§3），所以在 macOS 26 上「签名稳定」并不决定一个会话能不能采集：一个刚编出来的
+`Signature=adhoc` 二进制，从已授权的终端 App 里能采集，从已授权 wrapper 的 SSH 里也能采集（两项都实测过）。
+签名仍然决定的是：
 
-- **不要 ad-hoc 签名**（`codesign -s -`）。每次编译都是新的 cdhash，TCC 记录对不上，
-  ScreenCaptureKit 返回 `-3801`（或者 pane 全黑而屏幕上没有任何错误）。只有在完全找不到身份时
-  `install.sh`/`deploy.sh` 才会退到 ad-hoc，而且会警告。
-- **identifier 必须冻住**（`com.kkrt.macdesk`）。TCC 记录挂在它上面；改掉它 —— 哪怕只是改成一个「更好看
-  的名字」—— macOS 就会把它当成一个新 App 重新要授权。
-- **安装路径保持稳定。** 就地覆盖文件没问题，挪到别的目录不行（你会得到第二条 TCC 记录，而第一条指向
-  空气）。
+- **记在二进制自己身上的授权**（用 `+` 加的那种，或表里 `launchd` 那一行）是按代码要求（csreq）匹配的，
+  ad-hoc 签名会让它失效：每次编译都是新 cdhash，记录对不上。所以 `install.sh`/`deploy.sh` 在有身份时
+  仍然用你的身份签，退到 ad-hoc 时会警告。
+- **identifier**（`com.kkrt.macdesk`）就是这种记录的键；改掉它 —— 哪怕只是改成「更好看的名字」——
+  macOS 就会把它当成一个新 App 重新要授权。
+- **安装路径**同样要稳：同一份二进制的第二个副本就是第二条记录，而第一条从此指向空气。
 - **绝对不要在目标机上 `strip`、重签或 `xattr` 这个二进制。** 本地重编、本地重签、再拷一次。
-- 所以升级流程是：停掉 krd → `./deploy.sh user@host` → 再运行。授权会保留，因为身份和 identifier 都没变。
+- 所以升级流程是：停掉 krd → `./deploy.sh user@host` → 再运行。终端与 SSH 两种情况不用重新授权，
+  按二进制记的那种也不用 —— 因为身份和 identifier 都没变。
 
 确认装上去的到底是什么：
 
@@ -172,4 +219,6 @@ for host in mac-mini@10.0.0.11 macbook@10.0.0.12; do
 done
 ```
 
-每台仍然要各自做一次 TCC 授权（§3）—— 授权是按机器记的，哪怕签名身份完全相同也不能转移。
+每台仍然要各自做一次授权（§3）—— 授权是按机器记的，不能转移 —— 但注意被授权的是**谁**：
+如果你在那台机器上也会从窗口里跑 krd，就是那个终端 App；如果你只在 SSH 里跑，就是
+`/usr/libexec/sshd-keygen-wrapper`。
