@@ -1227,6 +1227,87 @@ final class ChromeMenuTests: XCTestCase {
         XCTAssertGreaterThan(panelCells, 0, "the label column still belongs to the panel")
     }
 
+    /// Issue #233: the three axes have 5, 2 and 20 steps, and sizing each bar to its own step count
+    /// drew a 5-cell, a 2-cell and a 20-cell track in one box with the values at columns 24, 21 and
+    /// 39 -- measured on a 120x30 pane, and it reads as a rendering fault rather than as "fps has
+    /// twenty options". One track length for all three rows, one value column.
+    func testTheMenusThreeTracksAreOneLengthAndOneValueColumn() {
+        let geo = Chrome.layout(paneCols: 120, paneRows: 30, imageCols: 120, imageRows: 20,
+                                bar: true, dev: true, panel: .menu)
+        let chrome = Chrome()
+        // One draw: the second one is a diff of unchanged content and emits (almost) nothing.
+        let bytes = chrome.draw(geometry: geo, metrics: menuMetrics(),
+                                state: ChromeState(panel: .menu))
+
+        var spans: [ChromeAxis: ClosedRange<Int>] = [:]
+        for axis in ChromeAxis.allCases {
+            let ticks = chrome.widgets.filter { $0.id.hasPrefix("rung:\(axis.rawValue):") }
+            XCTAssertEqual(ticks.count, axis.steps, "\(axis.label): one widget per step")
+            guard let first = ticks.map(\.rect.col).min(),
+                  let last = ticks.map({ $0.rect.col + $0.rect.width - 1 }).max()
+            else { return XCTFail("\(axis.label): no tick was drawn") }
+            // Contiguous: the runs tile the track, so no cell between two ticks is unclaimed.
+            XCTAssertEqual(ticks.map(\.rect.width).reduce(0, +), last - first + 1,
+                           "\(axis.label): the runs tile their span exactly")
+            spans[axis] = first...last
+        }
+        // The measurement from the report, as a contract: 17...36 -- the box's value column starts at
+        // 17 and the widest axis (twenty one-frame steps) fits in what is left.
+        XCTAssertEqual(spans[.colour], 17...36, "the colour track is as long as the fps one")
+        XCTAssertEqual(spans[.quality], 17...36, "and so is the two-step quality track")
+        XCTAssertEqual(spans[.fps], 17...36)
+        XCTAssertEqual(ChromeAxis.longestTrack, 20, "one frame per cell is the widest axis")
+
+        // The value column is the same cell on all three rows: the one column a reader scans down.
+        let text = String(decoding: bytes, as: UTF8.self)
+        for value in ["5-6-5 (80)", "guarded", "12 fps"] {
+            XCTAssertTrue(text.contains(value), "\(value) is still the value of its row")
+        }
+    }
+
+    /// The geometry a click maps back through, as arithmetic: `cell * steps / track` has to be the
+    /// inverse of `ceil(s * track / steps)`, or a click lands one step off what it points at.
+    func testAStepOwnsARunOfCellsOnTheSharedTrack() {
+        // Five rungs on a twenty-cell track: four cells each, in order.
+        let colourRuns = (0..<5).map { ChromeAxis.trackRun(step: $0, steps: 5, track: 20) }
+        XCTAssertEqual(colourRuns.map(\.start), [0, 4, 8, 12, 16])
+        XCTAssertEqual(colourRuns.map(\.width), [4, 4, 4, 4, 4])
+        // Twenty steps on the same track: one cell each, which is the case the drawer had before.
+        XCTAssertEqual((0..<20).map { ChromeAxis.trackRun(step: $0, steps: 20, track: 20).width },
+                       Array(repeating: 1, count: 20))
+        // Uneven division still tiles: no gap, no overlap, and the widths add up to the track.
+        for (steps, track) in [(5, 7), (2, 5), (20, 7), (3, 2), (20, 3)] {
+            let runs = (0..<steps).map { ChromeAxis.trackRun(step: $0, steps: steps, track: track) }
+            var covered: [Int] = []
+            for run in runs { covered += Array(run.start..<(run.start + run.width)) }
+            XCTAssertEqual(covered.sorted(), Array(0..<track),
+                           "steps=\(steps) track=\(track): \(runs.map(\.start))/\(runs.map(\.width))")
+            // …and every drawn cell maps back to the step that drew it.
+            for (step, run) in runs.enumerated() {
+                for cell in run.start..<(run.start + run.width) {
+                    XCTAssertEqual(cell * steps / track, step, "steps=\(steps) cell=\(cell)")
+                }
+            }
+        }
+    }
+
+    /// The end of the colour track is the lossless rung, and it is a *click target* — the run is
+    /// several cells wide and every cell of it answers with the one step it belongs to.
+    func testTheEndOfTheColourTrackIsItsLastRung() {
+        let geo = Chrome.layout(paneCols: 120, paneRows: 30, imageCols: 120, imageRows: 20,
+                                bar: true, dev: true, panel: .menu)
+        let chrome = Chrome()
+        _ = chrome.draw(geometry: geo, metrics: menuMetrics(), state: ChromeState(panel: .menu))
+        guard let tick = chrome.widgets.first(where: { $0.id == "rung:colour:4" }) else {
+            return XCTFail("the lossless rung was not drawn")
+        }
+        XCTAssertEqual(tick.rect.width, 4, "a fifth of a twenty-cell track")
+        for col in tick.rect.col...(tick.rect.col + tick.rect.width - 1) {
+            XCTAssertEqual(chrome.route(row: tick.rect.row + 1, col: col + 1, geometry: geo),
+                           .widget("rung:colour:4"), "col \(col)")
+        }
+    }
+
     /// The bar's way in is a control like `[ - ]`, on the bar's own row.
     func testTheBarOffersTheMenuNextToTheWayOut() {
         let geo = Chrome.layout(paneCols: 120, paneRows: 20, imageCols: 120, imageRows: 18,

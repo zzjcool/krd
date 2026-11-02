@@ -327,6 +327,25 @@ enum ChromeAxis: String, CaseIterable {
         }
     }
 
+    /// The longest track any axis needs. The menu draws all three on **one** bar length (issue #233):
+    /// sized to the axis's own step count the bars were 5, 2 and 20 cells in one box with their
+    /// values at 24, 21 and 39 — measured on a 120x30 pane — which reads as a rendering fault rather
+    /// than as "fps has twenty options".
+    static var longestTrack: Int { allCases.map(\.steps).max() ?? 1 }
+
+    /// The cells one step owns on a shared track: `steps` contiguous runs that tile `track` cells
+    /// exactly. `ceil(s * track / steps)` is the inverse of the integer division a click maps a cell
+    /// back through (`cell * steps / track`), so what the drawer paints and what a report lands on
+    /// cannot disagree. A step on a track narrower than the step count gets no cell — a tick that is
+    /// not drawn is a tick that cannot be clicked, which is the same rule the truncated track always
+    /// had — and the caller skips it rather than painting an empty widget.
+    static func trackRun(step: Int, steps: Int, track: Int) -> (start: Int, width: Int) {
+        guard steps > 0, track > 0 else { return (0, 0) }
+        let start = (step * track + steps - 1) / steps
+        let end = ((step + 1) * track + steps - 1) / steps
+        return (start, max(0, end - start))
+    }
+
     /// The `--quality` numbers the colour track lands on: `QualityBudget`'s four shipped bit depths
     /// and lossless, i.e. the rungs its own table documents.
     static let colourValues = [50, 70, 80, 90, 100]
@@ -1353,21 +1372,26 @@ final class Chrome {
             // click is the whole interaction -- no key opens this and no key moves it. The bar exists
             // on pages without `--dev` (a handed-over window mirror) and the chord table is being
             // reworked elsewhere (#180), so the mouse route has to stand on its own (issue #87).
+            // One track for all three rows (issue #233): the widest the box can hold while leaving a
+            // value column of at least six cells on its right. The value is truncated to whatever is
+            // left, so a long one ("guarded — only what will not compress") costs its own columns and
+            // never the shared geometry.
+            let track = max(1, min(ChromeAxis.longestTrack, w - valueCol - 2 - 6))
             for (i, axis) in ChromeAxis.allCases.enumerated() {
                 guard let r = slot(i) else { continue }
                 let y0 = y + 1 + r
                 text(2, y0, DisplayWidth.pad(axis.label, to: 14), .dim)
                 let selected = axis.step(m)
-                // The track keeps a value column to its right; on a narrow pane that is what gives
-                // way, and a tick that is not drawn is a tick that cannot be clicked.
-                let valueRoom = max(6, DisplayWidth.of(axis.value(m)) + 1)
-                let track = max(1, min(axis.steps, w - valueCol - valueRoom - 1))
-                for step in 0..<track {
+                for step in 0..<axis.steps {
+                    // A step owns a run of cells, so the fill is proportional on every axis instead
+                    // of one cell per option. One widget per step either way: its action is what a
+                    // click does, and the id is only the name the hover answers and `--debug` prints.
+                    let run = ChromeAxis.trackRun(step: step, steps: axis.steps, track: track)
+                    guard run.width > 0 else { continue }
                     let reached = step <= selected
-                    // One widget per tick, and its action is what a click does: the id is only the
-                    // name the hover answers and the `--debug` line prints.
                     paint(ChromeAxis.id(axis, step), .control(.rung(axis, step))) {
-                        text(valueCol + step, y0, reached ? "█" : "▁",
+                        text(valueCol + run.start, y0,
+                             String(repeating: reached ? "█" : "▁", count: run.width),
                              step == selected ? .barBright : (reached ? .accent : .dim))
                     }
                 }
