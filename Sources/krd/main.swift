@@ -177,6 +177,13 @@ struct Options {
     /// Replace ScreenCaptureKit with a desktop drawn in process. No permission, runs forever.
     var mock = false
     var mockSize: (w: Int, h: Int)? = nil
+    /// `--first-frame-delay <ms>`: how long the loading card is held up before the stream starts.
+    ///
+    /// A test switch, because the card cannot be observed otherwise: a real run takes it away after
+    /// the few hundred milliseconds a capture grant takes (#227), so the thing #217 had to measure
+    /// against a copy of `LoadingView` is this flag's whole reason. `nil` is "nobody typed it": the
+    /// run is then the run it always was, byte for byte (`--selftest`'s sha256 is the proof).
+    var firstFrameDelayMs: Int? = nil
 }
 
 /// A command line krd refuses: one sentence for stderr, and the documented "usage" status.
@@ -310,6 +317,14 @@ func usage() -> String {
                           With --wall: a fake window list (12 cards, CJK/emoji titles, a withheld
                           title, a mask, two displays) and pictures drawn in process
       --mock-size WxH     size of the generated desktop (default 1920x1200)
+      --first-frame-delay <ms>
+                          a test switch, like --mock: hold the loading card up by starting the
+                          stream <ms> later (1...600000), so the card can be measured on the wire
+                          in a run that otherwise does everything for real. The encode path is
+                          untouched -- the frame that finally lands is the frame a plain run
+                          lands. With --mock, which captures nothing and so would draw no card at
+                          all, it draws the live path's card and holds that one. A wall has no
+                          card: there the flag is a usage error rather than a silent no-op
       --list              list displays and windows, then exit (--list --json: one object)
       -v, --version       print the version and exit
 
@@ -678,6 +693,13 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
                 throw UsageError("--mock-size wants <width>x<height> above 8x8, got \"\(spec)\"")
             }
             options.mockSize = (parts[0], parts[1])
+        case "--first-frame-delay":
+            // Bounded rather than "any integer": a hold is a wall clock the test waits on, so a
+            // value a human mistyped (a stray digit, 0, a negative) is refused by name instead of
+            // hanging a run for an hour.
+            options.firstFrameDelayMs = try intValue("--first-frame-delay", args, &i,
+                                                     wants: "a hold of 1...600000 ms",
+                                                     min: 1, max: 600_000)
         case "--no-chrome": options.noChrome = true
         // The default since phase 4; kept because scripts and muscle memory spell it.
         case "--wall": options.wall = true; wallPinned = true
@@ -745,6 +767,14 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
     // `Desk.run()` will take: while it did not, `krd --mock` ran the mock mirror with `wall` still
     // true, i.e. a session that believed it was a wall.
     if options.mock && !wallPinned { options.wall = false }
+    // A wall drives no capture (`runWall` paints text), so it never has a loading card to hold: the
+    // flag can only do nothing there. Refused in the same place and for the same reason as `--dev`
+    // above -- a flag whose whole meaning is a card cannot be honoured on a mode without one -- and
+    // the sentence names the fix, because "the flag does nothing" reads as a bug otherwise.
+    if options.firstFrameDelayMs != nil && options.wall {
+        throw UsageError("--first-frame-delay holds the loading card up until the stream starts, and "
+                         + "a wall draws no card; add --mirror (or --mock)")
+    }
     return options
 }
 
@@ -796,6 +826,10 @@ final class Desk {
     let writer = ScreenWriter()
     /// The mascot card shown until the first frame lands (see LoadingView).
     private var loading: LoadingView?
+    /// When that card went up, on `benchNowMs`'s clock -- `nil` unless `--first-frame-delay` put it
+    /// there. Set next to `card.start()` and cleared the moment `stop()` runs, so the ONE line that
+    /// reports the hold (#227) is printed once and only when a hold was actually taken.
+    private var loadingUpAt: Double?
     private let capturer = Capturer()
     private var input: InputReader?
     private var cleanedUp = false
@@ -1381,6 +1415,29 @@ final class Desk {
             // be the one surface in the tree that never follows the terminal's theme (issue #213).
             prepareTheme()
             writer.beginSession()
+            // `--first-frame-delay` draws the live path's card here, because this path captures
+            // nothing and would otherwise never have one -- and the card is the thing #227 exists to
+            // observe (until now only a copy of `LoadingView` in a test harness could be). Started
+            // after `beginSession` and before the chrome, which is the live path's own order, and
+            // before `startInput()` below: that takes stdin over, and the `a=f` probe reads it.
+            //
+            // The same arguments the live path hands it, written out again rather than shared
+            // through a factory: this is the path the pty test measures, so a reader has to be able
+            // to see the card was built here from the same probe answer, palette and writer.
+            if options.firstFrameDelayMs != nil {
+                let card = LoadingView(paneCols: layout.paneCols, paneRows: layout.paneRows,
+                                       cell: (layout.cellW, layout.cellH),
+                                       animates: TermGeometry.supportsAnimationFrames() == true,
+                                       paletteKey: IconCache.paletteKey(themePalette)) { [writer] in
+                    writer.write($0)
+                }
+                Log.write("krd: loading card " + (card.animates
+                    ? "as an a=f animation (the terminal plays the mascot, krd sends it once)\n"
+                    : "as the still mosaic (the terminal did not answer the a=f probe)\n"))
+                card.start()
+                loading = card
+                loadingUpAt = benchNowMs()
+            }
             startChrome()
             installSignalCleanup()
             installReportHandler()
@@ -1392,6 +1449,10 @@ final class Desk {
                 self?.handleFrame(pixels: pixels, width: width, height: height)
             }
             self.mock = mock
+            // The hold goes immediately before the stream, not before the card: everything that
+            // paints (chrome, diagnostics, the card) is already up, so what the flag holds is a real
+            // session rather than a skeleton, and no mock frame has been drawn yet.
+            try await holdFirstFrameIfAsked()
             mock.start()
             Log.write("krd: mock \(layout.pixelW)x\(layout.pixelH) px @\(options.fps) fps, "
                       + "\(layout.tilesX)x\(layout.tilesY) tiles, no capture\n")
@@ -1606,11 +1667,26 @@ final class Desk {
             : "as the still mosaic (the terminal did not answer the a=f probe)\n"))
         card.start()
         loading = card
+        // The flag's clock starts when the card is up, not when the flag was parsed: the line
+        // `handleFrame` prints is the hold the reader sees, and it is the only product output the
+        // flag adds (#227).
+        if options.firstFrameDelayMs != nil { loadingUpAt = benchNowMs() }
         startChrome()
         installSignalCleanup()
         installReportHandler()
         installResizeHandler()
         installDisplayChangeHandler()
+
+        // The hold `--first-frame-delay` asks for sits **between the handlers and the 1 Hz tick**, not
+        // next to the stream, and that placement is the whole of one measured bug (#227 review). The
+        // tick is `probeRoundTrip`, which writes `CSI 5n` and can only read the answer through the
+        // input reader — and the reader does not exist until `startInput()` below. A hold in front of
+        // that write spends its seconds emitting probes nobody can answer, and three misses make
+        // `RTTProbe` declare the terminal "does not implement DSR" *for the rest of the session*:
+        // measured with a pty that does answer DSR, `--first-frame-delay 5000` logged exactly that
+        // verdict and 12000 skipped the measurements outright. Started here, the tick begins once the
+        // hold is over, and its first probe lands in a session that has a reader.
+        try await holdFirstFrameIfAsked()
         startDiagnostics()
 
         try await capturer.start(filter: filter, sourceRect: cropForFilter(),
@@ -4089,8 +4165,35 @@ final class Desk {
         return target.pid
     }
 
+    /// Wait out `--first-frame-delay`, or return at once when nobody typed it.
+    ///
+    /// Called on the two paths that draw a card, and in both of them before the stream is asked for:
+    /// waiting here rather than delaying the frame is what keeps the bytes out of it -- nothing on the
+    /// encode path learns that a flag was typed, so the frame that finally lands is the frame a plain
+    /// run lands. The two call sites are not in the same position, and each says why: the live path has
+    /// a 1 Hz round-trip probe to keep out of the hold (it cannot be answered until `startInput()`),
+    /// while the mock path has no probe at all and holds immediately before `mock.start()` so the
+    /// whole session is up behind the card.
+    private func holdFirstFrameIfAsked() async throws {
+        guard let hold = options.firstFrameDelayMs else { return }
+        try await Task.sleep(nanoseconds: UInt64(hold) * 1_000_000)
+    }
+
     private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
-        if let card = loading { card.stop(); loading = nil }
+        if let card = loading {
+            card.stop()
+            loading = nil
+            // #227's instrument. On the wire the hold is invisible -- the `a=f` card writes nothing
+            // while the terminal plays it, and `--mock` has no heartbeat to time it by -- so the
+            // product says it on the clock it took it with. Gated on the flag, and the stamp is
+            // cleared here: a `stop()` from `shutdown`/`failCapture` afterwards has nothing left to
+            // print, so the line cannot appear twice with two different numbers.
+            if let up = loadingUpAt, let hold = options.firstFrameDelayMs {
+                loadingUpAt = nil
+                Log.write("krd: loading card down after \(Int(benchNowMs() - up)) ms "
+                          + "(--first-frame-delay \(hold))\n")
+            }
+        }
         let started = benchNowMs()
         // A frame-rate step -- the governor's rung, or the cap a focus-out puts on it -- is enforced
         // here, before anything is encoded: the capture still delivers at `--fps`

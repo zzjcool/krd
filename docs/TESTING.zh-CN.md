@@ -194,6 +194,16 @@ input: key code=0 flags=256
 | `--list` | 屏幕录制权限，以及显示器/窗口枚举，全都在碰任何像素之前 |
 | `-v`、`--version` | 手里这个二进制是不是你以为的那个：和 `VERSION` 文件、release tag 对一遍（`scripts/release.sh` 让两者保持同步） |
 | `--dump-termcaps <路径>` | **这台**终端对能力探测批次答了什么 —— 原始字节和解析后的 `TermCaps`，写进一个 JSON 文件，然后退出。stdin 必须是 tty，且不画任何东西（见 §9） |
+| `--first-frame-delay <ms>` | 镜像的第一帧被压住：加载卡上去后至少等 `<ms>` 才来 —— 真二进制里唯一看得见这张卡的办法（有屏幕录制授权时卡只活几百毫秒）；`--mock` 下它也会把卡画出来（mock 镜像本来就没有要盖住的等待）。端到端证明它的是 `Tests/krdTests/LoadingCardProcessTests.swift` |
+
+这个 pty 测试在**真二进制**上（`swift test` 在测试 bundle 旁边构建的那个，和出货的是同一个 target）
+而不是在 #217 里那份编译进去的 `LoadingView.swift` 上，证明下面这些：
+卡画出来了，并且在第一帧画面占下这行之前就按 id 删掉 —— 先跑 `stop()`，这个顺序归 `main.swift` 管，
+单元测试看不见；卡亮着的时候是 0 B/s，发送加拆除整段都在设计 §5.1 的 4 KB/s 预算以内；`a=f` 循环
+只起一次；终端拒绝 `a=f`（或者干脆无视它）时，拿到的还是那张马赛克卡，代价照旧 —— 每 110 ms
+约 22.5 KB（形状、单帧大小和速率都对得上；逐字节相同由 `LoadingViewTests` 钉住，这个测试不替代它）。
+想用眼睛看：`krd --mirror --mock --first-frame-delay 5000` 会把卡挂住五秒；
+`--log <路径>` 里记着 `loading card down after <ms> ms`。
 
 `stats:` 行，开 `--debug` 时每秒一行（逐字段解释见
 [ARCHITECTURE §9](ARCHITECTURE.zh-CN.md#9-诊断开关的接线)）：
