@@ -237,7 +237,7 @@ picture) or the parser dropped it.
 | `--list` | Screen Recording permission and the display/window enumeration, before touching any pixels |
 | `-v`, `--version` | that the binary in your hand is the one you think: compare it with the `VERSION` file and the release tag (`scripts/release.sh` keeps both in sync) |
 | `--dump-termcaps <path>` | what *this* terminal answers to the capability batch — the raw bytes and the parsed `TermCaps` in one JSON file, then exit. Needs a tty on stdin; nothing is painted (§9) |
-| `--first-frame-delay <ms>` | holds the mirror's first frame for at least `<ms>` after the loading card goes up — the only way to see that card in a real binary (with a Screen Recording grant it lives a few hundred ms); with `--mock` it also draws the card (the mock mirror has no wait to cover). `Tests/krdTests/LoadingCardProcessTests.swift` proves it |
+| `--first-frame-delay <ms>` | holds the mirror's first frame for at least `<ms>` after the loading card goes up — the only way to see that card in a real binary (with a Screen Recording grant it lives a few hundred ms); with `--mock` it also draws the card (the mock mirror has no wait to cover). The hold sits **behind `startInput()`**: raw mode, mouse reporting and the input reader are already up when it starts, so only the *picture* is held — keys typed during a hold go where they go in any other second (nowhere with `--no-input`), and the 1 Hz `CSI 5n` probe stays behind the hold so none of its questions go out unanswered (#230, #227). `Tests/krdTests/LoadingCardProcessTests.swift` proves it |
 
 On the **real binary** — the one `swift test` builds next to the test bundle, from the same target
 that ships — and not on #217's copy of `LoadingView.swift`, that pty test proves: the card is drawn,
@@ -247,7 +247,11 @@ the `a=f` loop started exactly once; a terminal that refuses `a=f` still gets th
 old ~22.5 KB per 110 ms tick (shape, tick size and rate — byte identity is pinned by
 `LoadingViewTests`, which this test does not replace). By hand: `krd --mirror --mock
 --first-frame-delay 5000` holds the card five seconds; `--log <path>` records `loading card down
-after <ms> ms`.
+after <ms> ms`. The same hold on the **live** path is a live session, not a frozen one: `krd
+--mirror --first-frame-delay 5000 --log <path>` (a real terminal, or a pty that answers `CSI 5n`)
+puts the mouse modes and the reader up before the hold, so a key typed while the card is up is
+delivered at once and not echoed — with `--debug --dry-run` the log shows `input: key code=…`
+*before* the `loading card down` line, which is what cooked mode would invert.
 
 `stats:` line, once per second with `--debug` (field-by-field in
 [ARCHITECTURE §9](ARCHITECTURE.md#9-diagnostics-wiring)):

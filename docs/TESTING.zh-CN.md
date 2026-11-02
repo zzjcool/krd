@@ -194,7 +194,7 @@ input: key code=0 flags=256
 | `--list` | 屏幕录制权限，以及显示器/窗口枚举，全都在碰任何像素之前 |
 | `-v`、`--version` | 手里这个二进制是不是你以为的那个：和 `VERSION` 文件、release tag 对一遍（`scripts/release.sh` 让两者保持同步） |
 | `--dump-termcaps <路径>` | **这台**终端对能力探测批次答了什么 —— 原始字节和解析后的 `TermCaps`，写进一个 JSON 文件，然后退出。stdin 必须是 tty，且不画任何东西（见 §9） |
-| `--first-frame-delay <ms>` | 镜像的第一帧被压住：加载卡上去后至少等 `<ms>` 才来 —— 真二进制里唯一看得见这张卡的办法（有屏幕录制授权时卡只活几百毫秒）；`--mock` 下它也会把卡画出来（mock 镜像本来就没有要盖住的等待）。端到端证明它的是 `Tests/krdTests/LoadingCardProcessTests.swift` |
+| `--first-frame-delay <ms>` | 镜像的第一帧被压住：加载卡上去后至少等 `<ms>` 才来 —— 真二进制里唯一看得见这张卡的办法（有屏幕录制授权时卡只活几百毫秒）；`--mock` 下它也会把卡画出来（mock 镜像本来就没有要盖住的等待）。这段等待在 **`startInput()` 之后**：等的时候 raw 模式、鼠标上报和输入读取线程都已经起来了，被压住的只是**画面**，不是会话 —— 压住期间敲的键照常送到它平时去的地方（`--no-input` 下哪儿也不去），而 1 Hz 的 `CSI 5n` 探测仍在等待之后，不会有一问没人答（#230、#227）。端到端证明它的是 `Tests/krdTests/LoadingCardProcessTests.swift` |
 
 这个 pty 测试在**真二进制**上（`swift test` 在测试 bundle 旁边构建的那个，和出货的是同一个 target）
 而不是在 #217 里那份编译进去的 `LoadingView.swift` 上，证明下面这些：
@@ -203,7 +203,11 @@ input: key code=0 flags=256
 只起一次；终端拒绝 `a=f`（或者干脆无视它）时，拿到的还是那张马赛克卡，代价照旧 —— 每 110 ms
 约 22.5 KB（形状、单帧大小和速率都对得上；逐字节相同由 `LoadingViewTests` 钉住，这个测试不替代它）。
 想用眼睛看：`krd --mirror --mock --first-frame-delay 5000` 会把卡挂住五秒；
-`--log <路径>` 里记着 `loading card down after <ms> ms`。
+`--log <路径>` 里记着 `loading card down after <ms> ms`。同一次等待在**真路径**上等的是一个活着的会话，
+不是冻住的界面：`krd --mirror --first-frame-delay 5000 --log <路径>`（真终端，或者一个会答 `CSI 5n`
+的 pty）会在等待开始前就把鼠标模式和读取线程都装上，所以卡挂着的期间敲一键是立刻送出去的、也不会回显 ——
+开 `--debug --dry-run` 时日志里的 `input: key code=…` 会出现在 `loading card down` **之前**，
+而熟模式（cooked）恰好会把这个顺序倒过来。
 
 `stats:` 行，开 `--debug` 时每秒一行（逐字段解释见
 [ARCHITECTURE §9](ARCHITECTURE.zh-CN.md#9-诊断开关的接线)）：

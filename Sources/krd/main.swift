@@ -319,12 +319,15 @@ func usage() -> String {
       --mock-size WxH     size of the generated desktop (default 1920x1200)
       --first-frame-delay <ms>
                           a test switch, like --mock: hold the loading card up by starting the
-                          stream <ms> later (1...600000), so the card can be measured on the wire
-                          in a run that otherwise does everything for real. The encode path is
-                          untouched -- the frame that finally lands is the frame a plain run
-                          lands. With --mock, which captures nothing and so would draw no card at
-                          all, it draws the live path's card and holds that one. A wall has no
-                          card: there the flag is a usage error rather than a silent no-op
+                          stream <ms> later (1...600000), so the card can be measured on the wire.
+                          Only the picture is held, never the session: raw mode, mouse reporting
+                          and the input reader are already up when the hold starts, so keys typed
+                          during it go where they go in any other second (nowhere with
+                          --no-input). The encode path is untouched -- the frame that finally
+                          lands is the frame a plain run lands. With --mock, which captures
+                          nothing and so would draw no card at all, it draws the live path's card
+                          and holds that one. A wall has no card: there the flag is a usage error
+                          rather than a silent no-op
       --list              list displays and windows, then exit (--list --json: one object)
       -v, --version       print the version and exit
 
@@ -1450,8 +1453,10 @@ final class Desk {
             }
             self.mock = mock
             // The hold goes immediately before the stream, not before the card: everything that
-            // paints (chrome, diagnostics, the card) is already up, so what the flag holds is a real
-            // session rather than a skeleton, and no mock frame has been drawn yet.
+            // paints (chrome, diagnostics, the card) is already up, and so is the input reader —
+            // `startInput()` runs above, the live path's order since #230, so raw mode and the mouse
+            // are on here too. What the flag holds is a real session rather than a skeleton, and no
+            // mock frame has been drawn yet.
             try await holdFirstFrameIfAsked()
             mock.start()
             Log.write("krd: mock \(layout.pixelW)x\(layout.pixelH) px @\(options.fps) fps, "
@@ -1677,30 +1682,37 @@ final class Desk {
         installResizeHandler()
         installDisplayChangeHandler()
 
-        // The hold `--first-frame-delay` asks for sits **between the handlers and the 1 Hz tick**, not
-        // next to the stream, and that placement is the whole of one measured bug (#227 review). The
-        // tick is `probeRoundTrip`, which writes `CSI 5n` and can only read the answer through the
-        // input reader — and the reader does not exist until `startInput()` below. A hold in front of
-        // that write spends its seconds emitting probes nobody can answer, and three misses make
-        // `RTTProbe` declare the terminal "does not implement DSR" *for the rest of the session*:
-        // measured with a pty that does answer DSR, `--first-frame-delay 5000` logged exactly that
-        // verdict and 12000 skipped the measurements outright. Started here, the tick begins once the
-        // hold is over, and its first probe lands in a session that has a reader.
-        try await holdFirstFrameIfAsked()
-        startDiagnostics()
-
-        try await capturer.start(filter: filter, sourceRect: cropForFilter(),
-                                 width: layout.pixelW, height: layout.pixelH, fps: options.fps)
-
-        startInput()
-
         // Clipboard bridge (issue #18). `--no-input` keeps the target-to-terminal half only: the
         // other half presses keys into the mirrored machine, so it is dropped rather than trusted.
+        //
+        // The policy is decided before the reader starts and put on it the moment it exists (#230):
+        // from `startInput()` on the reader forwards keys, and `--first-frame-delay`'s hold sits
+        // between that and the rest of startup — a Ctrl-V during a held card has to be read under the
+        // policy this run was started with, not under `InputReader`'s `.off` default.
         let clipboardPolicy = options.clipboard.allowing(noInput: options.noInput)
         if options.clipboardPaste != nil, options.noInput {
             throw DeskError.message("--clipboard-paste needs input: it posts Cmd-V. Drop --no-input, "
                                     + "or use --clipboard=in to only read the target's clipboard")
         }
+
+        // The hold `--first-frame-delay` asks for sits **behind `startInput()` and in front of the
+        // 1 Hz tick** — not next to the stream. Both edges are one measured bug each (#227 review,
+        // #230), and both were measured on this path, not on the mock one:
+        //
+        // *In front of the reader* the terminal is still **cooked** for the whole hold: 1…600000 ms of
+        // echoed keys sitting in the tty's line buffer, handed to the mirrored desktop only when the
+        // reader finally starts, with `?1002`/`?1006` still off so a click during the hold is not even
+        // seen. What the flag holds has to be the picture and never the session, so `startInput()`
+        // comes first: raw mode, mouse reporting and the reader are all up while the card is held.
+        // (`--no-input` never takes the tty over at all, hold or no hold — it is the same run it was.)
+        //
+        // *Behind the hold* is `probeRoundTrip`, which writes `CSI 5n` and can only read the answer
+        // through that reader. A hold in front of that write spends its seconds emitting probes nobody
+        // can answer, and three misses make `RTTProbe` declare the terminal "does not implement DSR"
+        // *for the rest of the session*: measured with a pty that does answer DSR,
+        // `--first-frame-delay 5000` logged exactly that verdict and 12000 skipped the measurements
+        // outright. So the tick still begins once the hold is over.
+        startInput()
         if !clipboardPolicy.isOff || options.clipboardPaste != nil {
             let bridge = ClipboardBridge(policy: clipboardPolicy)
             clipboard = bridge
@@ -1723,6 +1735,13 @@ final class Desk {
                           + "\(clipboardPolicy.toTarget))\n")
             }
         }
+
+        try await holdFirstFrameIfAsked()
+        startDiagnostics()
+
+        try await capturer.start(filter: filter, sourceRect: cropForFilter(),
+                                 width: layout.pixelW, height: layout.pixelH, fps: options.fps)
+
         startFrameWatchdog()
         if clipboardPolicy.toTerminal {
             let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -4170,10 +4189,11 @@ final class Desk {
     /// Called on the two paths that draw a card, and in both of them before the stream is asked for:
     /// waiting here rather than delaying the frame is what keeps the bytes out of it -- nothing on the
     /// encode path learns that a flag was typed, so the frame that finally lands is the frame a plain
-    /// run lands. The two call sites are not in the same position, and each says why: the live path has
-    /// a 1 Hz round-trip probe to keep out of the hold (it cannot be answered until `startInput()`),
-    /// while the mock path has no probe at all and holds immediately before `mock.start()` so the
-    /// whole session is up behind the card.
+    /// run lands. In both call sites the session is already **live** when the wait begins: `startInput()`
+    /// -- raw mode, mouse reporting, the reader -- runs before the hold (#230), so what the flag holds
+    /// is the picture and not the terminal. The one thing kept *behind* the hold is the live path's 1 Hz
+    /// round-trip probe, whose `CSI 5n` can only be answered through that reader (#227 review); each
+    /// call site says in place why it sits where it sits.
     private func holdFirstFrameIfAsked() async throws {
         guard let hold = options.firstFrameDelayMs else { return }
         try await Task.sleep(nanoseconds: UInt64(hold) * 1_000_000)
