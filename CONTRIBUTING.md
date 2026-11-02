@@ -43,6 +43,7 @@ back, so that loop is written down as a project skill instead of being rediscove
 .agents/skills/krd-dev/SKILL.md          # the loop, the pitfalls, the A/B protocol
 .agents/skills/krd-dev/scripts/deploy-vm.sh    # build → codesign → install into the tart VM
 .agents/skills/krd-dev/scripts/wall-runs.py    # read a frame's picture rectangles out of a capture
+scripts/shaped-link.sh                   # a slow link in front of that VM, and krd's numbers through it
 ```
 
 Short version: run the build in a **Rex** pane (`rex send` / `rex capture --format=vt`), read the

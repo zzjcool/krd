@@ -420,3 +420,74 @@ from "stopped working".
 - 30 minutes is not a day, and this VM's ScreenCaptureKit is clearly less reliable than a real
   Mac's: `-3805` after ten minutes of restarts may be a VM artefact. The watchdog and the restart
   are what make that difference survivable either way.
+
+## 12. A slow, distant link: `scripts/shaped-link.sh`
+
+krd is adaptive: `--scale auto` steps the picture down when the link cannot carry it, `--fps` has
+rungs, and `--wall-quality` trades bytes for colour before any of that. Deciding whether those are
+*right* needs a link that is measurably bad, not a guess about the café wifi.
+
+`tart` cannot do this — its only network switches are `--net-bridged` and `--net-softnet`, which are
+isolation, not a rate. macOS does have one (`dnctl` + `pfctl`, the dummynet that Xcode's Network
+Link Conditioner drives), but it needs root and rewrites this machine's packet filter. So the link
+goes in front of the VM's **sshd** instead: a userspace TCP proxy, which means the only thing being
+shaped is exactly the connection the picture bytes cross.
+
+```bash
+scripts/shaped-link.sh up                       # 80 ms each way, 200 KB/s each way
+scripts/shaped-link.sh up --delay 200 --rate 40 # a bad hotel link
+scripts/shaped-link.sh status                   # the toxics in force + a measured proof
+scripts/shaped-link.sh compare --secs 20        # baseline vs shaped, one table each
+scripts/shaped-link.sh run --secs 40 -- --mirror --fps 30 --zoom 2
+scripts/shaped-link.sh down
+```
+
+`up` prints the link's own proof, so the krd numbers below it are attributable rather than assumed:
+
+```
+ssh round trip (3x): 1.40 1.39 1.40 s          (0.12 s unshaped)
+2 MiB guest -> host: 11.99 s (171 KB/s)        (0.13 s unshaped)
+```
+
+`compare` runs the same krd twice, direct and through the shaper, and prints one line per sampled
+second straight from `--stats-json`. (The tables below are the release installed in the VM,
+`~/bin/krd` 0.2.0, on its own mostly-static desktop — a *relative* reading, not a budget.)
+
+```
+== baseline (direct)  (8 s)
+    t   fps   MB/s  scale  qual   KB  write_ms  pipe_p99  late
+    1  18.9  1.106   1.00    80   20       1.0      38.6     0
+    ...
+   cells 146x46  mean fps 19.48  mean 0.583 MB/s  scales [1.0]  quality [80]  late 0/156
+
+== shaped (shaped)  (12 s)
+    t   fps   MB/s  scale  qual   KB  write_ms  pipe_p99  late
+    1   9.0  0.838   1.00    80   22       0.0     260.3     3
+    2   3.0  0.110   1.00    80   14       0.0     529.2     3
+    ...
+    9   3.0  0.132   1.00    50   48       0.0     536.8     3
+   cells 146x46  mean fps 4.03  mean 0.193 MB/s  scales [1.0]  quality [50, 70, 80]  late 38/44
+```
+
+Reading it: `pipe_p99` jumps to the link's own scale (mine sat at ~537 ms, i.e. one frame's payload
+through 200 KB/s plus the 160 ms of latency), `write_ms` shows the blocked writes, `late` counts the
+frames the write side could not keep up with. The *order* of the retreat is the thing to look at:
+`quality` 80 → 70 → 50 first, and `scale` only after that — on a 30 s run at 80 ms / 200 KB/s the
+scale step did not arrive until **t≈24 s**, with the picture sitting at 1–2 fps in between. Too
+late or exactly right is a judgement, but it is now a measurable one.
+
+Two things this mode cannot do:
+
+- **`--wall`.** The per-second tick is mirror-only: the wall runs `wallTick()` instead (`#199` — the
+  same `CSI 5n` probe, the same `LinkVerdict`, drawn as the header pill), so `--stats-json` is never
+  written and `--debug`'s `stats:` line is never printed. The script refuses `--wall` rather than
+  reporting silence; the wall's answer to a bad link is the pill plus its `wall …` log lines.
+- **A terminal that does not answer `CSI 5n`.** The tables come from the pipe, not from the
+  terminal: `rtt_ms` stays `-1` and the verdict stays `unknown` unless a real terminal (Rex, kitty,
+  Ghostty) is on the other end. That is a property of the harness, not of the link.
+- **A still screen.** The VM desktop is mostly static, so a healthy run is a few hundred KB/s, not
+  the 1.8 MB/s a colour-heavy frame costs. Put something that animates on the VM's screen
+  (`caffeinate -u -t 600` plus a video) if the numbers need to represent a busy desktop.
+
+`probe/pipe_probe.py` is the local cousin: it starves krd on one machine by draining the *pty* at a
+fixed rate. This one shapes a real TCP link between two machines, which is what "krd over ssh" is.
