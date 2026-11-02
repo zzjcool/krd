@@ -15,9 +15,9 @@ import krdcore
 /// Deliberately not a byte-for-byte golden: CoreGraphics antialiasing is allowed to differ between
 /// macOS releases, and a test that fails on a runner upgrade teaches people to re-baseline without
 /// looking. The assertions below are the properties that would still have to hold after a redraw:
-/// ink coverage is plausible, the four picture beats differ, the blink closes the eyes, the one
-/// brand-blue dot is there when they are open, and the paper is exactly the paper — which is what
-/// makes the card's cells and the picture's own background the same black on screen.
+/// ink coverage is plausible, the four picture beats differ, the blink closes the eyes, the drawing
+/// still carries the one brand-blue dot, and the paper is exactly the paper — which is what makes the
+/// card's cells and the picture's own background the same black on screen.
 final class MascotArtTests: XCTestCase {
     private let paper = MascotRGB(hex: "#080a10")
     private let blue = MascotRGB(hex: "#5eb8ff")
