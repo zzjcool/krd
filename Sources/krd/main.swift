@@ -141,6 +141,10 @@ struct Options {
     var record: String? = nil
     var recordFrames = 60
     var statsJSON: String? = nil
+    /// `--dump-termcaps <path>`: write the capability batch's answers (raw bytes and parsed) to
+    /// `<path>`, then exit (issue #226). A diagnostic like `--bench`, not a mode: it asks the
+    /// terminal and paints nothing.
+    var dumpTermcaps: String? = nil
     /// The TUI layer: a status line plus panels on the rows the picture does not use.
     var dev = false
     /// Force the layer off, even with `--dev` (scripts, CI, `--bench`).
@@ -329,6 +333,10 @@ func usage() -> String {
       --record-frames <n> stop recording after n frames (default 60)
       --replay <dir>      feed recorded frames through the real pipeline
       --stats-json <path> per-second stats as NDJSON (implies the --debug stats)
+      --dump-termcaps <path>
+                          write what this terminal answered to the capability batch (raw
+                          bytes + parsed TermCaps) to <path>, then exit. Needs a tty on
+                          stdin: it is the same one-write probe a real start-up sends
 
     headless (text, no frames, no Screen Recording needed):
       ax windows          list on-screen windows as text
@@ -632,6 +640,10 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             options.replay = try value("--replay", args, &i)
         case "--stats-json":
             options.statsJSON = try value("--stats-json", args, &i)
+        case "--dump-termcaps":
+            options.dumpTermcaps = try value("--dump-termcaps", args, &i)
+        case let arg where arg.hasPrefix("--dump-termcaps="):
+            options.dumpTermcaps = String(arg.dropFirst("--dump-termcaps=".count))
         case "--log":
             options.logPath = try value("--log", args, &i)
         case "--dry-run": options.dryRun = true
@@ -1127,6 +1139,17 @@ final class Desk {
             // A log line, not stderr: inside a pane a line of text scrolls the picture off its own
             // grid (CONTRIBUTING.md rule 1), and `Log` is a file whenever logging is configured.
             Log.write("krd: passthrough \(passthrough.on ? "on" : "off") (\(passthrough.why))\n")
+        }
+        // `--dump-termcaps <path>`: write down what this terminal answered, then exit (issue #226).
+        //
+        // Here, above every painting branch and above `--bench`/`--selftest`, because it *is* the
+        // probe and nothing else: it must not start a capture, register a signal handler, or draw a
+        // byte. The passthrough resolver is the one thing above it that has to have run — the
+        // graphics APCs of the `U=1`/`a=f` questions are only a question when tmux forwards them
+        // (issue #107), so a dump asked before the envelope was decided would report answers about
+        // the wrong bytes. A diagnostic, so it changes nothing about how krd starts.
+        if let path = options.dumpTermcaps {
+            dumpTermCaps(to: path)
         }
         effectiveFps = options.fps
         frameGate = FrameGate(fps: options.fps)
@@ -2770,6 +2793,35 @@ final class Desk {
             if options.debug { arguments.append("--debug") }
         }
         return arguments
+    }
+
+    /// `--dump-termcaps <path>`: ask this terminal the questions a start-up asks, write the answers to
+    /// a file, and exit (issue #226). Never returns.
+    ///
+    /// The batch is `TermCaps.probeReport` — literally the call `prepareGraphemeMode` makes below, so
+    /// the raw bytes in the file are the bytes a real run sends and the parsed fields are the values
+    /// `prepareTheme`/`prepareGraphemeMode` would act on. The two graphics questions come from the
+    /// product's own probe (`TermGeometry.supportsPlaceholders`/`supportsAnimationFrames`), which is
+    /// where `U=1` and `a=f` are decided; they cannot ride in the batch (an APC answer is not a `CSI`
+    /// and a refusal is silence), so a dump is a batch plus the one probe that has its own timeout.
+    ///
+    /// One line on stderr and nothing on stdout: a reader runs this *inside* the terminal they want to
+    /// know about, and stdout is that terminal's stream. The file is the evidence — two dumps of two
+    /// terminals diff line by line.
+    ///
+    /// It exits non-zero when the file cannot be written (a path that does not exist), because a dump
+    /// nobody can read is not a diagnostic; a terminal that answers nothing is *not* a failure — that
+    /// is an answer, and it is in the file.
+    private func dumpTermCaps(to path: String) -> Never {
+        let report = TermCapsDump.ask()
+        do {
+            let line = try TermCapsDump.write(report, to: path)
+            FileHandle.standardError.write(Data("krd: wrote \(path): \(line)\n".utf8))
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("krd: could not write \(path): \(error)\n".utf8))
+            exit(1)
+        }
     }
 
     /// One question per process, before the first cell: which grapheme-clustering mode (`DECRQM`

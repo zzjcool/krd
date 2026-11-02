@@ -1,0 +1,5 @@
+krd: wall cell 7x14 px, the pty's pixel size 560x336 - 80x24 cells, 1.0x pictures
+krd: grapheme clustering (2027) was no answer — left as the terminal had it
+krd: terminal colours (OSC 10/11) fg #000000 bg #FFFFFF — scheme light; 2031 not asked for (DECRQM says the mode is not recognised)
+krd: wall cell 7x14 px, the pty's pixel size 560x336 - 80x24 cells, 1.0x pictures
+krd: the terminal did not answer the U=1 probe: pixel-sized pictures

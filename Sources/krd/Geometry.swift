@@ -262,8 +262,17 @@ extension TermGeometry {
         if isatty(STDIN_FILENO) != 0 { DeleteProbeImages() }
         placeholdersAnswer = placeholderProbeVerdict(reply)
         animationFramesAnswer = animationFrameVerdict(reply)
+        probeReply = reply
         probeAsked = true
     }
+
+    /// The graphics probe's raw reply, for `--dump-termcaps` and nothing else (issue #226).
+    ///
+    /// The two verdicts above are what the product acts on; a report of a *real* terminal has to be
+    /// able to show the bytes those verdicts were read from, or an `a=f` cell in a table is a claim
+    /// about a string nobody can see. Read-only, and consulted by no path that paints.
+    private static var probeReply: String?
+    static var graphicsProbeReply: String? { probeReply }
 
     /// The probe's APCs, as bytes, without a terminal — built from the same bodies
     /// `supportsPlaceholders`/`supportsAnimationFrames` send and `DeleteProbeImages` deletes, so

@@ -1,0 +1,5 @@
+krd: wall cell 16x34 px, the pty's pixel size 2420x1886 - 151x55 cells, 1.0x pictures
+krd: grapheme clustering (2027) was 1 — left as the terminal had it
+krd: terminal colours (OSC 10/11) fg #FFFFFF bg #282C34 — scheme dark; 2031 on for this session, off on the way out
+krd: wall cell 16x34 px, the pty's pixel size 2420x1886 - 151x55 cells, 1.0x pictures
+krd: the terminal answered a U=1 placeholder: pictures are fitted into their cells

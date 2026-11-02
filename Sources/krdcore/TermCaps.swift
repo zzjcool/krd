@@ -230,6 +230,32 @@ public struct TermCaps: Equatable {
         return RGB.parse(String(rest[..<end]))
     }
 
+    /// One probe's trip to the terminal: the answers, and how they arrived.
+    ///
+    /// The product only ever reads `caps`. `--dump-termcaps` (issue #226) reads the rest, because the
+    /// two facts a parsed `TermCaps` cannot carry are exactly the two a table of *real* terminals has
+    /// to report: whether the `DA1` ended the read or the deadline did (`caps.terminated` says which,
+    /// `elapsedMs` says what the wait cost), and whether the answers came back in one read or several
+    /// (`reads`). Nothing here is used to decide anything — a diagnostic reads it, the product does not.
+    public struct Probe: Equatable {
+        /// Every byte the terminal sent back, `DA1` included; `nil` when nothing came back at all.
+        public var reply: String?
+        /// How many `read(2)`s returned bytes. One is one write's worth of answers; more means the
+        /// terminal answered over several writes (or the kernel split one write's answers).
+        public var reads: Int
+        /// Milliseconds from the write (or the failed `tcgetattr`) to the read that ended the loop.
+        public var elapsedMs: Double
+        /// The same bytes, parsed — what a caller acts on.
+        public var caps: TermCaps
+
+        public init(reply: String? = nil, reads: Int = 0, elapsedMs: Double = 0, caps: TermCaps = .none) {
+            self.reply = reply
+            self.reads = reads
+            self.elapsedMs = elapsedMs
+            self.caps = caps
+        }
+    }
+
     /// Write the batch and read until the `DA1` — the one probe (issue #197).
     ///
     /// Returns `.none` when there is no terminal to ask: `ask` fails on a stdin that is not a tty
@@ -237,7 +263,18 @@ public struct TermCaps: Equatable {
     /// The paths that own stdout and read no input — `--bench`, `--selftest`, `--list` — never call this
     /// in the first place.
     public static func probe(timeoutMs: Int = 500) -> TermCaps {
-        parse(ask(query, timeoutMs: timeoutMs, until: isComplete))
+        probeReport(timeoutMs: timeoutMs).caps
+    }
+
+    /// `probe`, plus the trip: the raw reply and the two numbers only a report wants.
+    ///
+    /// The same call, the same single write, the same parser — `probe` is this minus the report, so
+    /// `--dump-termcaps` cannot drift from what a start-up asks (issue #226: a dump that asked
+    /// different questions would be evidence about a program nobody runs).
+    public static func probeReport(timeoutMs: Int = 500) -> Probe {
+        let asked = askCounted(query, timeoutMs: timeoutMs, until: isComplete)
+        return Probe(reply: asked.reply, reads: asked.reads, elapsedMs: asked.elapsedMs,
+                     caps: parse(asked.reply))
     }
 
     /// Write `bytes` to the terminal and collect what comes back for up to `timeoutMs`, with stdin in
@@ -250,8 +287,20 @@ public struct TermCaps: Equatable {
     /// The bytes leave through the same sink as everything else (issue #107): one write loop, and
     /// `GraphicsAPC.writeRaw` asserts its envelope there rather than trusting each call site.
     public static func ask(_ bytes: String, timeoutMs: Int, until: (String) -> Bool) -> String? {
+        askCounted(bytes, timeoutMs: timeoutMs, until: until).reply
+    }
+
+    /// `ask`, plus how the answer arrived: the number of `read(2)`s that returned bytes, and how long
+    /// the loop ran. Same raw mode, same one write, same terminator — the counters are the difference,
+    /// and they are what lets a report say "this terminal answers in two writes" (issue #226).
+    public static func askCounted(_ bytes: String, timeoutMs: Int, until: (String) -> Bool)
+        -> (reply: String?, reads: Int, elapsedMs: Double) {
+        let started = Date()
+        func atDeadline() -> (reply: String?, reads: Int, elapsedMs: Double) {
+            (nil, 0, Date().timeIntervalSince(started) * 1000)
+        }
         var original = termios()
-        guard tcgetattr(STDIN_FILENO, &original) == 0 else { return nil }
+        guard tcgetattr(STDIN_FILENO, &original) == 0 else { return atDeadline() }
         var raw = original
         raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
         // c_cc[0]/[1] are VEOF/VEOL on macOS, not VMIN/VTIME: name them, or the fd keeps blocking.
@@ -259,10 +308,11 @@ public struct TermCaps: Equatable {
             p[Int(VMIN)] = 0
             p[Int(VTIME)] = 0
         }
-        guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return nil }
+        guard tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0 else { return atDeadline() }
         defer { tcsetattr(STDIN_FILENO, TCSANOW, &original) }
         GraphicsAPC.writeRaw(bytes)
         var response = ""
+        var reads = 0
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
         var buffer = [UInt8](repeating: 0, count: 256)
         while Date() < deadline, !until(response) {
@@ -270,9 +320,12 @@ public struct TermCaps: Equatable {
             let remaining = max(1, Int32(deadline.timeIntervalSinceNow * 1000))
             guard poll(&pfd, 1, remaining) > 0 else { continue }
             let n = Darwin.read(STDIN_FILENO, &buffer, buffer.count)
-            if n > 0 { response += String(decoding: buffer[0..<n], as: UTF8.self) }
+            if n > 0 {
+                reads += 1
+                response += String(decoding: buffer[0..<n], as: UTF8.self)
+            }
         }
-        return response.isEmpty ? nil : response
+        return (response.isEmpty ? nil : response, reads, Date().timeIntervalSince(started) * 1000)
     }
 
     /// `CSI <code> ; <height> ; <width> t` — one of the two size answers.
