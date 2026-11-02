@@ -309,8 +309,9 @@ that back asks `make(fillsCells:)` for the cell box itself. A placeholder grid i
 but only on a terminal that draws one image pixel per device pixel: there `--scale < 1` never
 shortens a placeholder frame. A terminal whose cell arrived in *points* draws the image at its own
 size and scales it into the cell box, so `--scale` stays bandwidth and the frame really is `scale`
-of the box (`--mock --placeholders --scale 0.8 --pane 137x44` prints `frame 877x550 px` underneath a
-1096x688 cell box).
+of the box (`--mock --placeholders --scale 0.8 --pane 137x44` prints `frame 1754x1101 px` underneath a
+2192x1376 cell box - the cells are **device** pixels: an 8x16 *reported* cell doubled by `dpr` 2,
+which is the one number both pages of a pane read, issue #206).
 
 ### Zoom: showing less at full density
 

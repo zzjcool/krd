@@ -163,4 +163,59 @@ final class PaneGeometryTests: XCTestCase {
         XCTAssertTrue(assumed.paintsDifferently(from: wider))
         XCTAssertTrue(assumed.paintsDifferently(from: silent.with(cols: 120, rows: 44)))
     }
+
+    // MARK: - one rule, both pages (issue #206)
+
+    /// The multiplication the mirror used to skip. `dpr` is *device pixels per reported pixel*: it is
+    /// 1 when the cell already arrived in device pixels (the pty's `ws_xpixel`, an operator's
+    /// `--cell`), 2 when only an ANSI answer was available, and `--dpr` overrides both.
+    ///
+    /// This is one function because it was two rules in two places: the wall captured at
+    /// `cell x dpr` (`wallPanels`), the mirror at `cell`, and one pane drew two pictures of different
+    /// sizes - the mirror's covering 47.06 % x 48.48 % of its cell box on a pane that reported points.
+    func testTheDevicePixelRatioIsOneRuleForBothPages() {
+        XCTAssertEqual(PaneGeometry.devicePixelRatio(explicit: nil, deviceCell: true), 1,
+                       "a pty that filled ws_xpixel is already device pixels: nothing to multiply")
+        XCTAssertEqual(PaneGeometry.devicePixelRatio(explicit: nil, deviceCell: false), 2,
+                       "a cell that arrived in points is half a device cell: 2 is the documented default")
+        XCTAssertEqual(PaneGeometry.devicePixelRatio(explicit: 3, deviceCell: true), 3,
+                       "--dpr is the operator's number, even over a device cell")
+        XCTAssertEqual(PaneGeometry.devicePixelRatio(explicit: 1, deviceCell: false), 1,
+                       "--dpr 1 must be able to ask for the older, smaller frame")
+        // …and a measurement really does take it, so the helper is not a parallel truth.
+        let pinned = PaneGeometry.measure(cell: (w: 17, h: 33), grid: (cols: 137, rows: 44),
+                                          dpr: nil, askTerminal: false) { _ in }
+        XCTAssertEqual(pinned.dpr, PaneGeometry.devicePixelRatio(explicit: nil, deviceCell: true))
+    }
+
+    /// The two pages' arithmetic, side by side. `TermGeometry` is what the mirror measures a frame
+    /// from and `PaneGeometry` is what the wall does, so their `pictureCell` must be the same number
+    /// for the same reported cell and dpr - the disagreement *was* issue #206.
+    func testTheMirrorAndTheWallFrameTheSameCell() {
+        // Both are process-wide statics, so a test that writes them owes the next one a restore.
+        let previousPin = TermGeometry.pinnedCell
+        let previousFallback = TermGeometry.fallbackCell
+        TermGeometry.pinnedCell = nil
+        TermGeometry.fallbackCell = (w: 8, h: 16)
+        defer {
+            TermGeometry.pinnedCell = previousPin
+            TermGeometry.fallbackCell = previousFallback
+        }
+        // 141x56 with no `ws_xpixel` and no `CSI 16t` answer: the pane that reports points.
+        let geometry = TermGeometry(cols: 141, rows: 56, pixelWidth: 0, pixelHeight: 0)
+        let reported = geometry.cellSize
+        XCTAssertEqual(reported.w, 8, "no ws_xpixel and no pin: the documented fallback")
+        for dpr in [1.0, 2.0, 2.125] {
+            let mirror = geometry.pictureCell(scale: dpr)
+            let wall = PaneGeometry(cols: 141, rows: 56, cellW: reported.w, cellH: reported.h,
+                                    dpr: dpr, source: "test").pictureCell(scale: dpr)
+            XCTAssertEqual(mirror.w, wall.w, accuracy: 1e-12, "dpr \(dpr)")
+            XCTAssertEqual(mirror.h, wall.h, accuracy: 1e-12, "dpr \(dpr)")
+        }
+        XCTAssertEqual(geometry.pictureCell(scale: 2).w, 16,
+                       "a points cell of 8x16 is 16 device px at dpr 2")
+        XCTAssertEqual(geometry.pictureCell(scale: 2).h, 32)
+        XCTAssertEqual(geometry.cellSize.w, 8,
+                       "the reported cell itself must not move: the mouse path divides by it")
+    }
 }

@@ -322,8 +322,12 @@ Two independent decisions, one each:
   source's own points. It **may exceed 1**: a 1024x678 window in an 88x30 pane (1496x990 px) is drawn
   at 1.46x and fills the pane. That enlargement costs no bytes — the terminal does it.
 - **captured pixels = the picture's cell box × `--scale`** is how many pixels we *send*: `cols x cellW`
-  by `rows x cellH` from the fit (`TileGrid.make`), which on a placeholder grid on a terminal that
-  draws one image pixel per device pixel is the box itself and nothing else (#121). More than the source has is normal - a
+  by `rows x cellH` from the fit (`TileGrid.make`), where the cell is in **device** pixels — the
+  terminal's *reported* cell times `dpr` (2 when it answered in points, 1 when the pty reported
+  `ws_xpixel`, `--dpr` overrides). That one number is what the wall and the mirror both frame
+  (issue #206: the mirror used the reported cell, and a points pane drew its picture at 47 % of its
+  cell box). On a placeholder grid on a terminal that
+  draws one image pixel per device pixel it is the box itself and nothing else (#121). More than the source has is normal - a
   1920-px display in a 2006-px page asks for 2006 and the *stream* upscales to it; only a *screenshot*
   is capped at the source, because a too-large request comes back padded with black (#69). `--scale`
   only ever takes pixels away.
