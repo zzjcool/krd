@@ -293,8 +293,11 @@ final class WallProcessTests: XCTestCase {
         child.executableURL = binary
         // A mirror that knows where it came from: the `[ - ]` button and `Ctrl-\` both end here.
         // `--cell` because a pty reports no pixel size, and the query path would spend the test's
-        // first seconds waiting for a reply that never comes.
-        child.arguments = ["--mirror", "--wall-at", "0:0", "--pane", "60x24", "--cell", "8x20"]
+        // first seconds waiting for a reply that never comes. `--no-takeover` because this is the
+        // one spawn in the suite with no `--mock`/`--demo`: it would otherwise ask a live
+        // `.build/debug/krd` for the screen (`Takeover`), which is not this test's subject.
+        child.arguments = ["--mirror", "--wall-at", "0:0", "--pane", "60x24", "--cell", "8x20",
+                           "--no-takeover"]
         let pane = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         child.standardInput = pane
         child.standardOutput = pane

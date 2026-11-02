@@ -424,8 +424,14 @@ krd: frame 1920x1200 px, grid wants 1920x1200 px (118x38 cells of 17.0x33.0 px, 
 `-3805`（"failed during stream due to application connection being interrupted"），墙的截图也会是空的。
 这不是权限问题，也不是目标窗口的问题：被拒绝的是**第二个**客户端，不管它是谁、抓什么。这也正是点击用
 `exec` 而不是 spawn 一个子进程的原因（设计 §12 P3b）。
-**解决。** `pgrep -fl krd` 找到旧的，关掉它（终端已经没了就 `pkill -f /path/to/krd`）。一台机器同时只留
-一个 krd。
+**解决。** 现在不用手动做了：即将向 ScreenCaptureKit 申请客户端的 `krd`，会先让同一可执行文件路径下排在
+它前面的副本让位，然后接管屏幕（`Takeover.swift`：先 `SIGTERM`，卡在抓屏调用里的一律 `SIGKILL` ——
+信号被忽略不等于客户端被释放，这一点在 tart VM 上实测过）。三种情况会拒绝并照常画：根本不抓屏的运行
+（`--selftest`、`--bench`、`--replay`、`--mock`、`--demo`、纯列表）、图片流被重定向的运行
+（`krd … >/dev/null`）、以及带 `--no-takeover` 的运行。两个副本同时启动时 pid 更大（也就是更新的那个）
+赢，另一个会把自己的退让写进日志。日志会写明它从哪些 pid 手里接过屏幕、花了多少毫秒，这样「还是没图」的
+会话仍然有据可查。这个机制出现之前，解决方式是 `pgrep -fl krd` 找到旧的关掉（终端没了就
+`pkill -f /path/to/krd`）—— 在跑旧版本的机器上，这仍然是正确做法。
 
 ### 24. 流无声无息地死了
 

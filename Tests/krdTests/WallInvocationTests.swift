@@ -306,6 +306,21 @@ final class StickyArgumentTests: XCTestCase {
         XCTAssertTrue(again.qualityAuto)
     }
 
+    /// The takeover is a decision about *this* pane and this screen, so a session that declined it
+    /// must not have the mirror it hands the pane to take the screen from the copy it was protecting
+    /// (`Takeover`, §23c). Nothing else about the hand-over changes: an untyped run carries nothing.
+    func testNoTakeoverSurvivesTheHandOver() throws {
+        let typed = try options(["--no-takeover"])
+        let sticky = Desk.stickyArguments(typed)
+        XCTAssertEqual(sticky, ["--no-takeover"], "one token, and only when it was typed")
+        for arguments in [Desk.wallArguments(at: (1, 2), sticky: sticky),
+                          Desk.mirrorArguments(windowID: nil, cell: nil, at: (1, 2), sticky: sticky)] {
+            XCTAssertTrue(try options(arguments).noTakeover, "\(arguments) keeps the refusal")
+        }
+        XCTAssertEqual(Desk.stickyArguments(try options([])), [],
+                       "a default run hands over nothing")
+    }
+
     /// An eager 80 came back guarded across a wall -> mirror hand-over: `--quality 80` is the bit
     /// depth and cannot spell the other half of the same `QualityBudget` (issue #87).
     func testTheEagerHalfOfQualitySurvivesTheHandOver() throws {

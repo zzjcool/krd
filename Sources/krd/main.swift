@@ -149,6 +149,12 @@ struct Options {
     var dev = false
     /// Force the layer off, even with `--dev` (scripts, CI, `--bench`).
     var noChrome = false
+    /// `--no-takeover`: paint without taking the screen from an earlier `krd`.
+    ///
+    /// Default is to take it: ScreenCaptureKit gives one executable one client, so while an earlier
+    /// copy is alive this session's pictures do not exist at all (`Takeover`, §23c). Refused here
+    /// for the one case that means it: two panes, one of them an old session to compare against.
+    var noTakeover = false
     /// Open a panel at startup, for screenshots and for `--dev --selftest` without input.
     var devPanel: String? = nil
     /// The landing screen: the display plus the most recently used windows, as pictures.
@@ -304,6 +310,13 @@ func usage() -> String {
                           Selects the mirror -- the wall owns every row, so `--wall --dev` is a
                           usage error rather than a flag that does nothing
       --no-chrome         force the TUI layer off, e.g. for scripts
+      --no-takeover       paint without taking the screen from an earlier krd. By default a
+                          session that is about to capture asks the copies of this executable that
+                          came before it to leave (SIGTERM, then SIGKILL for one wedged in a capture
+                          call) and takes the screen: one executable may only be one ScreenCaptureKit
+                          client, so an older copy still running is exactly why the new session would
+                          draw no pictures at all. `--selftest`, `--bench`, `--replay`, `--mock`,
+                          `--demo`, a listing and a redirected picture stream never take it
       --dev-panel <name>  with --dev: open stats|devices|settings|log|help at startup
       --mirror            the whole display as one picture at --fps (the old behaviour; plain krd
                           now opens the wall: the display on top, the three most recent windows
@@ -704,6 +717,7 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
                                                      wants: "a hold of 1...600000 ms",
                                                      min: 1, max: 600_000)
         case "--no-chrome": options.noChrome = true
+        case "--no-takeover": options.noTakeover = true
         // The default since phase 4; kept because scripts and muscle memory spell it.
         case "--wall": options.wall = true; wallPinned = true
         case "--mirror": options.wall = false; wallPinned = false
@@ -1464,6 +1478,15 @@ final class Desk {
             while true { try await Task.sleep(nanoseconds: 1_000_000_000) }
         }
 
+        // Taking the screen from an earlier krd, at the boundary where this run is about to become
+        // the executable's ScreenCaptureKit client: below every refusal (a `--scale` this parser
+        // rejected must not kill the reader's wall first) and above both capturing branches. The
+        // line goes to the log, never to the pane (`paintsThePane` gave every capturing run a file).
+        if Takeover.wanted(options: options, capturesTheScreen: Self.capturesTheScreen(options),
+                           isTerminal: isatty(STDOUT_FILENO) == 1) {
+            let takeover = Takeover.takeTheScreen()
+            if !takeover.isEmpty { Log.write("krd: \(takeover.sentence)\n") }
+        }
         // The wall is text and needs no grant: `CGWindowListCopyWindowInfo` hands out owner, pid,
         // bounds and window number without one (only `kCGWindowName` is withheld, and a card with
         // no title draws `window N`). This branch is therefore strictly before the first
@@ -2758,6 +2781,23 @@ final class Desk {
         !listsOnly(options)
     }
 
+    /// The *other* question about a run, and the one that decides whether it may take the screen
+    /// from an earlier copy: will it ask for the one ScreenCaptureKit client?
+    ///
+    /// `paintsThePane` is not that question, and the difference is exactly the paths where it would
+    /// be wrong to kill anything (`main.swift`'s own prose says so two screens above): `--selftest`
+    /// checks a byte contract and "never touches ScreenCaptureKit", `--bench`/`--bench-wire` hash
+    /// their own frames, `--replay` decodes a file, `--mock`/`--demo` draw a desk in process, and a
+    /// listing exits after printing. All of them paint, none of them can collide with a wall — and
+    /// the repo's own recipes run them in a terminal (`KRD_DUMP=… krd --selftest … >/dev/null` in
+    /// CONTRIBUTING.md, TESTING.md). Pure, so the list is a test rather than a comment.
+    static func capturesTheScreen(_ options: Options) -> Bool {
+        if Desk.listsOnly(options) { return false }
+        if options.selftest || options.bench || options.benchWire != nil { return false }
+        if options.replay != nil || options.mock || options.demo { return false }
+        return true
+    }
+
     /// Whether leaving means *returning* to the wall (`exec`) rather than exiting: only a mirror the
     /// wall handed its pane to has a wall to go back to.
     ///
@@ -2879,6 +2919,10 @@ final class Desk {
             arguments.append(placeholders ? "--placeholders" : "--no-placeholders")
         }
         if options.square { arguments.append("--square") }
+        // The takeover decision is about this pane and this screen, not about one process: a session
+        // started with `--no-takeover` that hands the pane to a mirror must not have that mirror take
+        // the screen from the copy the flag was protecting.
+        if options.noTakeover { arguments.append("--no-takeover") }
         if options.drawsCursor { arguments.append("--cursor") }
         // Diagnostics follow their file, never the picture: without `--log` the hand-over leaves
         // `--debug` behind, because the next process's stderr *is* the picture - the mirror's first
@@ -4533,7 +4577,15 @@ final class Desk {
         for sig in [SIGTERM, SIGHUP, SIGINT] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .global(qos: .userInitiated))
-            source.setEventHandler { [weak self] in self?.shutdown() }
+            source.setEventHandler { [weak self] in
+                // SIGTERM is not typed by anyone: it is a script, a supervisor, or a newcomer asking
+                // for the screen (`Takeover`) and about to ask again harder. A mirror that came back
+                // as a wall (returnsToWall) would be a picture in a pane nobody is taking back from
+                // us, mid-handover, only to be SIGKILLed there a moment later. Leaving is what the
+                // signal means. The terminal's own keys (Ctrl-\, `q`, the shrink button) are not
+                // signals and still go back to the wall.
+                self?.shutdown(returnsToWall: sig != SIGTERM)
+            }
             source.resume()
             signalSources.append(source)
         }
@@ -5617,7 +5669,9 @@ final class Desk {
         chromeDirty = true
     }
 
-    func shutdown() {
+    /// `returnsToWall: false` for a signal: see `installSignalCleanup` — a process told to leave does
+    /// not get to leave a replacement behind in the pane it is leaving.
+    func shutdown(returnsToWall: Bool = true) {
         guard !cleanedUp else { return }
         cleanedUp = true
         followTimer?.cancel()
@@ -5657,7 +5711,7 @@ final class Desk {
         // Only a *mirror* returns (`returnsToWall`): a wall that carries `--wall-at` to remember its
         // page used to exec itself here, so Ctrl-\\ looked dead and SIGHUP left it orphaned with the
         // capture stream still open.
-        if Self.returnsToWall(options), let at = options.wallAt {
+        if returnsToWall, Self.returnsToWall(options), let at = options.wallAt {
             writer.endSession()
             Self.execSelf(Self.wallArguments(at: at, exit: exitStatus, said: failureSaid,
                                              sticky: Self.stickyArguments(options)))

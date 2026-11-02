@@ -213,6 +213,19 @@ final class ArgumentTests: XCTestCase {
                        "--first-frame-delay needs a value")
     }
 
+    /// `--no-takeover` is the one switch on the takeover (`Takeover`, §23c) that the reader sets,
+    /// and it has to be spelled here rather than only set on `Options` in a test: an unknown flag is
+    /// a usage error, so a parser that lost the case would exit 2 with every other test still green.
+    func testNoTakeoverIsATypedFlagAndNotADefault() throws {
+        XCTAssertFalse(try parseArguments(["krd"]).noTakeover,
+                       "taking the screen from a leftover krd is the default")
+        XCTAssertTrue(try parseArguments(["krd", "--no-takeover"]).noTakeover)
+        XCTAssertTrue(try parseArguments(["krd", "--mirror", "--no-takeover"]).noTakeover)
+        XCTAssertEqual(refusal(["krd", "--no-takeover", "yes"]),
+                       "unexpected argument \"yes\" (try `krd --help`)",
+                       "the flag takes no value")
+    }
+
     /// A wall paints text and owns every row, so it has no loading card to hold: the flag there can
     /// only be a no-op, which reads as a bug. The sentence has to carry the way out -- `--dev` on the
     /// wall learned the same lesson (issue #116).

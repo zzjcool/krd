@@ -379,6 +379,7 @@ pane    137 × 73 格               单元格 17 × 33 px
 | `--dev` | `Chrome` + `startChrome()`：TUI 层，预留一行状态栏，面板按需占行。它会选镜像——墙占满每一行，所以 `--wall --dev` 是用法错误，而不是被丢掉的开关（#116） |
 | `--dev-panel` | 在第一次布局前就打开面板，用于截图和 pty 测试 |
 | `--no-chrome` | 强制关闭该层，方便把 `--dev` 写进包装脚本 |
+| `--no-takeover` | 拒绝接管（`Takeover`）：默认情况下，要抓屏的会话会先让同一可执行文件路径下排在它前面的副本让位 —— 先 `SIGTERM`，卡在抓屏调用里的一律 `SIGKILL` —— 因为 ScreenCaptureKit 一个可执行文件只认一个客户端，前一个还活着时这个会话一张图都画不出来（[TROUBLESHOOTING](TROUBLESHOOTING.zh-CN.md) §23c）。纯列表、不抓屏的运行、以及图片流被重定向的运行都不会接管 |
 | `krd`（无参数） | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`：落地屏，舞台放一块屏、下面三张最近用过的窗口，都是图片。点其中一张会让这个进程变成 `krd --window <id>`（`Desk.handOver`，`execv`——同一个可执行文件的两个活进程不允许都开流，见设计 §12 P3b），在镜像里按 `Ctrl-\` 会用 argv 里的偏移（`--wall-at`、`--said`）把墙 `exec` 回来。`--mirror` 选回老的整屏镜像路径，`--window <查询>` 隐含它 |
 | `--symbols <m>` | `WallSymbols`：墙的 `emoji`（默认）/ `ascii` 字形 |
 | `KRD_REAP` | 每 n 帧整屏重绘（0 = 关闭，默认） |

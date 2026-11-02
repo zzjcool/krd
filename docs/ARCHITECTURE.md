@@ -442,6 +442,7 @@ which is why §7.6 exists.
 | `--dev` | `Chrome` + `startChrome()`: the TUI layer, one row reserved and a panel on demand. Selects the mirror — the wall owns every row, so `--wall --dev` is a usage error rather than a dropped flag (#116) |
 | `--dev-panel` | `ChromeState.panel` set before the first layout, for screenshots and pty tests |
 | `--no-chrome` | forces the layer off, so `--dev` can live in a wrapper script |
+| `--no-takeover` | declines the takeover (`Takeover`): by default a run that will capture asks the copies of the same executable path that came before it to leave — `SIGTERM`, then `SIGKILL` for one wedged in a capture call — because ScreenCaptureKit gives one executable one client, and while an earlier copy lives this session draws no pictures at all ([TROUBLESHOOTING](TROUBLESHOOTING.md) §23c). A listing, a run that never captures and a redirected picture stream never take it |
 | `krd` (no flags) | `WallSource` + `WallCanvas` + `WallPictures` + `runWall()`: the landing screen, one display on stage and three recent windows below, as pictures. A click on one turns this process into `krd --window <id>` (`Desk.handOver`, `execv` — a second live process of one executable is not allowed to stream, see design §12 P3b) and `Ctrl-\` in that mirror `exec`s the wall back with its offsets in argv (`--wall-at`, `--said`). `--mirror` selects the old whole-display path, `--window <q>` implies it |
 | `--symbols <m>` | `WallSymbols`: `emoji` (default) or `ascii` glyphs for the wall |
 

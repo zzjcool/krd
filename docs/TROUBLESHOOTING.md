@@ -492,8 +492,17 @@ connection being interrupted") for every stream, and the wall's shots come back 
 a permission problem and not a bug in the target window: the *second* client is refused, whoever it
 is and whatever it captures. This is also why a click `exec`s instead of spawning a child (design
 §12 P3b).
-**Fix.** `pgrep -fl krd` and close the older one (or `pkill -f /path/to/krd` if its terminal is gone).
-One krd at a time per machine.
+**Fix.** Nothing to do by hand any more: a `krd` that is about to ask for the ScreenCaptureKit client
+asks the copies of the same executable path that came before it to leave, and takes the screen
+(`Takeover.swift`: `SIGTERM`, then `SIGKILL` for one wedged in a capture call, because an ignored
+signal is not a released client — measured on the tart VM). Three runs decline and paint anyway: one
+that never captures (`--selftest`, `--bench`, `--replay`, `--mock`, `--demo`, any listing), one whose
+picture stream is redirected (`krd … >/dev/null`), and one typed with `--no-takeover`. When two copies
+start at the same moment the higher pid — the newer process — wins and the other says so in its log.
+The line names every pid it took over from and how long it took, so a session that still has no
+pictures can be asked why. Before this existed the fix was `pgrep -fl krd` and closing the older one
+(`pkill -f /path/to/krd` if its terminal was gone) — still the right move on a machine running an
+older build.
 
 ### 24. The stream dies silently
 
