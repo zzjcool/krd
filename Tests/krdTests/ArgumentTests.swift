@@ -190,6 +190,41 @@ final class ArgumentTests: XCTestCase {
         XCTAssertTrue(try parseArguments(["krd", "--list"]).listOnly)
     }
 
+    /// `--first-frame-delay` is a test switch (#227), and the two ways it can go wrong are a hold
+    /// nobody asked for and a hold nobody can wait out: the first is a `nil` here, the second a
+    /// refusal naming the flag and its range, so neither has to be discovered by watching a pane.
+    func testTheFirstFrameDelayIsOffUnlessTypedAndRefusesAValueItCannotWait() throws {
+        XCTAssertNil(try parseArguments(["krd"]).firstFrameDelayMs,
+                     "no template, no default: absent, every path stays byte-identical")
+        XCTAssertEqual(try parseArguments(["krd", "--mirror", "--first-frame-delay", "1500"])
+                        .firstFrameDelayMs, 1500)
+        // Both ends of the documented range, then the three ways out of it.
+        XCTAssertEqual(try parseArguments(["krd", "--mirror", "--first-frame-delay", "1"])
+                        .firstFrameDelayMs, 1)
+        XCTAssertEqual(try parseArguments(["krd", "--mirror", "--first-frame-delay", "600000"])
+                        .firstFrameDelayMs, 600_000)
+        XCTAssertEqual(refusal(["krd", "--mirror", "--first-frame-delay", "0"]),
+                       "--first-frame-delay wants a hold of 1...600000 ms, got \"0\"")
+        XCTAssertEqual(refusal(["krd", "--mirror", "--first-frame-delay", "600001"]),
+                       "--first-frame-delay wants a hold of 1...600000 ms, got \"600001\"")
+        XCTAssertEqual(refusal(["krd", "--mirror", "--first-frame-delay", "soon"]),
+                       "--first-frame-delay wants a hold of 1...600000 ms, got \"soon\"")
+        XCTAssertEqual(refusal(["krd", "--mirror", "--first-frame-delay"]),
+                       "--first-frame-delay needs a value")
+    }
+
+    /// A wall paints text and owns every row, so it has no loading card to hold: the flag there can
+    /// only be a no-op, which reads as a bug. The sentence has to carry the way out -- `--dev` on the
+    /// wall learned the same lesson (issue #116).
+    func testTheFirstFrameDelayRefusesTheWallAndNamesTheFix() {
+        XCTAssertEqual(refusal(["krd", "--first-frame-delay", "10"]),
+                       "--first-frame-delay holds the loading card up until the stream starts, and a "
+                       + "wall draws no card; add --mirror (or --mock)")
+        // The two modes the sentence names are the two that do have a card.
+        XCTAssertNoThrow(try parseArguments(["krd", "--mirror", "--first-frame-delay", "10"]))
+        XCTAssertNoThrow(try parseArguments(["krd", "--mock", "--first-frame-delay", "10"]))
+    }
+
     /// The other half of the contract lives outside the parser: the sentence must arrive on
     /// **stderr**, stdout (the picture stream) must stay empty, and the status must be 2. Only a
     /// spawned process can show that -- `UsageError.status` alone would stay green if `main` printed
@@ -208,6 +243,9 @@ final class ArgumentTests: XCTestCase {
             (["--unfocused-fps"], "krd: --unfocused-fps needs a value\n"),
             (["--fps", "--wall"], "krd: --fps needs a value (got the option \"--wall\")\n"),
             (["--fps", "abc"], "krd: --fps wants a whole number, got \"abc\"\n"),
+            (["--first-frame-delay", "10"],
+             "krd: --first-frame-delay holds the loading card up until the stream starts, and a wall "
+             + "draws no card; add --mirror (or --mock)\n"),
         ]
         for (arguments, sentence) in cases {
             let child = Process()
