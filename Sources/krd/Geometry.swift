@@ -113,73 +113,134 @@ struct PaneGeometry: Equatable {
 
 extension TermGeometry {
 
-    /// Does this terminal implement kitty unicode placeholders (`U=1`)?
+    /// Does this terminal implement the two graphics capabilities krd asks about — kitty unicode
+    /// placeholders (`U=1`) and kitty animation frames (`a=f`)?
     ///
-    /// The wall's whole geometry question turns on this one bit. With `U=1` the *terminal* fits the
+    /// The wall's whole geometry question turns on the first bit. With `U=1` the *terminal* fits the
     /// image into the rectangle of placeholder cells, aspect preserved, so the picture's box is the
     /// layout and no estimate of a cell's pixel size can be wrong. Without it, krd has to guess the
     /// cell in device pixels and an image that does not match is drawn at the wrong size in the
     /// corner - the bug this replaces.
     ///
-    /// A reply, not an assumption: the transmit is sent with `q=2` (silent) and the placement with
-    /// `q=0`, so the only message that comes back is the placement's `OK` or `E...`. A terminal that
-    /// ignores `U=1` draws the placeholder cells as missing-glyph boxes over the picture - much worse
-    /// than a small picture - so "no answer" counts as "no".
-    /// The probe's three APC bodies — the *only* copy of them.
+    /// The second bit is the loading card's (issue #217). A picture the terminal plays by itself
+    /// costs 0 B/s after the transmit; one it does not play has to be redrawn here every 110 ms,
+    /// which is the 1.4 KB per tick this issue exists for. So `a=f` is *asked*, never assumed, even
+    /// of a terminal that just accepted `a=t`: drawing a picture and playing an animation are two
+    /// different bits of a graphics stack, and the design's P4 (§6) makes every new capability a
+    /// probe for exactly that reason. Guessing it the other way round is worse than the bytes: a
+    /// card whose frames the terminal holds but never plays is a frozen mascot, and nothing in the
+    /// stream says so.
     ///
-    /// `supportsPlaceholders`, `DeleteProbeImage` and the test that walks the probe's bytes through
-    /// `GraphicsAPC.isFullyEnveloped` all read this: a second literal copy is how a regression test
-    /// ends up testing itself instead of the code that had the bug.
-    enum PlaceholderProbe {
-        static let transmit = "Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA"
-        static let place = "Gi=31,p=1,a=p,U=1,q=0,c=1,r=1"
-        static let delete = "Ga=d,d=i,i=31"
+    /// A reply, not an assumption: the transmits are sent with `q=2` (silent) and the two questions
+    /// with `q=0`, so the only messages that come back are the answered ones' `OK` or `E...`. A
+    /// terminal that ignores `U=1` draws the placeholder cells as missing-glyph boxes over the
+    /// picture - much worse than a small picture - so "no answer" counts as "no". `a=f` reads the
+    /// same way: no answer is a no, because the fallback card is correct and a silent animation is
+    /// not.
+    /// The probe's APC bodies — the *only* copy of them.
+    ///
+    /// `supportsPlaceholders`, `supportsAnimationFrames`, `DeleteProbeImages` and the test that
+    /// walks the probe's bytes through `GraphicsAPC.isFullyEnveloped` all read this: a second
+    /// literal copy is how a regression test ends up testing itself instead of the code that had
+    /// the bug.
+    enum GraphicsProbe {
+        /// Silent, so it can only ever be an image: this is the picture the `U=1` placement below
+        /// has to point at. Id 31, because 32 belongs to the animation question (see `frame32`).
+        static let transmit31 = "Ga=t,f=24,s=1,v=1,q=2,i=31;AAAA"
+        /// The frame probe's own image: `a=f` on `q=0` asks "can you play this?", and that needs
+        /// something to play. Silent for the same reason as the one above.
+        static let transmit32 = "Ga=t,f=24,s=1,v=1,q=2,i=32;AAAA"
+        /// Asked (`q=0`): a terminal that plays it answers `Gi=32,r=2;OK` - the `r=` is the
+        /// terminal's own echo of the animation it would keep, not something this request sent
+        /// (design §2.1) - and one that does not replies `;E...`, or not at all.
+        static let frame32 = "Ga=f,f=24,s=1,v=1,q=0,i=32;AAAA"
+        /// Asked (`q=0`); its answer is the *last* one in the write, so it is the one the read
+        /// stops on - see `runGraphicsProbeOnce` for why that order is load-bearing.
+        static let place31 = "Gi=31,p=1,a=p,U=1,q=0,c=1,r=1"
+        /// Both images go: a transmit nobody deletes is a picture the terminal keeps for the life
+        /// of the pane, and these two carry 3 bytes of `AAAA` each that nobody will ever look at.
+        static let delete = ["Ga=d,d=i,i=31", "Ga=d,d=i,i=32"]
+
+        /// The four APCs that leave in **one** write, in the order the read depends on: the frame
+        /// probe's answer arrives before the placement's (which ends the read), so a terminal that
+        /// places pictures but refuses `a=f` costs no timeout.
+        static var asked: [String] { [transmit31, transmit32, frame32, place31] }
     }
 
-    /// The `U=1` verdict for this *process*, asked exactly once (issue #99).
+    /// The two verdicts for this *process*, asked exactly once (issue #99, then #217).
     ///
     /// The probe is up to 600 ms of a terminal that will not answer, and it used to be asked twice per
     /// `--wall` start - once for the mirror's tiles (a value the wall never reads) and once for the
     /// wall's pictures. Two callers asking the same terminal the same question are asking it once, so
     /// the second one sends no bytes at all. `nil` ("no answer") is memoised too: a silent terminal
     /// stays silent for the life of the process, and re-asking it is the same 600 ms again.
-    private static var placeholdersAsked = false
+    ///
+    /// The frame question rides along on the same write (issue #217) and shares `probeAsked`: a
+    /// second probe would be a second read and, on a terminal that answers neither question, a
+    /// second 600 ms - where the three extra APCs are ~90 bytes on a write that was going out
+    /// anyway. So whichever of the two is asked first sends all six APCs and fills *both* memos; the
+    /// other then costs nothing.
+    private static var probeAsked = false
     private static var placeholdersAnswer: Bool?
+    private static var animationFramesAnswer: Bool?
 
-    /// Test seam: forget the process-wide verdict (a test that wants to re-ask).
-    static func resetPlaceholderProbeCache() { placeholdersAsked = false; placeholdersAnswer = nil }
+    /// Test seam: forget the process-wide verdicts (a test that wants to re-ask).
+    static func resetGraphicsProbeCache() {
+        probeAsked = false
+        placeholdersAnswer = nil
+        animationFramesAnswer = nil
+    }
 
+    /// The `U=1` verdict, memoised per process (`nil` = no answer, memoised too).
     static func supportsPlaceholders(timeoutMs: Int = 600) -> Bool? {
-        if placeholdersAsked { return placeholdersAnswer }
-        // Both APCs come out of `GraphicsAPC`, so `--passthrough` reaches them too: inside tmux a raw
-        // `a=t` is eaten by the multiplexer, which is the exact question this probe asks.
-        let transmit = GraphicsAPC.sequence(PlaceholderProbe.transmit)
-        let place = GraphicsAPC.sequence(PlaceholderProbe.place)
-        // The reply echoes whatever the request carried, so it is `i=31,p=1;OK` here - *not*
-        // `i=31;OK`. Matching the literal `i=31;OK` made every answer look like silence, which sent
-        // the wall down the pixel path on a terminal that had accepted the placeholder (measured
-        // against Rex: `ESC_Gi=31,p=1;OK ESC\`).
-        let reply = TermCaps.ask(transmit + place, timeoutMs: timeoutMs) { text in
-            placeholderProbeVerdict(text) != nil
-        }
-        // Only a terminal that was asked can hold the probe's image. `TermCaps.ask` writes nothing
-        // without a tty on stdin (`--bench`, `--selftest`, a pipe: `krd --wall > file`), and the blind
-        // delete was the one probe APC those paths still emitted — 20 bytes of cleanup for a transmit
-        // that never happened (issue #197). A *silent* terminal is asked, so it still gets the delete.
-        if isatty(STDIN_FILENO) != 0 { DeleteProbeImage() }
-        placeholdersAnswer = placeholderProbeVerdict(reply)
-        placeholdersAsked = true
+        runGraphicsProbeOnce(timeoutMs: timeoutMs)
         return placeholdersAnswer
     }
 
-    /// The probe's APCs, as bytes, without a terminal — built from the same three constants
-    /// `supportsPlaceholders` and `DeleteProbeImage` send, so the test cannot drift from the emitter.
-    /// `ProbePassthroughTests` walks this through `GraphicsAPC.isFullyEnveloped`, so a probe APC
-    /// emitted outside the sink fails the suite instead of the tmux pane.
-    static func placeholderProbePayload() -> [UInt8] {
-        Array((GraphicsAPC.sequence(PlaceholderProbe.transmit)
-               + GraphicsAPC.sequence(PlaceholderProbe.place)
-               + GraphicsAPC.sequence(PlaceholderProbe.delete)).utf8)
+    /// The `a=f` verdict, from the same write as `supportsPlaceholders` (`nil` = no answer).
+    ///
+    /// The caller decides what a `nil` means; the loader treats it as "no", because the still card
+    /// is correct on every terminal and an animation the terminal never plays is not.
+    static func supportsAnimationFrames(timeoutMs: Int = 600) -> Bool? {
+        runGraphicsProbeOnce(timeoutMs: timeoutMs)
+        return animationFramesAnswer
+    }
+
+    private static func runGraphicsProbeOnce(timeoutMs: Int) {
+        if probeAsked { return }
+        // Every APC comes out of `GraphicsAPC`, so `--passthrough` reaches them too: inside tmux a raw
+        // `a=t` is eaten by the multiplexer, which is the exact question this probe asks.
+        let request = GraphicsProbe.asked.map(GraphicsAPC.sequence).joined()
+        // The reply echoes whatever the request carried, so an accepted placement is `i=31,p=1;OK`
+        // here - *not* `i=31;OK`. Matching the literal `i=31;OK` made every answer look like silence,
+        // which sent the wall down the pixel path on a terminal that had accepted the
+        // placeholder (measured against Rex: `ESC_Gi=31,p=1;OK ESC\`).
+        //
+        // The read stops on the *placement's* answer, the last one in the write, so the frame probe
+        // has already been answered (or has stayed silent) by then and its verdict is in the same
+        // buffer: a terminal that refuses `a=f` costs no timeout for saying so. In the other order
+        // every terminal without `a=f` - which is most of them - would pay the full 600 ms here.
+        let reply = TermCaps.ask(request, timeoutMs: timeoutMs) { text in
+            placeholderProbeVerdict(text) != nil
+        }
+        // Only a terminal that was asked can hold the probe's images. `TermCaps.ask` writes nothing
+        // without a tty on stdin (`--bench`, `--selftest`, a pipe: `krd --wall > file`), and the blind
+        // delete was the one probe APC those paths still emitted — 20 bytes of cleanup for a transmit
+        // that never happened (issue #197). A *silent* terminal is asked, so it still gets the
+        // delete - both of them now, since the write transmits two images.
+        if isatty(STDIN_FILENO) != 0 { DeleteProbeImages() }
+        placeholdersAnswer = placeholderProbeVerdict(reply)
+        animationFramesAnswer = animationFrameVerdict(reply)
+        probeAsked = true
+    }
+
+    /// The probe's APCs, as bytes, without a terminal — built from the same bodies
+    /// `supportsPlaceholders`/`supportsAnimationFrames` send and `DeleteProbeImages` deletes, so
+    /// the test cannot drift from the emitter. `ProbePassthroughTests` walks this through
+    /// `GraphicsAPC.isFullyEnveloped`, so a probe APC emitted outside the sink fails the suite
+    /// instead of the tmux pane.
+    static func graphicsProbePayload() -> [UInt8] {
+        Array((GraphicsProbe.asked + GraphicsProbe.delete).map(GraphicsAPC.sequence).joined().utf8)
     }
 
     /// What a placeholder probe's reply means: `true` accepted, `false` refused, `nil` no answer yet.
@@ -196,10 +257,36 @@ extension TermGeometry {
         return nil
     }
 
-    /// Remove the probe's image by id, so it can never sit on the wall as a stray pixel.
+    /// What the `a=f` probe's reply means: `true` plays it, `false` refused it, `nil` no answer.
+    ///
+    /// Split out of the probe for the same reason as the `U=1` verdict: this is the decision the
+    /// whole loading card turns on, and it has to be testable without a terminal.
+    ///
+    /// Two things this must *not* do, both of which have a shape a real reply produces:
+    /// - read a `;OK` from someone else. Both answers start `Gi=` and both arrive in one read, and
+    ///   the placement's `;OK` comes later in that string (it is the answer that ends the read). A
+    ///   terminal that refused `a=f` with `Gi=32;EINVAL` and then placed the probe would otherwise
+    ///   be believed, and the card would start an animation nothing plays - a frozen mascot, which
+    ///   no byte count would ever show.
+    /// - read past the answer itself. The verdict is the token right after this id's first `;`
+    ///   (`;OK` accepted, `;E...` refused, kitty's own vocabulary), and the answer ends at its
+    ///   `ESC`.
+    static func animationFrameVerdict(_ reply: String?) -> Bool? {
+        guard let reply, let id = reply.range(of: "i=32") else { return nil }
+        let answer = reply[id.upperBound...].prefix { $0 != "\u{1B}" }
+        guard let sep = answer.firstIndex(of: ";") else { return nil }
+        let verdict = answer[answer.index(after: sep)...]
+        if verdict.hasPrefix("OK") { return true }
+        if verdict.hasPrefix("E") { return false }
+        return nil
+    }
+
+    /// Remove the probe's images by id, so they can never sit on the wall as stray pixels.
     /// Same sink, same envelope: an unwrapped `a=d` inside tmux leaves the probe image on screen.
-    private static func DeleteProbeImage() {
-        GraphicsAPC.write(PlaceholderProbe.delete)
+    /// Both ids, because one write transmits two images (issue #217): a leftover is a leftover
+    /// whether or not its question was answered.
+    private static func DeleteProbeImages() {
+        for body in GraphicsProbe.delete { GraphicsAPC.write(body) }
     }
 }
 

@@ -266,7 +266,8 @@ final class IconCacheTests: XCTestCase {
     func testACellPlacementWritesTheGridOnEveryDrawAndThePictureOnce() {
         let cache = IconCache()
         let picture = IconCache.Graphic(frames: [image(w: 4, h: 3, seed: 8)])
-        let grid = IconCache.Placement.cells(cols: 4, rows: 3, paneCols: 80, paneRows: 24)
+        let grid = IconCache.Placement.cells(CellRect(col: 1, row: 1, cols: 4, rows: 3),
+                                             paneCols: 80, paneRows: 24)
         let first = cache.draw(picture, palette: 0, at: grid)
         XCTAssertTrue(first.bytes.contains("Gi=9000,p=9000,a=p,U=1,q=2,c=4,r=3"))
         XCTAssertEqual(cellCount(first.bytes), 12, "cols * rows placeholders, no more")
@@ -281,6 +282,20 @@ final class IconCacheTests: XCTestCase {
         XCTAssertFalse(second.bytes.contains("a=t"))
     }
 
+    /// The grid goes where the caller said, in 1-based pane cells: a picture is not the pane's first
+    /// cell, and a placeholder grid that ignored the origin would draw the icon in the corner (the chrome's
+    /// inline icons are the callers this exists for).
+    func testTheGridStartsAtTheCallersCell() {
+        let cache = IconCache()
+        let picture = IconCache.Graphic(frames: [image(w: 4, h: 3, seed: 12)])
+        let emit = cache.draw(picture, palette: 0,
+                              at: .cells(CellRect(col: 7, row: 4, cols: 2, rows: 2),
+                                         paneCols: 80, paneRows: 24))
+        XCTAssertTrue(emit.bytes.contains(esc + "[4;7H"), "row 4, column 7")
+        XCTAssertTrue(emit.bytes.contains(esc + "[5;7H"), "and the next row of the grid")
+        XCTAssertEqual(cellCount(emit.bytes), 4)
+    }
+
     /// A pending wrap at the final cell of the final pane row scrolls the grid and drags every
     /// placement on it one row up, so that cell is never written.
     func testTheFinalCellOfTheFinalRowIsNeverWritten() {
@@ -288,7 +303,8 @@ final class IconCacheTests: XCTestCase {
         let picture = IconCache.Graphic(frames: [image(w: 4, h: 3, seed: 9)])
         // Two rows of four cells in a two-row pane of four columns: the last row may hold three.
         let emit = cache.draw(picture, palette: 0,
-                              at: .cells(cols: 4, rows: 2, paneCols: 4, paneRows: 2))
+                              at: .cells(CellRect(col: 1, row: 1, cols: 4, rows: 2),
+                                         paneCols: 4, paneRows: 2))
         XCTAssertEqual(cellCount(emit.bytes), 4 + 3, "the last row stops one cell short")
     }
 

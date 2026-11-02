@@ -1559,10 +1559,26 @@ final class Desk {
         // would show around it. Same delete the wall does, for the same reason.
         writer.clear()
         // Nothing is on screen yet: the first frame is a full capture away. The mascot fills that
-        // window, in plain ANSI, and the first frame takes it away (`handleFrame`).
-        let card = LoadingView(paneCols: layout.paneCols, paneRows: layout.paneRows) { [writer] in
+        // window - as an `a=f` animation when the terminal plays one, else in plain ANSI - and the
+        // first frame takes it away (`handleFrame`).
+        //
+        // The verdict is read *here* because this is the last moment a probe may read stdin:
+        // `startInput()` below takes it over for the rest of the process. It is memoised, so it
+        // costs no bytes when `--placeholders` (or the mirror's own tile path) already asked this
+        // terminal; and `nil` (a silent terminal) means the still card, never a guess.
+        let card = LoadingView(paneCols: layout.paneCols, paneRows: layout.paneRows,
+                               cell: (layout.cellW, layout.cellH),
+                               animates: TermGeometry.supportsAnimationFrames() == true,
+                               paletteKey: IconCache.paletteKey(themePalette)) { [writer] in
             writer.write($0)
         }
+        // One line about the first thing on screen, because "the mascot does not move" has no other
+        // explanation anywhere: the two transports draw different things, and which one ran is a
+        // probe's answer rather than a build's. The `a=f` card is the one that costs ~1.2 KB and
+        // then nothing (#217); the mosaic is the 110 ms card, unchanged.
+        Log.write("krd: loading card " + (card.animates
+            ? "as an a=f animation (the terminal plays the mascot, krd sends it once)\n"
+            : "as the still mosaic (the terminal did not answer the a=f probe)\n"))
         card.start()
         loading = card
         startChrome()

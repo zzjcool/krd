@@ -235,7 +235,7 @@ nothing extra.
 | `z=` (z-index), `x`/`y`/`X`/`Y` (offsets), `t=f`/`t=t`/`t=s` (file mediums) | whole-cell `c`/`r` placement needs none of them, and file mediums do not work over SSH |
 | `f=100` (PNG), `f=24` (RGB) | RGBA + zlib is cheaper in CPU than PNG, and PNG requires a second encoder |
 | `a=T` (transmit and display) | it bakes the placement into the transmit command; a per-tile `a=t` + `a=p` pair is what allows fixed ids |
-| unicode placeholders, `a=f` animation frames, `a=q` capability query | not used by the renderer; `a=q`/`a=f` were only probed during the feasibility study |
+| `a=q` capability query | `a=t`/`a=p` are asked for (`U=1`, §6.6) and `a=f` for the loading card (§6.7), but never `a=q`: the two questions krd needs are answered by the sequences it would send anyway |
 
 ## 6. Why these choices
 
@@ -295,7 +295,7 @@ default `auto` = wrap when `TERM` starts with `tmux` or `screen`, off otherwise 
 the variable).
 
 With it on, every kitty APC krd emits — each `a=t` transmit chunk, each `a=p` placement including
-the `U=1` virtual ones, the `a=d,d=a` delete, and the §6.7 geometry probe's own `a=t`/`a=p`/`a=d`
+the `U=1` virtual ones, the `a=d,d=a` delete, and the §6.6 geometry probe's own `a=t`/`a=p`/`a=d`
 plus `KRD_DELTEST`'s lone `a=d` — goes out as
 
 ```
@@ -312,7 +312,7 @@ byte for byte what krd wrote.
 
 **"Every APC" is structural, not a promise per call site.** `GraphicsAPC`
 (`krdcore/GraphicsAPC.swift`) is the only constructor of a graphics escape, and the flag it consults
-is set once, process-wide, before the first byte — so the geometry probe (§6.7), which writes through
+is set once, process-wide, before the first byte — so the geometry probe (§6.6), which writes through
 raw fd 1 before any `ScreenWriter` exists, is enveloped by the same decision as a transmit chunk. Two
 guards keep it that way: `GraphicsAPC.writeRaw` (the probe's write) and `ScreenWriter.flushLocked`
 (the frame sink) both run the envelope parser `GraphicsAPC.isFullyEnveloped` over the bytes they are
@@ -370,6 +370,89 @@ tmux's own parser and manual, not from a live pane.
 Limits: tmux ≥ 3.3 with `allow-passthrough` on (`set -g allow-passthrough on` — it is off by
 default) and one level of nesting only (a DCS inside a DCS is not forwarded). tmux < 3.7 has no
 `?2026` at all, so a picture there arrives in pieces: never frozen, but a resize can tear it.
+
+### 6.7 The loading card is an animation the terminal plays (`a=f`, #217)
+
+The mascot shown while the first frame is in flight used to be re-rasterised and re-sent as `▀`
+half-blocks every 110 ms: **22,631 B per tick** on a 137×44 pane, i.e. ~206 KB/s while it is up
+(measured through the card's own sink and confirmed on a pty — the design's older `188 KiB/s` figure
+was the same card, so it was in the right place and the picture data is only 3,888 B of those 22.6 KB:
+the per-cell 24-bit SGR is the rest).
+
+It is now four frames transmitted **once** and played by the terminal. One `?2026` block, written by
+`LoadingView.start()`, every APC carrying `q=2` so no reply can land on stdin after `startInput()`:
+
+```
+ESC [ <row> ; 1 H  ESC [ 2 K                                 x 20    # blank the card's own rows
+ESC [ <row> ; <col> H                                              # CUP to the picture's cell box
+ESC _ G f=24,s=<w>,v=<h>,a=t,o=z,q=2,i=<id>; <b64> ESC \           # frame 0: the still picture
+ESC _ G f=24,s=<w>,v=<h>,a=f,o=z,q=2,i=<id>,z=220; <b64> ESC \     # frame 1
+ESC _ G … a=f …,z=220; <b64> ESC \                                 # frames 2, 3
+ESC _ G i=<id>,a=a,r=1,z=220 ESC \                                 # the base frame's own gap
+ESC _ G i=<id>,a=a,s=3,v=1 ESC \                                   # run normally, loop for ever
+ESC _ G i=<id>,p=<id>,a=p,q=2,C=1,c=36,r=18 ESC \                  # one pixel-sized placement
+ESC [ ? 2026 l
+```
+
+Then **nothing**: the animated card has no timer at all, so a 3 s window costs what the first write
+cost — **3,418 B = 1.14 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 633,789 B
+for the mosaic in the same window. `stop()` clears the card's 20 rows and deletes the image
+(`a=d,d=i,i=<id>`): a pixel-sized placement is not part of the text grid, so clearing cells would
+leave the mascot floating over the frame that just arrived.
+
+Rules that are not decoration:
+
+- **`z` belongs to the frame it follows, and the base frame has none.** kitty makes frame 0 the base
+  image data; the gap before frame 1 can only be set with `a=a,r=1,z=220`. Without it the loop is a
+  flicker.
+- **`s=3,v=1`** is "run normally, loop for ever". `s=2` is loading mode (the terminal stops at the end
+  of the frames and waits for more) and `v=0` is "as if not specified".
+- **Four frames, 220 ms each**: the even steps of the same blink curve, so the cycle is still 880 ms.
+  Bytes are the whole reason — eight anti-aliased frames are 6.9 KB, four are 3.5 KB.
+- **`C=1`, not `U=1`**: the placeholder grid over the card's 36×18 cells is 648 cells ≈ 2.8 KB — four fifths
+  of the whole card — and it would make the card depend on a second capability. A card has no cells to
+  belong to; it is deleted by id instead. (The icon cache below does implement the `U=1` transport,
+  which is the one the chrome's inline icons need.)
+- **Picture size is derived from the cell**: `36 × round(36 · cellH / (2 · cellW))` — 45 on an 8×20
+  cell, 35 on a 17×33 one — so the picture's pixel aspect equals the cell box's and a terminal that
+  stretches a `c`/`r` placement to fill it and one that fits it preserving the aspect agree.
+
+**The capability is asked, never assumed.** The `a=f` question rides in the same write as the `U=1`
+probe (§6.6's geometry probe, `TermGeometry.GraphicsProbe`), on its own image id so the two answers
+cannot be read off one another, and the read still stops on the placement's answer — the frame probe's
+reply arrives first, so a terminal that places pictures but refuses `a=f` pays no timeout:
+
+```
+ESC _ G a=t,f=24,s=1,v=1,q=2,i=31;AAAA ESC \       # the U=1 probe's image (silent)
+ESC _ G a=t,f=24,s=1,v=1,q=2,i=32;AAAA ESC \       # the frames probe's image (silent)
+ESC _ G a=f,f=24,s=1,v=1,q=0,i=32;AAAA ESC \       # asked: `Gi=32,r=2;OK`
+ESC _ G i=31,p=1,a=p,U=1,q=0,c=1,r=1 ESC \         # asked; the read ends on this answer
+ESC _ G a=d,d=i,i=31 ESC \  ESC _ G a=d,d=i,i=32 ESC \    # cleanup, after the read
+```
+
+A terminal that answers nothing (or refuses) gets **the old card, byte for byte** — the `▀` mosaic,
+the 110 ms timer, the ellipsis. That is the degrade and it is why the animation needs no flag: the
+card is the one thing on screen before any capability is proven, so it must never depend on one that
+was not.
+
+### 6.8 An icon is a content-addressed picture (`IconCache`, #217)
+
+`krdcore/IconCache.swift` is the other half: a book of "this terminal already holds these exact
+pixels, on this palette". Key = (FNV-1a over every frame's width/height/format/pixels, FNV-1a over
+the palette's foreground and background — `0` for the hard-coded table). The first draw of a key
+transmits and places; **every later draw is the placement alone and 0 B of image data**, asserted on
+the bytes (`Emit.payloadBytes == 0`) rather than on a hit counter, because a counter would still be
+right if the picture went out again.
+
+The palette half is #213's: the same glyph on a light and a dark terminal is two different pictures,
+because its colours come from the theme layer. `Placement` has the two shapes krd uses — `.pixels`
+(`C=1,c,r`, the loading card) and `.cells` (`U=1` plus the `U+10EEEE` grid at a caller-supplied
+`CellRect`, which is what the chrome's inline icons will want, design §4.3). The loading card is the
+cache's first user: its four frames are one entry, so the second card in a session costs 38 B.
+
+Id allocation starts at 9000, above every other id krd hands out in a session (tiles `100 + index`,
+wall panels `5000 + slot`, the probes 31 and 32): a collision does not fail, one picture silently
+replaces the other's image.
 
 ## 7. Input: what the terminal sends
 

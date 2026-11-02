@@ -64,6 +64,49 @@ final class PaneGeometryTests: XCTestCase {
         XCTAssertNil(TermGeometry.placeholderProbeVerdict("\u{1B}_Gi=31,p=1"), "a partial line")
     }
 
+    /// The loading card's verdict (issue #217), asked for the same reason as the one above: a
+    /// terminal that draws pictures may still not play them, and believing it does leaves a frozen
+    /// mascot. `Gi=32,r=2;OK` is kitty's own recorded answer (design §2.1); a silent terminal
+    /// answers nothing, which is a *no* - the still card is correct everywhere.
+    func testTheAnimationFrameVerdictReadsOnlyItsOwnAnswer() {
+        XCTAssertEqual(TermGeometry.animationFrameVerdict("\u{1B}_Gi=32,r=2;OK\u{1B}\\"), true)
+        XCTAssertEqual(TermGeometry.animationFrameVerdict("\u{1B}_Gi=32;EINVAL:bad\u{1B}\\"), false)
+        XCTAssertNil(TermGeometry.animationFrameVerdict("\u{1B}_Gi=31,p=1;OK\u{1B}\\"),
+                     "the placement's answer says nothing about animation frames")
+        XCTAssertNil(TermGeometry.animationFrameVerdict(nil), "no answer")
+        XCTAssertNil(TermGeometry.animationFrameVerdict(""), "empty answer")
+        XCTAssertEqual(TermGeometry.animationFrameVerdict("\u{1B}_Gi=32,r=2\u{1B}\\"), nil,
+                       "a partial line carries no verdict")
+        // Both answers arrive in *one* read - the frame probe's first, the placement's last,
+        // because the placement is what ends the read (`runGraphicsProbeOnce`). So a `;OK` later in
+        // that same string must not turn a refusal into a yes: that is exactly the terminal the
+        // fallback card exists for, and it would be handed an animation nothing plays.
+        XCTAssertEqual(TermGeometry.animationFrameVerdict(
+                           "\u{1B}_Gi=32;EINVAL:bad\u{1B}\\\u{1B}_Gi=31,p=1;OK\u{1B}\\"), false)
+        XCTAssertEqual(TermGeometry.animationFrameVerdict(
+                           "\u{1B}_Gi=32,r=2;OK\u{1B}\\\u{1B}_Gi=31,p=1;OK\u{1B}\\"), true)
+    }
+
+    /// The probe's bytes carry an **order**, not just an id pair: the frame question is answered
+    /// before the placement's, and `runGraphicsProbeOnce` stops reading on the placement because
+    /// that is the last answer in the write. Reversed, every terminal that places pictures but
+    /// ignores `a=f` - which is most of them - would sit out the full 600 ms timeout for its
+    /// silence before the `U=1` answer could end the read, on the first frame, with nothing on
+    /// screen.
+    func testTheProbeAsksTheFrameQuestionBeforeThePlacement() throws {
+        let text = String(decoding: TermGeometry.graphicsProbePayload(), as: UTF8.self)
+        let frame = try XCTUnwrap(text.range(of: "Ga=f,f=24"), "no frame probe in the payload")
+        let place = try XCTUnwrap(text.range(of: "Gi=31,p=1,a=p,U=1"),
+                                  "no `U=1` placement in the payload")
+        XCTAssertLessThan(frame.lowerBound, place.lowerBound,
+                          "the frame probe's answer has to be in the buffer before the placement's "
+                          + "answer ends the read")
+        // ...and both deletes come after it: an `a=d` ahead of its own `a=p` would remove the image
+        // the placement is about to point at, leaving a hole where the probe's picture was.
+        let delete = try XCTUnwrap(text.range(of: "Ga=d,d=i,i=31"), "no delete in the payload")
+        XCTAssertLessThan(place.lowerBound, delete.lowerBound)
+    }
+
     // MARK: - paint before probing (issue #99)
 
     /// The first paint's measurement: with `askTerminal: false` the wall must not sit in a

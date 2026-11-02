@@ -82,11 +82,12 @@ public final class IconCache {
         case pixels(cols: Int, rows: Int)
         /// `U=1` plus the invisible `U+10EEEE` grid, the wall's transport (design §6.9).
         ///
-        /// The frozen API carries no origin: the grid is written at the pane's first cell, which is
-        /// the one position a picture without a caller-supplied rect can have. A `U=1` grid is
-        /// absolute CUPs (a cell belongs to a row of the *screen*), so a picture somewhere else needs
-        /// `row`/`col` in this case — the chrome's inline icons will be the first callers to want it.
-        case cells(cols: Int, rows: Int, paneCols: Int, paneRows: Int)
+        /// The origin is the caller's, in 1-based pane cells, because a `U=1` grid *is* text: a
+        /// placeholder cell belongs to a row of the screen, not to the picture, so the grid has to be written
+        /// where the picture goes. The chrome's inline icons are the callers that will want an origin
+        /// other than the pane's first cell (the loading card does not use this transport at all —
+        /// see `.pixels`).
+        case cells(_ rect: CellRect, paneCols: Int, paneRows: Int)
     }
 
     /// What a picture is, for the book: its content and the palette it was drawn for.
@@ -297,24 +298,25 @@ public final class IconCache {
             guard cols > 0, rows > 0 else { return "" }
             return GraphicsAPC.sequence("Gi=\(id),p=\(id),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)")
 
-        case let .cells(cols, rows, paneCols, paneRows):
-            guard cols > 0, rows > 0 else { return "" }
+        case let .cells(rect, paneCols, paneRows):
+            guard rect.cols > 0, rect.rows > 0, rect.col > 0, rect.row > 0 else { return "" }
             // The virtual placement: the cell rectangle the terminal should fit the picture into.
-            var out = GraphicsAPC.sequence("Gi=\(id),p=\(id),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)")
+            var out = GraphicsAPC.sequence("Gi=\(id),p=\(id),a=p,U=1,q=\(quiet)"
+                                           + ",c=\(rect.cols),r=\(rect.rows)")
             // The cells themselves. The image id travels in the foreground colour and one diacritic
             // per row is enough: a cell inherits "the cell to its left, column + 1" (kitty
             // §Unicode placeholders), so `cols * rows` characters are the whole grid.
             let r = (id >> 16) & 0xFF, g = (id >> 8) & 0xFF, b = id & 0xFF
             let colour = "\u{1B}[38;2;\(r);\(g);\(b)m"
-            for line in 0..<rows {
-                let paneRow = 1 + line
+            for line in 0..<rect.rows {
+                let paneRow = rect.row + line
                 guard paneRow <= paneRows else { break }
                 // Clipped so this never writes the final cell of the final pane row: a pending wrap
                 // there scrolls the grid, and every placement on it follows one row up.
-                var cells = cols
-                if paneRow == paneRows { cells = min(cells, paneCols - 1) }
+                var cells = rect.cols
+                if paneRow == paneRows { cells = min(cells, paneCols - rect.col) }
                 if cells <= 0 { break }
-                out += "\u{1B}[\(paneRow);1H"
+                out += "\u{1B}[\(paneRow);\(rect.col)H"
                 out += colour
                 for cell in 0..<cells {
                     out += "\u{10EEEE}"
