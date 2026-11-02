@@ -310,10 +310,15 @@ struct ChromeMetrics {
 enum ChromeAxis: String, CaseIterable {
     case colour, quality, fps
 
+    /// What the row is, not the flag it half-names. The middle axis was called `quality`, and a row
+    /// called "quality" showing two positions reads as a broken level slider — measured: "怎么就这么
+    /// 几级?" (issue #234). It is the *guard*: quantise every tile, or only the ones that proved
+    /// incompressible. `colour` is where the levels are (five bit depths), and its value spells the
+    /// rung, so the row that has five stops is the one that says so.
     var label: String {
         switch self {
         case .colour: return "colour"
-        case .quality: return "quality"
+        case .quality: return "quantise"
         case .fps: return "fps"
         }
     }
@@ -332,6 +337,16 @@ enum ChromeAxis: String, CaseIterable {
     /// values at 24, 21 and 39 — measured on a 120x30 pane — which reads as a rendering fault rather
     /// than as "fps has twenty options".
     static var longestTrack: Int { allCases.map(\.steps).max() ?? 1 }
+
+    /// Where the knob sits for a step on a `track`-cell slider: the first step at the left end and
+    /// the last at the right end, so a two-state axis reads as a switch and a twenty-frame axis as a
+    /// ruler. Kept apart from `trackRun` on purpose: the *click* segments tile the whole track (a
+    /// cell nothing answers is a dead cell), while the drawn knob only ever sits on a stop.
+    static func knob(step: Int, steps: Int, track: Int) -> Int {
+        guard steps > 1, track > 1 else { return 0 }
+        let clamped = min(max(0, step), steps - 1)
+        return (clamped * (track - 1) + (steps - 1) / 2) / (steps - 1)
+    }
 
     /// The cells one step owns on a shared track: `steps` contiguous runs that tile `track` cells
     /// exactly. `ceil(s * track / steps)` is the inverse of the integer division a click maps a cell
@@ -384,8 +399,8 @@ enum ChromeAxis: String, CaseIterable {
         let held = m.pinned.contains(self) ? " · pinned" : ""
         switch self {
         case .colour: return "\(m.qualityLabel) (\(m.quality))\(held)"
-        case .quality: return (m.qualityEager ? "eager — quantise every tile"
-                                             : "guarded — only what will not compress") + held
+        case .quality: return (m.qualityEager ? "every tile"
+                                             : "only incompressible tiles") + held
         case .fps: return "\(m.fpsTarget) fps\(held)"
         }
     }
@@ -1374,25 +1389,43 @@ final class Chrome {
             // reworked elsewhere (#180), so the mouse route has to stand on its own (issue #87).
             // One track for all three rows (issue #233): the widest the box can hold while leaving a
             // value column of at least six cells on its right. The value is truncated to whatever is
-            // left, so a long one ("guarded — only what will not compress") costs its own columns and
-            // never the shared geometry.
+            // left, so a long one ("only incompressible tiles") costs its own columns and never the
+            // shared geometry.
             let track = max(1, min(ChromeAxis.longestTrack, w - valueCol - 2 - 6))
             for (i, axis) in ChromeAxis.allCases.enumerated() {
                 guard let r = slot(i) else { continue }
                 let y0 = y + 1 + r
                 text(2, y0, DisplayWidth.pad(axis.label, to: 14), .dim)
-                let selected = axis.step(m)
+                // A slider, drawn as a slider: one continuous rule across the whole track, the part
+                // behind the knob heavy and lit, the part in front light and dim, and a knob `●` on
+                // the stop it is at (issue #234). The block bars this replaced were unreadable as
+                // controls -- "I could not tell it was a slider, I thought it had frozen" -- and a
+                // two-state axis drawn as a block looked broken rather than binary.
+                let knob = ChromeAxis.knob(step: axis.step(m), steps: axis.steps, track: track)
+                // A coarse axis shows its stops, a fine one does not: five bit depths are five
+                // crossings a reader can count, twenty frames per second would be a picket fence.
+                // Only the stops *between* the ends: the track's own ends are already visible, and a
+                // two-state axis is a switch, not a ruler with one mark in it.
+                let stops: Set<Int> = (3...8).contains(axis.steps)
+                    ? Set((1..<(axis.steps - 1)).map {
+                        ChromeAxis.knob(step: $0, steps: axis.steps, track: track)
+                    }) : []
                 for step in 0..<axis.steps {
-                    // A step owns a run of cells, so the fill is proportional on every axis instead
-                    // of one cell per option. One widget per step either way: its action is what a
-                    // click does, and the id is only the name the hover answers and `--debug` prints.
+                    // One widget per step, carrying the *click*: the segments tile the track, so a
+                    // click anywhere in a step's run sets that step, while the knob is only ever
+                    // drawn on a stop.
                     let run = ChromeAxis.trackRun(step: step, steps: axis.steps, track: track)
                     guard run.width > 0 else { continue }
-                    let reached = step <= selected
                     paint(ChromeAxis.id(axis, step), .control(.rung(axis, step))) {
-                        text(valueCol + run.start, y0,
-                             String(repeating: reached ? "█" : "▁", count: run.width),
-                             step == selected ? .barBright : (reached ? .accent : .dim))
+                        for j in 0..<run.width {
+                            let cell = run.start + j
+                            if cell == knob { text(valueCol + cell, y0, "●", .barBright) }
+                            else if stops.contains(cell) {
+                                text(valueCol + cell, y0, "┿", cell < knob ? .accent : .dim)
+                            }
+                            else if cell < knob { text(valueCol + cell, y0, "━", .accent) }
+                            else { text(valueCol + cell, y0, "─", .dim) }
+                        }
                     }
                 }
                 text(valueCol + track + 2, y0,

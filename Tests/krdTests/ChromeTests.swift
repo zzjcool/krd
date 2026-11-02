@@ -1260,7 +1260,7 @@ final class ChromeMenuTests: XCTestCase {
 
         // The value column is the same cell on all three rows: the one column a reader scans down.
         let text = String(decoding: bytes, as: UTF8.self)
-        for value in ["5-6-5 (80)", "guarded", "12 fps"] {
+        for value in ["5-6-5 (80)", "only incompressible tiles", "12 fps"] {
             XCTAssertTrue(text.contains(value), "\(value) is still the value of its row")
         }
     }
@@ -1289,6 +1289,67 @@ final class ChromeMenuTests: XCTestCase {
                 }
             }
         }
+    }
+
+    /// Issue #234: the tracks were blocks of colour (`███▁▁▁`), which read as a bar chart -- "I could
+    /// not tell it was a slider, I thought it had frozen". A slider now: one rule across the track,
+    /// heavy and lit behind the knob, light and dim in front of it, one `●` on the stop it is at, and
+    /// crossings on the stops of a coarse axis so five rungs are five things to count.
+    func testTheMenuDrawsASliderAndNotABarChart() {
+        let geo = Chrome.layout(paneCols: 120, paneRows: 30, imageCols: 120, imageRows: 20,
+                                bar: true, dev: true, panel: .menu)
+        let chrome = Chrome()
+        let bytes = chrome.draw(geometry: geo, metrics: menuMetrics(),
+                                state: ChromeState(panel: .menu))
+        let rows = runs(bytes)
+        /// The row the axis's own first tick landed on -- not "the first row containing 'fps'",
+        /// which is the bar's rate and the status line before it.
+        func track(of axis: ChromeAxis) -> [Character]? {
+            guard let tick = chrome.widgets.first(where: { $0.id == "rung:\(axis.rawValue):0" }),
+                  let text = rows.first(where: { $0.row == tick.rect.row + 1 })?.text
+            else { return nil }
+            return Array(text.filter { "━─●┿".contains($0) })
+        }
+
+        for axis in ChromeAxis.allCases {
+            guard let cells = track(of: axis) else {
+                return XCTFail("\(axis.label): the row was not drawn")
+            }
+            let text = String(cells)
+            XCTAssertFalse(text.contains("█") || text.contains("▁"),
+                           "\(axis.label) is a block bar again: \(text)")
+            XCTAssertEqual(cells.count, 20, "\(axis.label) fills the shared track: \(text)")
+            XCTAssertEqual(cells.filter { $0 == "●" }.count, 1,
+                           "\(axis.label) has exactly one knob: \(text)")
+            guard let knob = cells.firstIndex(of: "●") else { continue }
+            XCTAssertEqual(knob, ChromeAxis.knob(step: axis.step(menuMetrics()), steps: axis.steps,
+                                                 track: 20),
+                           "\(axis.label) puts the knob on the step it is on: \(text)")
+            // Everything left of the knob is the lit rule, everything right of it is the dim one.
+            XCTAssertEqual(String(cells[0..<knob]).filter { $0 == "─" }.count, 0,
+                           "\(axis.label): the reached part is a rule, not a gap: \(text)")
+            XCTAssertEqual(String(cells[(knob + 1)...]).filter { $0 == "━" }.count, 0,
+                           "\(axis.label): past the knob is unfilled: \(text)")
+        }
+
+        // Five rungs are five stops, so the colour track marks the two interior ones it is not on;
+        // the two-state axis is a switch and gets no crossings at all.
+        XCTAssertEqual(track(of: .colour)?.filter { $0 == "┿" }.count, 2)
+        XCTAssertEqual(track(of: .quality)?.filter { $0 == "┿" }.count, 0,
+                       "a switch is not a ruler")
+    }
+
+    /// The knob's arithmetic, as a pure function: the ends are the ends, and a step never lands
+    /// outside the track or behind the step before it.
+    func testTheKnobSitsOnAStopOfTheTrack() {
+        for (steps, track) in [(5, 20), (2, 20), (20, 20), (5, 7), (20, 3)] {
+            let knobs = (0..<steps).map { ChromeAxis.knob(step: $0, steps: steps, track: track) }
+            XCTAssertEqual(knobs.first, 0, "steps=\(steps) track=\(track): the first stop is the left end")
+            XCTAssertLessThanOrEqual(knobs.last ?? 0, max(0, track - 1), "…and never past the track")
+            XCTAssertEqual(knobs, knobs.sorted(), "steps=\(steps): the knob moves forward only")
+        }
+        XCTAssertEqual(ChromeAxis.knob(step: 0, steps: 2, track: 20), 0, "guarded sits at the left end")
+        XCTAssertEqual(ChromeAxis.knob(step: 1, steps: 2, track: 20), 19, "eager at the right one")
     }
 
     /// The end of the colour track is the lossless rung, and it is a *click target* — the run is
@@ -1416,7 +1477,7 @@ final class ChromeMenuTests: XCTestCase {
             // and `fps` alone would also match the bar and the status line above the box.
             let ink = drawn.filter {
                 $0.row > geo.imageRows && $0.row != geo.statusRow + 1
-                    && ($0.text.contains("colour") || $0.text.contains("quality")
+                    && ($0.text.contains("colour") || $0.text.contains("quantise")
                         || $0.text.contains("fps") || $0.text.contains("a click sets it"))
             }
             XCTAssertFalse(ink.isEmpty, "\(label): the menu was not drawn at all")
@@ -1476,8 +1537,8 @@ final class ChromeMenuTests: XCTestCase {
                           as: UTF8.self)
         XCTAssertTrue(text.contains("5-6-5 (80) · pinned"), "the colour rung is the user's: \(text)")
         XCTAssertTrue(text.contains("12 fps · pinned"), "the frame rate is the user's: \(text)")
-        XCTAssertFalse(text.contains("guarded — only what will not compress · pinned"),
-                       "the quality axis was not pinned and must not claim it")
+        XCTAssertFalse(text.contains("only incompressible tiles · pinned"),
+                       "the quantise axis was not pinned and must not claim it")
     }
 
     /// The wheel must reach the box's last row even when the pointer is over a tick -- the menu's
