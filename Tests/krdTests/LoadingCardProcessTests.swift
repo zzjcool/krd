@@ -235,6 +235,14 @@ final class LoadingCardProcessTests: XCTestCase {
                         "the child logged no `krd: loading card down after <ms> ms (--first-frame-delay "
                         + "5000)` line, so the flag took no hold or the instrument is gone; its log says:\n"
                         + childLog.split(separator: "\n").suffix(6).joined(separator: "\n"))
+        // ...and once: the line is gated on the flag and its stamp is cleared where it is read, so two
+        // lines would mean the card was taken down twice (or the gate leaked) — a stale second number
+        // is exactly the shape of failure a `first match wins` reader would hide.
+        XCTAssertEqual(occurrences(of: "loading card down after", in: childLog), 1,
+                       "the child logged the card's lifetime "
+                       + "\(occurrences(of: "loading card down after", in: childLog)) times, not once: "
+                       + childLog.split(separator: "\n").filter { $0.contains("loading card") }
+                           .joined(separator: " | "))
         XCTAssertGreaterThanOrEqual(holdMs ?? 0, 5_000,
                                     "the child's own clock says the card was up "
                                     + "\(holdMs.map { String($0) } ?? "?") ms, not the 5000 ms the "
@@ -244,9 +252,11 @@ final class LoadingCardProcessTests: XCTestCase {
 
         // The dump goes in the PR body: the instrument, the numbers, the verdicts.
         let gap = firstFrameAt.timeIntervalSince(cardUpAt)
-        mark("A instrument: the shipped krd `--mock --no-bar --no-chrome --no-input --pane 137x44 "
+        mark("A instrument: the krd `swift test` builds next to the test bundle (debug config, the same\n"
+             + "  target the release build ships), `--mock --no-bar --no-chrome --no-input --pane 137x44 "
              + "--first-frame-delay 5000`, behind a pty answering `CSI 6;33;17t` / `CSI 4;792;1020t` "
-             + "and `Gi=32,r=2;OK`")
+             + "and `Gi=32,r=2;OK`. The card's bytes are the release build's bytes; the hold's surplus "
+             + "over 5000 ms is this build's first-frame production time")
         mark("A card id=\(id): one `?2026` block at bytes \(cardOpen)..<\(cardClose) "
              + "(\(cardClose - cardOpen) B), first row \(row) of the grid those answers produce; "
              + "start write \(startWrite) B, stop write \(stopWrite) B, total \(cardBytes) B")
@@ -310,10 +320,19 @@ final class LoadingCardProcessTests: XCTestCase {
                        } ?? ""))
 
         // 8. the card animates itself: the 110 ms timer is live, and its pose cycle repeats.
-        XCTAssertGreaterThanOrEqual(ticks.count, 8,
+        //
+        // The floor is 4 and not the 18 beats a 2000 ms hold nominally contains, because this count is
+        // a *lower* bound on a loaded machine by construction: the mock writes 22 KB a tick and the pty
+        // is a pipe, so a slow reader slows the writer, and the ticks the child's timer skips are never
+        // produced (measured on an idle box: 13 here, 34 with a reader that drains as fast as the pty
+        // allows — same binary, same 2 s window). What this assertion is for is "the fallback still
+        // animates itself", which 4 consecutive repaints with their own pose cycle establish; the
+        // *cost* claim below does not depend on the count.
+        XCTAssertGreaterThanOrEqual(ticks.count, 4,
                                     "the mosaic repainted \(ticks.count) times during the 2000 ms "
-                                    + "hold; the 110 ms timer alone is 18 beats, so a count this low "
-                                    + "means the fallback's clock is not running: "
+                                    + "hold; a live 110 ms timer gets more than four beats into that "
+                                    + "window even with a slow reader (measured: 13), so a count this "
+                                    + "low means the fallback's clock is not running: "
                                     + run.terminal.describe)
         for (index, tick) in ticks.enumerated() {
             XCTAssertTrue(tick.index(of: Array("38;2;".utf8)) != nil,
@@ -368,9 +387,10 @@ final class LoadingCardProcessTests: XCTestCase {
                               + Array(stream[frameOpen..<min(frameClose, frameOpen + 240)]).brief)
         }
 
-        mark("B instrument: the shipped krd `--mock --no-bar --no-chrome --no-input --pane 137x44 "
-             + "--first-frame-delay 2000`, behind the same pty but silent about `a=f` "
-             + "(`animationFramesAnswer == nil`)")
+        mark("B instrument: the same krd (debug config), `--mock --no-bar --no-chrome --no-input "
+             + "--pane 137x44 --first-frame-delay 2000`, behind the same pty but silent about `a=f` "
+             + "(`animationFramesAnswer == nil`). A release build over the same 2000 ms drains more "
+             + "beats (19 vs 13, both 22548..22636 B): this count is bounded by the reader, not the timer")
         mark("B card: \(ticks.count) mosaic repaints of \(smallest)..\(ticks.map(\.count).max() ?? 0) B "
              + "(floor 20000), \(mosaicBytes) B over the hold on row \(row) of the grid those answers "
              + "produce, \(Set(ticks).count) distinct poses of \(ticks.count)")
@@ -488,6 +508,19 @@ final class LoadingCardProcessTests: XCTestCase {
         return Int(text[range.upperBound...].prefix { $0.isNumber })
     }
 
+    /// Non-overlapping occurrences of a substring: the "the instrument spoke once" assertion on the
+    /// child's log. (`components(separatedBy:)` would copy the whole log per call; a scan does not.)
+    private func occurrences(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var found = 0
+        var search = haystack[...]
+        while let hit = search.range(of: needle) {
+            found += 1
+            search = search[hit.upperBound...]
+        }
+        return found
+    }
+
     // MARK: - the process under test
 
     private struct Run {
@@ -513,6 +546,10 @@ final class LoadingCardProcessTests: XCTestCase {
         func stop() {
             if child.isRunning { kill(child.processIdentifier, SIGKILL) }
             close(master)
+            // Reaped, not orphaned: `SIGKILL` plus a closed master leaves a zombie per test until the
+            // process table is read, and the `defer` around this call deletes the log file — which a
+            // still-running child would be holding open.
+            child.waitUntilExit()
         }
     }
 

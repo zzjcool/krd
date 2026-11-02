@@ -1676,13 +1676,19 @@ final class Desk {
         installReportHandler()
         installResizeHandler()
         installDisplayChangeHandler()
+
+        // The hold `--first-frame-delay` asks for sits **between the handlers and the 1 Hz tick**, not
+        // next to the stream, and that placement is the whole of one measured bug (#227 review). The
+        // tick is `probeRoundTrip`, which writes `CSI 5n` and can only read the answer through the
+        // input reader — and the reader does not exist until `startInput()` below. A hold in front of
+        // that write spends its seconds emitting probes nobody can answer, and three misses make
+        // `RTTProbe` declare the terminal "does not implement DSR" *for the rest of the session*:
+        // measured with a pty that does answer DSR, `--first-frame-delay 5000` logged exactly that
+        // verdict and 12000 skipped the measurements outright. Started here, the tick begins once the
+        // hold is over, and its first probe lands in a session that has a reader.
+        try await holdFirstFrameIfAsked()
         startDiagnostics()
 
-        // The hold `--first-frame-delay` asks for, immediately before the stream: the card, the
-        // chrome and the diagnostics are all up by now, so the seconds it holds are a real session
-        // and not a skeleton, and the probe above has already read stdin (it may not after
-        // `startInput()` below).
-        try await holdFirstFrameIfAsked()
         try await capturer.start(filter: filter, sourceRect: cropForFilter(),
                                  width: layout.pixelW, height: layout.pixelH, fps: options.fps)
 
@@ -4161,10 +4167,13 @@ final class Desk {
 
     /// Wait out `--first-frame-delay`, or return at once when nobody typed it.
     ///
-    /// Called on the two paths that draw a card, in the one place the hold can go: everything that
-    /// paints is already up, and the stream has not been asked for yet. Waiting here rather than
-    /// delaying the frame is what keeps the bytes out of it -- nothing on the encode path learns that
-    /// a flag was typed, so the frame that finally lands is the frame a plain run lands.
+    /// Called on the two paths that draw a card, and in both of them before the stream is asked for:
+    /// waiting here rather than delaying the frame is what keeps the bytes out of it -- nothing on the
+    /// encode path learns that a flag was typed, so the frame that finally lands is the frame a plain
+    /// run lands. The two call sites are not in the same position, and each says why: the live path has
+    /// a 1 Hz round-trip probe to keep out of the hold (it cannot be answered until `startInput()`),
+    /// while the mock path has no probe at all and holds immediately before `mock.start()` so the
+    /// whole session is up behind the card.
     private func holdFirstFrameIfAsked() async throws {
         guard let hold = options.firstFrameDelayMs else { return }
         try await Task.sleep(nanoseconds: UInt64(hold) * 1_000_000)
