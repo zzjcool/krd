@@ -31,6 +31,12 @@ jobs:
         run: swift build -c release
 
       - name: Run tests
+        # `pinned` links libghostty-vt from the published xcframework (URL + sha256 in
+        # Package.swift), which is what makes the headless cell assertions run here and not only
+        # on a machine that built the artifact (#218). The product is unaffected: the VT is a
+        # test-only target and `swift build -c release` above links none of it.
+        env:
+          KRD_VT_XCFRAMEWORK: pinned
         run: |
           if [ -d Tests ]; then
             swift test
