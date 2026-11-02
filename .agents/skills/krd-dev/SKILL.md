@@ -95,7 +95,8 @@ demo 146x73 · cell 17x33 · 1x · pic 143x46c 2431x1518px · U=1 · the pty's p
 ## The VM
 
 ```bash
-ssh krd-vm                         # admin@192.168.64.7, macOS 26.6.2, headless tart "kraal-agent"
+ssh krd-vm                         # admin@192.168.64.2, macOS 26.6.2, headless tart "kraal-agent"
+                                   # IP is tart's DHCP: re-check with `tart ip kraal-agent` if it moves
 ssh -t krd-vm 'stty rows 46 cols 146; ~/bin/krd --wall --debug --log /tmp/krd.log'
 ssh krd-vm 'screencapture -x /tmp/vm.png' && ssh krd-vm 'base64 -i /tmp/vm.png' | base64 -d > vm.png
 ```
