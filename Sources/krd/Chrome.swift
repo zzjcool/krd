@@ -338,6 +338,15 @@ enum ChromeAxis: String, CaseIterable {
     /// than as "fps has twenty options".
     static var longestTrack: Int { allCases.map(\.steps).max() ?? 1 }
 
+    /// Whether moving this axis changes how a frame is **encoded** — so the frame already on screen is
+    /// stale and has to be sent again — rather than only how often one is taken.
+    ///
+    /// The two halves of `--quality` are the former: a still desktop produces no frames at all, so a
+    /// colour click did nothing visible until something on the screen happened to move ("调整了好像都
+    /// 看不到效果", issue #237). The frame rate is the latter, and re-sending a frame nobody asked for
+    /// would be the same mistake the other way round.
+    var encodesTheFrame: Bool { self != .fps }
+
     /// Where the knob sits for a step on a `track`-cell slider: the first step at the left end and
     /// the last at the right end, so a two-state axis reads as a switch and a twenty-frame axis as a
     /// ruler. Kept apart from `trackRun` on purpose: the *click* segments tile the whole track (a
@@ -1396,20 +1405,13 @@ final class Chrome {
                 guard let r = slot(i) else { continue }
                 let y0 = y + 1 + r
                 text(2, y0, DisplayWidth.pad(axis.label, to: 14), .dim)
-                // A slider, drawn as a slider: one continuous rule across the whole track, the part
-                // behind the knob heavy and lit, the part in front light and dim, and a knob `●` on
-                // the stop it is at (issue #234). The block bars this replaced were unreadable as
-                // controls -- "I could not tell it was a slider, I thought it had frozen" -- and a
-                // two-state axis drawn as a block looked broken rather than binary.
+                // A slider, drawn as a slider: one continuous rule across the whole track and one
+                // vertical handle at the stop it is on. Three attempts got here, each from what the
+                // reader saw: blocks (`███▁▁▁`) read as a bar chart -- "I could not tell it was a
+                // slider, I thought it had frozen"; a fat `●` over hairline rules made three weights
+                // on one row and floated -- "好丑" (issue #237). So the track is one glyph (`━`) in
+                // two colours, and the knob is the only cell with a different *shape*.
                 let knob = ChromeAxis.knob(step: axis.step(m), steps: axis.steps, track: track)
-                // A coarse axis shows its stops, a fine one does not: five bit depths are five
-                // crossings a reader can count, twenty frames per second would be a picket fence.
-                // Only the stops *between* the ends: the track's own ends are already visible, and a
-                // two-state axis is a switch, not a ruler with one mark in it.
-                let stops: Set<Int> = (3...8).contains(axis.steps)
-                    ? Set((1..<(axis.steps - 1)).map {
-                        ChromeAxis.knob(step: $0, steps: axis.steps, track: track)
-                    }) : []
                 for step in 0..<axis.steps {
                     // One widget per step, carrying the *click*: the segments tile the track, so a
                     // click anywhere in a step's run sets that step, while the knob is only ever
@@ -1419,12 +1421,9 @@ final class Chrome {
                     paint(ChromeAxis.id(axis, step), .control(.rung(axis, step))) {
                         for j in 0..<run.width {
                             let cell = run.start + j
-                            if cell == knob { text(valueCol + cell, y0, "●", .barBright) }
-                            else if stops.contains(cell) {
-                                text(valueCol + cell, y0, "┿", cell < knob ? .accent : .dim)
-                            }
+                            if cell == knob { text(valueCol + cell, y0, "┃", .bright) }
                             else if cell < knob { text(valueCol + cell, y0, "━", .accent) }
-                            else { text(valueCol + cell, y0, "─", .dim) }
+                            else { text(valueCol + cell, y0, "━", .dim) }
                         }
                     }
                 }

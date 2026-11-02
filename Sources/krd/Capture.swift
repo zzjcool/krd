@@ -8,6 +8,13 @@ import krdcore
 /// ScreenCaptureKit wrapper: one stream, one callback queue, BGRA -> RGBA with vImage.
 final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let queue = DispatchQueue(label: "krd.capture", qos: .userInteractive)
+
+    /// Run work on the stream's own callback queue.
+    ///
+    /// The frame path is single-threaded by construction; a caller that wants to *re*-emit the last
+    /// frame (a quality change, issue #237) has to stand in the queue its frames stand in, or the
+    /// re-emit races the frame it is standing in for.
+    func onFrameQueue(_ work: @escaping () -> Void) { queue.async(execute: work) }
     private var stream: SCStream?
     /// Frame buffer, in the wire format (3 bytes/px for RGB, 4 for RGBA).
     private var rgba = [UInt8]()

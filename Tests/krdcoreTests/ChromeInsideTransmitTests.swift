@@ -127,3 +127,30 @@ final class ChromeInsideTransmitTests: XCTestCase {
         XCTAssertTrue(String(decoding: joined, as: UTF8.self).contains("Gi=999,a=t"))
     }
 }
+
+/// Issue #237: a control that changes how a frame is *encoded* has to get a frame, and a still
+/// desktop produces none — ScreenCaptureKit delivers a change, and there is none. The writer side of
+/// that promise is `repaintNextFrame`: the next frame re-sends every tile, and nothing is deleted (a
+/// `clear()` would blink the whole picture away, which is the price for placements that are really
+/// gone, not for a re-encoded one).
+final class RepaintNextFrameTests: XCTestCase {
+
+    func testRepaintNextFrameAsksForEveryTileAndDeletesNothing() {
+        let writer = ScreenWriter()
+        var chunks: [[UInt8]] = []
+        writer.sink = { chunks.append($0) }
+
+        XCTAssertFalse(writer.repaintNeeded, "a fresh writer has nothing to repaint")
+        writer.repaintNextFrame()
+        XCTAssertTrue(writer.repaintNeeded, "the frame on screen is stale now")
+
+        writer.beginFrame()
+        writer.appendTransmitChunk("Gi=100,a=t,m=0;", [UInt8](repeating: 0x41, count: 8)[...])
+        writer.endFrame()
+
+        // The whole point of not using `clear()`: no `a=d` and no `2J`, so nothing blinks.
+        let stream = String(decoding: chunks.flatMap { $0 }, as: UTF8.self)
+        XCTAssertFalse(stream.contains("a=d,d=a"), stream)
+        XCTAssertFalse(stream.contains("\u{1B}[2J"), stream)
+    }
+}

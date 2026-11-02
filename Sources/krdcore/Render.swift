@@ -670,6 +670,19 @@ public final class ScreenWriter {
         return true
     }
 
+    /// Ask for the frame already on screen to be encoded and sent **again**, at the settings as they
+    /// are now. Nothing is deleted and nothing is captured: the placements are still right, only the
+    /// pixels behind them were made at the old bit depth.
+    ///
+    /// `clear()` is the neighbouring price and the wrong one here: it drops every placement and
+    /// erases the grid, which blinks — the right thing when the placements really are gone, not for
+    /// "the same picture, re-encoded" (issue #237).
+    public func repaintNextFrame() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        needsFullRepaint = true
+    }
+
     /// A terminal only repaints when something arrives; one harmless byte keeps a static
     /// frame committed (Herdr otherwise waits for the next output cycle to show a placement).
     public func nudge() {

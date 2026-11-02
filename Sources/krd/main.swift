@@ -965,6 +965,9 @@ final class Desk {
     private var checkedFirstWindowFrame = false
     private var viewport = Viewport(pixelWidth: 1, pixelHeight: 1, cols: 1, rows: 1, sourceRect: .zero)
     private var previousFrame: [UInt8] = []
+    /// The size `previousFrame` was captured at, so the same frame can be encoded again without a
+    /// capture (`reemitLastFrame`, issue #237).
+    private var lastFrameSize = (w: 0, h: 0)
     private var lastDirtyCount = 0
     /// Frames that reached the encoder, not tiles: the number a human means by "fps".
     private var framesHandled = 0
@@ -4243,7 +4246,10 @@ final class Desk {
         try await Task.sleep(nanoseconds: UInt64(hold) * 1_000_000)
     }
 
-    private func handleFrame(pixels: [UInt8], width: Int, height: Int) {
+    /// `forced` is one frame the reader asked for by touching a control that changes how frames are
+    /// encoded (`reemitLastFrame`, issue #237): the rate gate is about *stream* frames, and declining
+    /// the re-encode of the picture already on screen would leave the slider looking dead.
+    private func handleFrame(pixels: [UInt8], width: Int, height: Int, forced: Bool = false) {
         if let card = loading {
             card.stop()
             loading = nil
@@ -4307,7 +4313,7 @@ final class Desk {
         // capture stream is not reconfigured mid-flight, so without the gate the loop would keep
         // delivering at the old cadence and the slider would read as doing nothing. A focus cap
         // still multiplies it down (`targetFps`), never around it.
-        let gated = fpsPinned || target < options.fps
+        let gated = !forced && (fpsPinned || target < options.fps)
         if gated, !frameGate.owesFrame(at: started) { return }
         // Frames ScreenCaptureKit delivered to us, i.e. what `captureFps` is the rate of -- counted
         // here, before the layout guards, so it stays a different number from `framesHandled`
@@ -4387,7 +4393,7 @@ final class Desk {
         // the panel's `frames x/y fps` row and `framesTotal` all mean "drawn"), so it advances here
         // and not above the identical check — a frame that changed nothing is not handled.
         framesHandled += 1
-        if gated { frameGate.tookFrame(at: started) }
+        if gated || forced { frameGate.tookFrame(at: started) }
 
         // Recording happens before the tile pass, i.e. it captures exactly the frames the
         // pipeline would render (post-dedupe, post-resize).
@@ -4408,6 +4414,7 @@ final class Desk {
         }
         stateLock.lock()
         previousFrame = pixels
+        lastFrameSize = (w: width, h: height)
         lastDirtyCount = dirty.count
         stateLock.unlock()
 
@@ -5505,6 +5512,26 @@ final class Desk {
         drawChrome()
     }
 
+    /// Encode and send the frame already on screen once more, at the settings as they are now.
+    ///
+    /// A still desktop produces **no frames** — ScreenCaptureKit only delivers a change — so a control
+    /// that changes how the *next* frame is encoded (`--quality`'s two halves) used to do nothing
+    /// visible until something on the screen happened to move, which reads as a dead slider: "调整了
+    /// 好像都看不到效果" (issue #237). The last frame's pixels are still here, so the honest answer is
+    /// to encode them again: no capture, no stream restart, no blink.
+    ///
+    /// On the capture queue, not here: `previousFrame` is written by the frame path, and a re-emit
+    /// that raced a real frame would be two frames interleaved.
+    private func reemitLastFrame() {
+        stateLock.lock()
+        let pixels = previousFrame
+        let size = lastFrameSize
+        stateLock.unlock()
+        guard !pixels.isEmpty, size.w > 0, size.h > 0 else { return }
+        writer.repaintNextFrame()
+        handleFrame(pixels: pixels, width: size.w, height: size.h, forced: true)
+    }
+
     /// One click on a tick in the menu's three tracks (issue #87), on the main queue.
     ///
     /// Colour and quality are the two halves of `--quality` and both are **hot**: `writer.quality`
@@ -5547,6 +5574,14 @@ final class Desk {
             fpsPinned = true
             options.fpsPinned = true
             Log.write("krd: menu fps \(step) -> \(fps) fps (held by the frame gate, no governor)\n")
+        }
+        // The picture side of the same promise: a rung that changes how a frame is *encoded* makes
+        // the frame on screen stale, and on a still desktop no frame will arrive to notice (issue
+        // #237). Re-encode the one we already have, on the frame queue.
+        // Only the live capture path: `--mock`/`--replay`/`--bench`/`--selftest` produce their frames
+        // on queues of their own, and a re-emit from here would interleave two frames into one writer.
+        if axis.encodesTheFrame, Self.capturesTheScreen(options) {
+            capturer.onFrameQueue { [weak self] in self?.reemitLastFrame() }
         }
         // Repaint now, not on the next 1 Hz tick: a slider that answers a second late reads as a
         // click that missed. The snapshot has to be refreshed first -- `chromeMetrics` is written

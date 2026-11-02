@@ -1291,11 +1291,12 @@ final class ChromeMenuTests: XCTestCase {
         }
     }
 
-    /// Issue #234: the tracks were blocks of colour (`███▁▁▁`), which read as a bar chart -- "I could
-    /// not tell it was a slider, I thought it had frozen". A slider now: one rule across the track,
-    /// heavy and lit behind the knob, light and dim in front of it, one `●` on the stop it is at, and
-    /// crossings on the stops of a coarse axis so five rungs are five things to count.
-    func testTheMenuDrawsASliderAndNotABarChart() {
+    /// Issues #234 and #237: three attempts at the same row, each from what the reader saw. Blocks
+    /// (`███▁▁▁`) read as a bar chart -- "I could not tell it was a slider, I thought it had frozen";
+    /// a fat `●` over hairline rules made three weights on one row and floated -- "好丑". The row is
+    /// now one weight (`━`) in two colours with a single `┃` handle, so what a test can pin is the
+    /// shape: one handle per row, one glyph for the track, and nothing blocky or floating left.
+    func testTheMenuDrawsOneHandleOnOneUniformTrack() {
         let geo = Chrome.layout(paneCols: 120, paneRows: 30, imageCols: 120, imageRows: 20,
                                 bar: true, dev: true, panel: .menu)
         let chrome = Chrome()
@@ -1308,7 +1309,7 @@ final class ChromeMenuTests: XCTestCase {
             guard let tick = chrome.widgets.first(where: { $0.id == "rung:\(axis.rawValue):0" }),
                   let text = rows.first(where: { $0.row == tick.rect.row + 1 })?.text
             else { return nil }
-            return Array(text.filter { "━─●┿".contains($0) })
+            return Array(text.filter { "━┃─●┿█▁".contains($0) })
         }
 
         for axis in ChromeAxis.allCases {
@@ -1316,27 +1317,26 @@ final class ChromeMenuTests: XCTestCase {
                 return XCTFail("\(axis.label): the row was not drawn")
             }
             let text = String(cells)
-            XCTAssertFalse(text.contains("█") || text.contains("▁"),
-                           "\(axis.label) is a block bar again: \(text)")
             XCTAssertEqual(cells.count, 20, "\(axis.label) fills the shared track: \(text)")
-            XCTAssertEqual(cells.filter { $0 == "●" }.count, 1,
-                           "\(axis.label) has exactly one knob: \(text)")
-            guard let knob = cells.firstIndex(of: "●") else { continue }
-            XCTAssertEqual(knob, ChromeAxis.knob(step: axis.step(menuMetrics()), steps: axis.steps,
-                                                 track: 20),
-                           "\(axis.label) puts the knob on the step it is on: \(text)")
-            // Everything left of the knob is the lit rule, everything right of it is the dim one.
-            XCTAssertEqual(String(cells[0..<knob]).filter { $0 == "─" }.count, 0,
-                           "\(axis.label): the reached part is a rule, not a gap: \(text)")
-            XCTAssertEqual(String(cells[(knob + 1)...]).filter { $0 == "━" }.count, 0,
-                           "\(axis.label): past the knob is unfilled: \(text)")
+            XCTAssertEqual(Set(cells), ["━", "┃"],
+                           "\(axis.label) is one weight and one handle, not a bar chart: \(text)")
+            XCTAssertEqual(cells.filter { $0 == "┃" }.count, 1,
+                           "\(axis.label) has exactly one handle: \(text)")
+            XCTAssertEqual(cells.firstIndex(of: "┃"),
+                           ChromeAxis.knob(step: axis.step(menuMetrics()), steps: axis.steps,
+                                           track: 20),
+                           "\(axis.label) puts the handle on the step it is on: \(text)")
         }
+    }
 
-        // Five rungs are five stops, so the colour track marks the two interior ones it is not on;
-        // the two-state axis is a switch and gets no crossings at all.
-        XCTAssertEqual(track(of: .colour)?.filter { $0 == "┿" }.count, 2)
-        XCTAssertEqual(track(of: .quality)?.filter { $0 == "┿" }.count, 0,
-                       "a switch is not a ruler")
+    /// Which axes make the frame on screen stale (issue #237): the two halves of `--quality` change
+    /// how the pixels are encoded, the frame rate changes only when the next one is taken. A still
+    /// desktop sends nothing, so the difference is the whole reason `applyRung` re-emits a frame.
+    func testOnlyTheEncodingAxesMakeTheFrameStale() {
+        XCTAssertTrue(ChromeAxis.colour.encodesTheFrame, "a new bit depth: the picture must be redone")
+        XCTAssertTrue(ChromeAxis.quality.encodesTheFrame, "eager/guarded: same, per tile")
+        XCTAssertFalse(ChromeAxis.fps.encodesTheFrame,
+                       "a rate change does not invalidate the frame already on screen")
     }
 
     /// The knob's arithmetic, as a pure function: the ends are the ends, and a step never lands
