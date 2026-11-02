@@ -24,3 +24,7 @@ docs/media/raw/
 /bench/ab-report.md
 /bench/history/*+dirty*.json
 __pycache__/
+
+# the libghostty-vt xcframework (issue #218): a local, optional test dependency
+# produced by scripts/build-vt-xcframework.sh, never committed
+/.artifacts/

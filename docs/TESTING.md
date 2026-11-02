@@ -491,3 +491,39 @@ Two things this mode cannot do:
 
 `probe/pipe_probe.py` is the local cousin: it starves krd on one machine by draining the *pty* at a
 fixed rate. This one shapes a real TCP link between two machines, which is what "krd over ssh" is.
+
+## 13. Headless render tests — `KRD_VT_XCFRAMEWORK`
+
+`Tests/krdTests/HeadlessRenderTests.swift` asserts on a **grid of cells** instead of on a pty's
+bytes: it draws a wall frame with `WallCanvas.draw` and reads the cells back out of libghostty-vt, the
+same library the width table was generated from (§10). What it can say that nothing else here can:
+`▪ krd` is `palette.accent` on cells 1–5 of the header row, the stage caption is one cell per glyph,
+and the focus ring is an **underline attribute on exactly the cells the caption wrote** — composed on top of
+whatever style the cell already carried, so the footer's dim `2;37` becomes `2;37;4` while the
+`N panels` tail on the same row stays `2;37`. That last one is the reason the test exists: an
+attribute, not a byte.
+
+```bash
+scripts/build-vt-xcframework.sh                          # ~1 min, needs xcodebuild; prints the sha256
+KRD_VT_XCFRAMEWORK=.artifacts/ghostty-vt.xcframework swift test --filter HeadlessRender
+```
+
+**Without the artifact nothing happens, and that is the design.** With `KRD_VT_XCFRAMEWORK` unset,
+`Package.swift` declares neither the `KrdVT` binary target nor the `KrdHeadlessVT` wrapper, the test
+file's whole body is inside `#if KRD_HEADLESS_VT` and compiles to nothing, and `swift build` /
+`swift test` are exactly what they were before this existed — same tests, same count, no skip. The one
+thing to know is the shape of "nothing": `swift test --filter HeadlessRender` with the variable unset
+prints `Executed 0 tests` and exits 0. That is the same trap as `KRD_UPDATE_FIXTURE` in
+`WallCanvasTests` — "0 failures" is not evidence that something ran. If you are checking the VT test,
+read the count: `Executed 5 tests`.
+
+**The rule: a failure here must never stop the product.** libghostty-vt is a test/reference
+dependency (UI v2 plan, P5), not the renderer — the shipping `krd` does not link it, and the release
+binary is byte-for-byte the same with the variable set and unset. So a missing, unpublished or
+wrong-architecture artifact means "the headless test did not run", never "krd does not build", and it
+is never fixed by making the artifact a dependency: a P5 failure is fixed by re-publishing the asset.
+
+Publishing is a maintainer step (`scripts/build-vt-xcframework.sh` builds from Ghostty `v1.4.0` with
+Zig 0.17.0, both pinned and signature-checked, and prints the checksum). Pinning it afterwards is one
+edit in `Package.swift`: replace the `path:` binary target with the commented `url:`/`checksum:` form
+above it, using the sha256 the script printed. Until then the local `path:` form is the switch.

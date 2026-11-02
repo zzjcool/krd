@@ -362,3 +362,32 @@ krd: capture stopped: Error Domain=com.apple.ScreenCaptureKit.SCStreamErrorDomai
 - 单显示器虚拟机测不了 #19 的拔线路径（那条有自己的测试和 probe）。
 - 30 分钟不是一天；而且这台虚拟机的 ScreenCaptureKit 明显比真机脆：重启十次后出 `-3805` 可能只是 VM 的
   问题。看门狗和重启的意义正是让这个差别不再致命。
+
+## 12. 无头渲染测试（libghostty-vt，英文版 §13）
+
+`Tests/krdTests/HeadlessRenderTests.swift` 断言的是一张**单元格网格**，而不是 pty 的字节流：它用
+`WallCanvas.draw` 画一帧 wall，再把单元格从 libghostty-vt 里读回来——宽度表就是从同一份库生成的（§10）。
+它能说、而这里其他测试说不出来的三件事：`▪ krd` 在 header 行第 1–5 格是 `palette.accent`；stage 说明行
+每个字形一格；焦点环是**恰好落在说明行写过的那些格子上的下划线属性**——而且是叠加在格子原有样式之上，所以
+footer 的暗色 `2;37` 会变成 `2;37;4`，同一行右侧的 `N panels` 仍然是 `2;37`。最后这一条正是这个测试存在
+的理由：它是属性，不是字节。
+
+```bash
+scripts/build-vt-xcframework.sh                          # 约 1 分钟，需要 xcodebuild；会打印 sha256
+KRD_VT_XCFRAMEWORK=.artifacts/ghostty-vt.xcframework swift test --filter HeadlessRender
+```
+
+**没有这份产物时什么都不会发生，这正是设计。** `KRD_VT_XCFRAMEWORK` 未设置时，`Package.swift` 既不声明
+`KrdVT` 二进制目标也不声明 `KrdHeadlessVT` 包装层，测试文件整个主体都在 `#if KRD_HEADLESS_VT` 里、编译成
+空，`swift build` / `swift test` 与这个东西出现之前完全一样——同样的测试、同样的数量、没有 skip。唯一要
+知道的是「什么都没发生」长什么样：变量未设置时 `swift test --filter HeadlessRender` 会打印
+`Executed 0 tests` 并以 0 退出。这与 `WallCanvasTests` 里 `KRD_UPDATE_FIXTURE` 的坑是同一个形状——
+「0 failures」不能证明有东西跑过。要看 VT 测试，请读数量：`Executed 5 tests`。
+
+**规则：这里的失败永远不能让产品停下。** libghostty-vt 是测试/参考依赖（UI v2 计划的 P5），不是渲染器——
+出货的 `krd` 不链接它，release 二进制在变量设置与未设置时逐字节相同。所以产物缺失、未发布或架构不对，意味着
+「无头测试没跑」，而不是「krd 构建不了」；也绝不能靠把它变成依赖来修：P5 的失败靠重新发布产物来修。
+
+发布是维护者的步骤（`scripts/build-vt-xcframework.sh` 用 Zig 0.17.0 从 Ghostty `v1.4.0` 构建，两者都锁定
+并校验签名，并打印 checksum）。发布之后把 `Package.swift` 里 `path:` 形式的二进制目标换成它上方注释里的
+`url:`/`checksum:` 形式即可，用脚本打印的 sha256。在那之前，本地 `path:` 形式就是开关。
