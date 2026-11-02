@@ -135,7 +135,8 @@ ${layerSrc}
 ${poses.map(p => `        ${p},`).join('\n')}
     ]
 
-    /// Every opaque colour in the drawing; the mosaic quantises its AA edges to these.
+    /// Every opaque colour in the drawing. The mosaic snaps each of its dots to one of these: a
+    /// half-block cell is one colour, so it must be a colour the drawing actually contains.
     static let palette: [String] = [${[...new Set([...palette, '#080a10'])].sort().map(str).join(', ')}]
 }
 `;

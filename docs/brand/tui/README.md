@@ -49,6 +49,7 @@ node logo-tui.mjs --art              # 46×23 的字符版寄居蟹
 node logo-tui.mjs --dump             # 两个 lod 的半块图
 node logo-tui.mjs --banner           # --help 的 5 行大写字标
 node logo-tui.mjs --shot lab.html    # 一页把每一档尺寸、明暗两态都排出来
+node logo-tui.mjs --plain --beat 3   # 管道里只出一张卡（字符版）；默认是半块版
 
 node logo-tui.mjs --svg  mascot.svg  --px 680              # 只画蟹，裁到墨边，透明
 node logo-tui.mjs --png  mascot.png  --px 680 [--bg #0d1117]

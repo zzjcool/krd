@@ -89,6 +89,7 @@ enum MascotArt {
         MascotPose(move: ["crab": [0, 1.7], "eyes": [0, 16.5]], turn: [:], shut: false),
     ]
 
-    /// Every opaque colour in the drawing; the mosaic quantises its AA edges to these.
+    /// Every opaque colour in the drawing. The mosaic snaps each of its dots to one of these: a
+    /// half-block cell is one colour, so it must be a colour the drawing actually contains.
     static let palette: [String] = ["#080a10", "#1c1420", "#220f08", "#3b2416", "#5a1c10", "#5eb8ff", "#8e643a", "#c4884e", "#d8603c", "#f3dfb8", "#f4845a", "#fde8d6", "#ffb48c", "#fffaf2", "#ffffff"]
 }
