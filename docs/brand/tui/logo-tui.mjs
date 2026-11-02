@@ -346,7 +346,11 @@ if (has('--shot')) {
     + `<figcaption>beat ${i}${i === 4 ? ' · blink' : ''}</figcaption></figure>`).join('');
   const plain = `<figure>${pre(card(cols, rows, 3, 'plain'))}<figcaption>character mode</figcaption></figure>`;
   const small = [80, 60, 40].map(c => `<figure>${pre(card(c, 24, 3))}<figcaption>${c} columns</figcaption></figure>`).join('');
-  writeFileSync(out, page(cards + plain + small, 'KRD · mascot lab'));
+  /* the assets themselves, on the same page: the drawing the README ships, and the two marks */
+  const assets = `<figure>${heroSVG(520)}<figcaption>the drawing · hi · the README's SVG</figcaption></figure>`
+    + `<figure>${spriteSVG(96)}<figcaption>the mark · lo · 96 px</figcaption></figure>`
+    + `<figure class="light">${spriteSVG(96)}<figcaption>the mark · light background</figcaption></figure>`;
+  writeFileSync(out, page(assets + cards + plain + small, 'KRD · mascot lab'));
   process.stdout.write(`${out}\n`);
   process.exit(0);
 }
