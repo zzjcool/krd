@@ -19,6 +19,9 @@ The probe bytes have a process-level test of their own: `Tests/krdTests/ProbeBat
 one does), and fails if those questions arrive in more than one write, or if the read runs past the
 `DA1` that terminates the batch (issue #197). "One write" is only visible from the other end of a pty;
 no in-process test can see it.
+Two real terminals have now answered those questions as well — Ghostty 1.4.0 and Apple Terminal — with
+`krd --dump-termcaps`, and the answers are in §9's *[what the batch answers in real
+terminals](#what-the-batch-answers-in-real-terminals-issue-226)*, dumps included.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) does exactly the mechanical part, and
 only on pull requests or on demand (not on every push); release tags get the same build plus
@@ -233,6 +236,7 @@ picture) or the parser dropped it.
 | `--debug` | stats timer + geometry dump + input trace + `AXIsProcessTrusted()` |
 | `--list` | Screen Recording permission and the display/window enumeration, before touching any pixels |
 | `-v`, `--version` | that the binary in your hand is the one you think: compare it with the `VERSION` file and the release tag (`scripts/release.sh` keeps both in sync) |
+| `--dump-termcaps <path>` | what *this* terminal answers to the capability batch — the raw bytes and the parsed `TermCaps` in one JSON file, then exit. Needs a tty on stdin; nothing is painted (§9) |
 
 `stats:` line, once per second with `--debug` (field-by-field in
 [ARCHITECTURE §9](ARCHITECTURE.md#9-diagnostics-wiring)):
@@ -263,6 +267,80 @@ compatibility table of the README:
 8. `krd --fps 20 --debug` + `--dry-run` — move the pointer without clicking: does the remote cursor
    follow? If it does not, the terminal ignores `?1003h` (any-motion tracking); clicks and drags
    still work, hover does not
+
+Step 0 is cheaper than a screenshot: `krd --dump-termcaps <path>` writes what this terminal answered
+to the capability batch — the raw bytes *and* the parsed `TermCaps` — to a file, then exits. It asks
+the product's own questions (the one write ending on the `DA1`, then the `U=1`/`a=f` graphics probe),
+so its answers are the values a real run acts on; it is not a second probe path. A tty on stdin is
+required, and nothing is painted.
+
+### What the batch answers in real terminals (issue #226)
+
+Every capability number the UI v2 plan rests on came from Rex or from a pty harness that *plays* a
+terminal, and the fallbacks were tested against a fake that says "no" — no krd had been run inside a
+terminal that really says no. These two were. Both were launched by a script, with no human and no
+Apple Events, and the files are in
+[`docs/evidence/termcaps-226/`](evidence/termcaps-226/README.md):
+
+| | Ghostty 1.4.0 | Apple Terminal 488 |
+|---|---|---|
+| `TERM` / `TERM_PROGRAM` | `xterm-ghostty` / `ghostty` | `xterm-256color` / `Apple_Terminal` |
+| `?2027` grapheme clustering | `1` — set | *no answer* (no `DECRQM` at all) |
+| `?1016h` (SGR pixels) | `2` — recognised, reset | *no answer* — no `DECRQM`, so whether it honours the mode is **unverified** |
+| `a=t`/`a=T` transmit (a real PNG) | yes — `Gi=50;OK` | no — silent |
+| `a=f` animation frames | yes — `Gi=32,r=2;OK` | no — silent |
+| `?2031` colour-scheme follow | `2` — recognised, so `?2031h` goes out | *no answer*, so it never does |
+| OSC 10 / OSC 11 | `#FFFFFF` / `#282C34`, `ST` → dark | `#000000` / `#FFFFFF`, `BEL` → light |
+| `U=1` placeholder | yes — `Gi=31,p=1;OK` | no answer |
+| `DA1` identity | `?62;22;52c` | `?1;2c` |
+| `CSI 16t` cell / `CSI 14t` area | 16×34 / 2416×1870 | *no `16t`* / 580×353 |
+| the answers arrived in | 7 `read(2)`s, 0.3–0.8 ms (two runs) | 4 `read(2)`s, 0.5 ms |
+
+Read it as "what the terminal said", not "what krd can do". Every *no answer* is the **silent** case,
+and each one is a fallback that already existed: on Terminal.app the wall runs on the pty's own 7×14
+cell, `2027` is left as the terminal had it, `?2031h` is never written, the palette comes from the two
+`OSC`s and the pictures are pixel-sized. That is the "pictures are optional" path, measured on a
+terminal that really has no pictures.
+
+One mode is missing on purpose: the batch does not ask `?2026` (synchronised output). krd assumes it
+and writes `?2026h`/`?2026l` unconditionally, so "sync mode" cannot be a column here — the mode
+column is `?2027`, which the batch does ask. And one cell is *unverified* rather than answered:
+Terminal.app's `?1016h`. It has no `DECRQM` at all, so whether it honours SGR-pixel reports cannot be
+read out of the protocol without clicking in the pane, which needs a mouse nobody could drive from a
+script here. krd's fallback there is its documented one — cell coordinates — not a measurement.
+
+Four things the dumps say that the fixtures cannot:
+
+- **The `DA1` arrives in both**, including the terminal that answers none of the other questions
+  (`?1;2c` is a VT100's answer). The read stops on it in under a millisecond instead of waiting out
+  the 500 ms timeout — the case
+  `ProbeBatchTests.testDA1EndsTheReadWithoutWaitingOutTheTimeout` plays, now measured on real
+  hardware.
+- **The answers come back in several writes, and nothing assumes otherwise.** Ghostty writes each
+  answer separately (7 `read(2)`s for seven answers, in both runs, and 6–7 across every run of this
+  capture); Terminal.app takes 4–5. `#197`'s "one write" is about the *request* — one round trip,
+  `DA1`-terminated — and `TermCaps.parse` is order-free and split-tolerant, so this costs nothing.
+  Anything asserting "one answer, one read" would be wrong on both terminals measured here.
+- **Terminal.app's `CSI 14t` disagrees with its own pty**: 580×353 against `ws_xpixel`/`ws_ypixel`
+  560×336, i.e. a derived cell of 7.25×14.7 px instead of the pty's exact 7×14. The product prefers
+  the pty's numbers when it has them (`krd: wall cell 7x14 px, the pty's pixel size 560x336`), so the
+  divergence only reaches the geometry on a pty that reports no pixel size — the ssh case `CSI 14t`
+  exists for.
+- **Ghostty's `?997` answer disagrees with its own `OSC 11`** on this machine: `CSI ?996n` answers
+  `?997;2n` (light) while the background it reported is `#282C34` (dark), because the report follows
+  the macOS appearance (Light here: `AppleInterfaceStyle` is unset) and the theme does not. `?2031h`
+  sends no report when it is enabled, so nothing inverts at start-up, and the mismatch would only show
+  on an appearance change. Not a krd bug — the batch's palette is the right answer — but it is the one
+  place where krd believes the terminal's report over the palette it measured
+  (`design-ui-v2.zh-CN.md` D5/D6), and the terminal can be wrong about which of the two is the truth.
+
+The pty fixtures in `Tests/krdTests/ProbeBatchTests.swift` answer four of the seven questions (`16t`,
+`14t`, `2027`, `DA1`) in one write, with `?62;22c` and `2027 = 2`; they never answer the two `OSC`s or
+`?2031`. Nothing they assert is contradicted here: the mechanics they pin — one write, a
+`DA1`-terminated read, `U=1` in its own APCs — hold on both real terminals. The answers that differ
+(Ghostty says `2027 = 1`; Terminal.app says nothing at all) are the ones the fixture never modelled,
+and `TermCapsTests` already parses them from real reply strings (both `OSC` terminators, `2027` `1`
+and `2`, `?62;22c` and `?62;22;52c`).
 
 ## 10. Independent cross-checks (`probe/`)
 
