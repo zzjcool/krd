@@ -244,7 +244,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 ## The mascot
 
 <p align="center">
-  <img src="docs/media/mascot.png" alt="krd's mascot: a hermit crab drawn in the terminal" width="680">
+  <img src="docs/media/mascot.svg" alt="krd's mascot: a hermit crab drawn in the terminal" width="680">
 </p>
 
 **A hermit crab** — and not just because it was the cutest sketch on the page.
@@ -258,9 +258,12 @@ Everything else lines up too: the claw is a capture, one frame at a time; the ey
 two things it has to watch (the screen it reads, the terminal it paints into); the spiral is drawn
 with the same rounded cells as the tile grid going down the wire.
 
-It is drawn **twice from one geometry, by the terminal itself** — 24-bit half blocks for the
-picture, one ASCII character per cell for the text version — so the logo is made of the same cells
-the product is made of. `node docs/brand/tui/logo-tui.mjs` to see it move.
+It is drawn **once**: paths in `docs/brand/tui/mascot.mjs`, read by three renderers — the SVG
+above, the terminal sprites the lab prints (24-bit half blocks, or one ASCII character per cell),
+and `MascotRaster`, the CoreGraphics renderer behind the card krd shows while the first frame is in
+flight. The crab on this page *is* the crab in the loading card, not a cousin of it: one geometry,
+generated into Swift (`MascotArt.swift`) so the two cannot drift. `node docs/brand/tui/logo-tui.mjs`
+to see it move.
 
 ## Contact
 

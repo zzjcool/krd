@@ -8,6 +8,8 @@
 #   make bench-replay   replay recorded real frames (needs --record first)
 #   make bench-ab REF=main   same-machine A/B, markdown report for the PR
 #   make test           swift test (unit + micro benchmarks)
+#   make mascot         redraw the mascot: regenerate MascotArt.swift + docs/media/mascot.svg
+#   make mascot-check   fail if the committed MascotArt.swift is not what mascot.mjs draws
 #   make selftest       draw the calibration pattern in this terminal
 #   make dev            run the desktop with the TUI layer (status line + panels)
 #   make dev-selftest   the same layer over the calibration pattern, no screen access needed
@@ -18,7 +20,7 @@ CONFIG  ?= --pane 137x44 --cell 17x33 --source 1920x1200
 BENCH_ARGS ?=
 KRD     := .build/release/krd
 
-.PHONY: all build test selftest dev dev-selftest dev-stats dev-mock mock wall bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
+.PHONY: all build test mascot mascot-check selftest dev dev-selftest dev-stats dev-mock mock wall bench bench-quick bench-encode bench-wire bench-replay bench-ab clean
 
 all: build
 
@@ -27,6 +29,28 @@ build:
 
 test:
 	swift test
+
+# The mascot exists once, as paths in docs/brand/tui/mascot.mjs. Everything else — the README's
+# SVG, the lab's sprites, the favicon, and the drawing krd itself paints — is generated from it.
+# Regenerate after touching the drawing; `mascot-check` is the drift alarm (CI runs it).
+NODE ?= node
+MASCOT := docs/brand/tui/logo-tui.mjs
+
+mascot:
+	$(NODE) $(MASCOT) --swift Sources/krd/MascotArt.swift
+	$(NODE) $(MASCOT) --svg docs/media/mascot.svg --px 680
+	$(NODE) $(MASCOT) --png docs/media/mascot.png --px 680
+	$(NODE) $(MASCOT) --mark docs/brand/tui/krd-mark.svg --px 64
+	$(NODE) $(MASCOT) --favicon docs/brand/tui/krd-favicon.svg --px 16
+	$(NODE) $(MASCOT) --beats docs/media/mascot-loading.png --px 256
+	$(NODE) $(MASCOT) --shot docs/brand/tui/shot.html --cols 96 --rows 26
+
+mascot-check:
+	@$(NODE) $(MASCOT) --swift /tmp/krd-mascot-check.swift >/dev/null
+	@cmp -s /tmp/krd-mascot-check.swift Sources/krd/MascotArt.swift \
+	  || { echo "Sources/krd/MascotArt.swift is stale: run make mascot"; exit 1; }
+	@$(NODE) $(MASCOT) --test
+	@echo "mascot: the generated Swift and the layout self-test agree with mascot.mjs"
 
 selftest: build
 	$(KRD) --selftest --pane 137x44 --cell 17x33 --source 1920x1200

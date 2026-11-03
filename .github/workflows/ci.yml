@@ -27,6 +27,12 @@ jobs:
       - name: Show Swift toolchain
         run: swift --version
 
+      # The mascot is drawn once, in docs/brand/tui/mascot.mjs, and generated into
+      # Sources/krd/MascotArt.swift. Regenerate-and-compare is the only thing that can catch a
+      # hand edit to the generated file, and it needs no build: node is on the runner already.
+      - name: Mascot drift (generated art matches the drawing)
+        run: make mascot-check
+
       - name: Build (release)
         run: swift build -c release
 

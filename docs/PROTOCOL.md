@@ -377,7 +377,9 @@ The mascot shown while the first frame is in flight used to be re-rasterised and
 half-blocks every 110 ms: **22,631 B per tick** on a 137×44 pane, i.e. ~206 KB/s while it is up
 (measured through the card's own sink and confirmed on a pty — the design's older `188 KiB/s` figure
 was the same card, so it was in the right place and the picture data is only 3,888 B of those 22.6 KB:
-the per-cell 24-bit SGR is the rest).
+the per-cell 24-bit SGR is the rest). The drawing inside it has since been replaced by the brand's
+generated one (`MascotArt`, §"the mascot" in `docs/brand/tui/README.md`); the transport below is what
+this section is about, and it did not change. The numbers below are the current ones.
 
 It is now four frames transmitted **once** and played by the terminal. One `?2026` block, written by
 `LoadingView.start()`, every APC carrying `q=2` so no reply can land on stdin after `startInput()`:
@@ -395,7 +397,7 @@ ESC [ ? 2026 l
 ```
 
 Then **nothing**: the animated card has no timer at all, so a 3 s window costs what the first write
-cost — **3,418 B = 1.14 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 633,789 B
+cost — **8,580 B = 2.86 KB/s** on the same pane (the design's budget is "< 4 KB/s"), against 625,320 B
 for the mosaic in the same window. `stop()` clears the card's 20 rows and deletes the image
 (`a=d,d=i,i=<id>`): a pixel-sized placement is not part of the text grid, so clearing cells would
 leave the mascot floating over the frame that just arrived.
@@ -408,7 +410,8 @@ Rules that are not decoration:
 - **`s=3,v=1`** is "run normally, loop for ever". `s=2` is loading mode (the terminal stops at the end
   of the frames and waits for more) and `v=0` is "as if not specified".
 - **Four frames, 220 ms each**: the even steps of the same blink curve, so the cycle is still 880 ms.
-  Bytes are the whole reason — eight anti-aliased frames are 6.9 KB, four are 3.5 KB.
+  Bytes are the whole reason: four frames, their placement and the two captions are 8.6 KB together,
+  and eight would be the same again — for animation this card plays once per connect.
 - **`C=1`, not `U=1`**: the placeholder grid over the card's 36×18 cells is 648 cells ≈ 2.8 KB — four fifths
   of the whole card — and it would make the card depend on a second capability. A card has no cells to
   belong to; it is deleted by id instead. (The icon cache below does implement the `U=1` transport,
