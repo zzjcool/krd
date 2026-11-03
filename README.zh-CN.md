@@ -221,7 +221,20 @@ krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检
 **只画一遍**：路径写在 `docs/brand/tui/mascot.mjs`，三个渲染器读它 —— 上面这张 SVG、lab 打印的终端
 精灵图（24-bit 半块，或每格一个 ASCII 字符）、以及 `MascotRaster`：krd 在首帧到达前那张加载卡背后的
 CoreGraphics 渲染器。所以这一页上的蟹**就是**加载卡里那只，不是亲戚：同一份几何生成成 Swift
-（`MascotArt.swift`），两边没法走样。`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。
+（`MascotArt.swift`），两边没法走样。
+
+<p align="center">
+  <img src="docs/media/mascot-loading.gif" alt="加载卡：寄居蟹从壳里探出来的四拍" width="288">
+</p>
+
+首帧到达之前只有这张卡：终端会播图片时是四帧 `a=f`、帧距 220 ms，不会播时是八拍半块。这个 GIF
+就是那张卡本身，不是它的插图 —— 36×45 个 dot 按原尺寸画出来，再按整数像素放大，和终端放大的
+是同一种像素。`make mascot` 从这一份画重生成所有产物，`make mascot-check` 发现提交的产物过期就红。
+
+**字标**和蟹是同一只手画的：`KRD` 用蟹自己的胶囊肢体扫出来 —— 同一个笔画粗细（大写高的 15%）、
+同一条暖墨描边、和壳同一种墨，所以名字不是碰巧排在画旁边的字体。lockup
+（`docs/brand/tui/krd-lockup.svg`）让蟹站在字标的基线上，四周留 0.14 个大写高的 clear space。
+`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。
 
 ## 联系
 

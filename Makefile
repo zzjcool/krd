@@ -31,26 +31,19 @@ test:
 	swift test
 
 # The mascot exists once, as paths in docs/brand/tui/mascot.mjs. Everything else — the README's
-# SVG, the lab's sprites, the favicon, and the drawing krd itself paints — is generated from it.
-# Regenerate after touching the drawing; `mascot-check` is the drift alarm (CI runs it).
+# SVG, the lab's sprites, the favicon, the wordmark and lockup, the social card, the loading GIF,
+# and the drawing krd itself paints — is generated from it. `--write` rewrites every generated
+# file, `--verify` regenerates in memory and compares (the drift alarm CI runs).
 NODE ?= node
 MASCOT := docs/brand/tui/logo-tui.mjs
 
 mascot:
-	$(NODE) $(MASCOT) --swift Sources/krd/MascotArt.swift
-	$(NODE) $(MASCOT) --svg docs/media/mascot.svg --px 680
-	$(NODE) $(MASCOT) --png docs/media/mascot.png --px 680
-	$(NODE) $(MASCOT) --mark docs/brand/tui/krd-mark.svg --px 64
-	$(NODE) $(MASCOT) --favicon docs/brand/tui/krd-favicon.svg --px 16
-	$(NODE) $(MASCOT) --beats docs/media/mascot-loading.png --px 256
-	$(NODE) $(MASCOT) --shot docs/brand/tui/shot.html --cols 96 --rows 26
+	$(NODE) $(MASCOT) --write
 
 mascot-check:
-	@$(NODE) $(MASCOT) --swift /tmp/krd-mascot-check.swift >/dev/null
-	@cmp -s /tmp/krd-mascot-check.swift Sources/krd/MascotArt.swift \
-	  || { echo "Sources/krd/MascotArt.swift is stale: run make mascot"; exit 1; }
+	@$(NODE) $(MASCOT) --verify
 	@$(NODE) $(MASCOT) --test
-	@echo "mascot: the generated Swift and the layout self-test agree with mascot.mjs"
+	@echo "mascot: every generated file matches mascot.mjs, and the layout self-test passes"
 
 selftest: build
 	$(KRD) --selftest --pane 137x44 --cell 17x33 --source 1920x1200

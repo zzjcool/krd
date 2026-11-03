@@ -262,7 +262,22 @@ It is drawn **once**: paths in `docs/brand/tui/mascot.mjs`, read by three render
 above, the terminal sprites the lab prints (24-bit half blocks, or one ASCII character per cell),
 and `MascotRaster`, the CoreGraphics renderer behind the card krd shows while the first frame is in
 flight. The crab on this page *is* the crab in the loading card, not a cousin of it: one geometry,
-generated into Swift (`MascotArt.swift`) so the two cannot drift. `node docs/brand/tui/logo-tui.mjs`
+generated into Swift (`MascotArt.swift`) so the two cannot drift.
+
+<p align="center">
+  <img src="docs/media/mascot-loading.gif" alt="the loading card: four beats of the crab coming out of its shell" width="288">
+</p>
+
+Before the first frame there is only this: four `a=f` frames at 220 ms where the terminal plays
+pictures, eight half-block beats where it does not. The GIF is that card, not an illustration of
+it — 36×45 dots rendered at their own size and repeated by whole pixels, the way the terminal
+scales them. `make mascot` regenerates every asset from the one drawing; `make mascot-check` fails
+if a committed one is stale.
+
+The **wordmark** is drawn in the same hand: `KRD` swept from the crab's own capsules — one stroke
+weight (15% of the cap), one warm outline, the same ink as the shell — so the name is not a font
+that happened to sit next to the drawing. The lockup (`docs/brand/tui/krd-lockup.svg`) sets the
+crab on the wordmark's baseline with 0.14 cap of clear space. `node docs/brand/tui/logo-tui.mjs`
 to see it move.
 
 ## Contact

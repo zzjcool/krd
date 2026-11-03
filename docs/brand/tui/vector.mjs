@@ -507,11 +507,13 @@ const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(
  * space (so a pose that moves the group does not drag its clip along), gradients are user-space.
  */
 export function svg(scene, { width, height, title, desc, lod = 'hi', pose = {}, css = '', pad = 0,
-                             viewBox = null, extra = '' } = {}) {
+                             viewBox = null, extra = '', id = '' } = {}) {
+  /* `id` prefixes every def and the title: two of these documents inlined in one HTML page share
+     one id namespace, and a shared #g0 paints the second drawing with the first one's gradient */
   const [vx, vy, vw, vh] = viewBox || scene.view;
   const defs = new Map();
   const ref = (kind, key, make) => {
-    if (!defs.has(key)) defs.set(key, { id: `${kind}${defs.size}`, body: make(`${kind}${defs.size}`) });
+    if (!defs.has(key)) defs.set(key, { id: `${id}${kind}${defs.size}`, body: make(`${id}${kind}${defs.size}`) });
     return defs.get(key).id;
   };
   const stops = st => st.map(([o, h, a = 1]) =>
@@ -572,8 +574,8 @@ export function svg(scene, { width, height, title, desc, lod = 'hi', pose = {}, 
   }
   const box = [vx - pad, vy - pad, vw + 2 * pad, vh + 2 * pad].map(v => num(v)).join(' ');
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${box}"` +
-    `${width ? ` width="${width}"` : ''}${height ? ` height="${height}"` : ''} role="img" aria-labelledby="t">\n` +
-    `  <title id="t">${esc(title || '')}</title>\n` + (desc ? `  <desc>${esc(desc)}</desc>\n` : '') +
+    `${width ? ` width="${width}"` : ''}${height ? ` height="${height}"` : ''} role="img" aria-labelledby="${id}t">\n` +
+    `  <title id="${id}t">${esc(title || '')}</title>\n` + (desc ? `  <desc>${esc(desc)}</desc>\n` : '') +
     (css ? `  <style>${css}</style>\n` : '') +
     (defs.size ? `  <defs>\n${[...defs.values()].map(d => `    ${d.body}`).join('\n')}\n  </defs>\n` : '') +
     body + extra + '</svg>\n';
@@ -601,4 +603,154 @@ export function bounds(scene, { lod = 'hi', pose = {} } = {}) {
     x0 = Math.min(x0, a); y0 = Math.min(y0, b); x1 = Math.max(x1, c); y1 = Math.max(y1, e);
   }
   return [x0, y0, x1, y1];
+}
+
+/* --------------------------------------------------------------------- GIF */
+/* A GIF, because the loading card is an animation and a strip of four stills is not what the
+   terminal plays. Same zero dependencies as the PNG writer: median-cut the frames' colours, then
+   GIF's LZW. The art is flat and few-coloured, so the palette is usually exact. */
+
+/** Colour histogram over straight-alpha RGBA frames: packed rgb -> count. */
+function histogram(frames) {
+  const h = new Map();
+  for (const { px } of frames) {
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i + 3] < 128) continue;               /* GIF frames here are opaque; a transparent pixel is background */
+      h.set((px[i] << 16) | (px[i + 1] << 8) | px[i + 2], (h.get((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]) || 0) + 1);
+    }
+  }
+  return h;
+}
+const unpack = k => [(k >> 16) & 255, (k >> 8) & 255, k & 255];
+const boxScore = box => (box.r1 - box.r0 + box.g1 - box.g0 + box.b1 - box.b0) * (box.n > 0 ? 1 : 0);
+function boxOf(colors) {
+  let r0 = 255, r1 = 0, g0 = 255, g1 = 0, b0 = 255, b1 = 0, n = 0;
+  for (const [r, g, b, c] of colors) {
+    if (r < r0) r0 = r; if (r > r1) r1 = r;
+    if (g < g0) g0 = g; if (g > g1) g1 = g;
+    if (b < b0) b0 = b; if (b > b1) b1 = b;
+    n += c;
+  }
+  return { colors, r0, r1, g0, g1, b0, b1, n };
+}
+/**
+ * Median cut, weighted by how many pixels each colour has. Empty boxes are dropped, so a frame with
+ * 40 colours never pays for 256 table entries of work — only for 256 table entries of bytes.
+ */
+function paletteOf(hist, max) {
+  if (hist.size <= max) return [...hist.keys()].map(unpack);
+  let boxes = [boxOf([...hist].map(([k, c]) => [...unpack(k), c]))];
+  while (boxes.length < max) {
+    let bi = -1, bs = -1;
+    for (let i = 0; i < boxes.length; i++) {
+      const s = boxScore(boxes[i]);
+      if (s > bs) { bs = s; bi = i; }
+    }
+    const box = boxes[bi];
+    if (!box || box.colors.length < 2) break;
+    const spans = [box.r1 - box.r0, box.g1 - box.g0, box.b1 - box.b0], ch = spans.indexOf(Math.max(...spans));
+    box.colors.sort((a, b) => a[ch] - b[ch]);
+    /* the weighted median: half the pixels on each side, not half the colours */
+    const half = box.n / 2;
+    let acc = 0, cut = 1;
+    for (let i = 0; i < box.colors.length - 1; i++) {
+      acc += box.colors[i][3];
+      if (acc >= half) { cut = i + 1; break; }
+      cut = i + 2;
+    }
+    boxes.splice(bi, 1, boxOf(box.colors.slice(0, cut)), boxOf(box.colors.slice(cut)));
+  }
+  return boxes.map(box => {
+    let r = 0, g = 0, b = 0, n = 0;
+    for (const [cr, cg, cb, c] of box.colors) { r += cr * c; g += cg * c; b += cb * c; n += c; }
+    return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+  });
+}
+/** Nearest palette entry, memoised per colour: the frames repeat their colours a lot. */
+function indexer(palette) {
+  const cache = new Map();
+  return px => {
+    const k = (px[0] << 16) | (px[1] << 8) | px[2];
+    let v = cache.get(k);
+    if (v === undefined) {
+      let best = 0, bestD = Infinity;
+      for (let i = 0; i < palette.length; i++) {
+        const p = palette[i];
+        const d = (px[0] - p[0]) ** 2 + (px[1] - p[1]) ** 2 + (px[2] - p[2]) ** 2;
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      cache.set(k, v = best);
+    }
+    return v;
+  };
+}
+/** GIF's LZW: clear code first, end code last, table reset when it fills. */
+function lzw(indices, min) {
+  const clear = 1 << min, eoi = clear + 1;
+  const out = [];
+  let cur = 0, bits = 0, size = min + 1, max = 1 << size, next = eoi + 1;
+  const dict = new Map();
+  const put = code => {
+    cur |= code << bits; bits += size;
+    while (bits >= 8) { out.push(cur & 255); cur >>>= 8; bits -= 8; }
+  };
+  put(clear);
+  let prefix = indices[0];
+  for (let i = 1; i < indices.length; i++) {
+    const k = indices[i], key = prefix * 4096 + k, got = dict.get(key);
+    if (got !== undefined) { prefix = got; continue; }
+    put(prefix);
+    if (next < 4096) {
+      dict.set(key, next++);
+      if (next > max && size < 12) { size++; max = 1 << size; }
+    } else {
+      put(clear); dict.clear(); size = min + 1; max = 1 << size; next = eoi + 1;
+    }
+    prefix = k;
+  }
+  put(prefix); put(eoi);
+  if (bits > 0) out.push(cur & 255);
+  return out;
+}
+const u16 = v => [v & 255, (v >> 8) & 255];
+/** The LZW stream as GIF sub-blocks: 255-byte chunks, each with its length, then a 0 terminator. */
+function subBlocks(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 255) {
+    const part = bytes.slice(i, i + 255);
+    out.push(part.length, ...part);
+  }
+  out.push(0);
+  return out;
+}
+/**
+ * `frames` are straight-alpha RGBA bytes at width x height, all the same size. `delay` is in
+ * centiseconds (220 ms = 22); `loop` 0 means forever, the Netscape extension.
+ */
+export function gif(frames, { width, height, delay = 22, loop = 0 } = {}) {
+  const palette = paletteOf(histogram(frames), 256);
+  if (!palette.length) palette.push([0, 0, 0]);
+  const index = indexer(palette);
+  let size = 1;
+  while ((1 << size) < Math.max(2, palette.length)) size++;
+  const table = Array.from({ length: 1 << size }, (_, i) => palette[i] || [0, 0, 0]).flat();
+  const bytes = [
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61,                       /* GIF89a */
+    ...u16(width), ...u16(height),
+    0xf0 | (size - 1),                                        /* global table, 8-bit colour resolution */
+    0, 0,                                                     /* background index, pixel aspect */
+    ...table,
+    0x21, 0xff, 0x0b, ...Buffer.from('NETSCAPE2.0', 'latin1'), 0x03, 0x01, ...u16(loop), 0x00,
+  ];
+  for (const frame of frames) {
+    bytes.push(0x21, 0xf9, 0x04, 0x04, ...u16(delay), 0, 0x00);      /* graphic control: disposal 1 */
+    bytes.push(0x2c, ...u16(0), ...u16(0), ...u16(width), ...u16(height), 0x00);
+    const levels = Math.max(2, size);       /* LZW minimum code size = bits per pixel */
+    bytes.push(levels);
+    const px = frame.px, idx = new Array(width * height);
+    for (let i = 0, n = width * height; i < n; i++) idx[i] = index(px.subarray(i * 4, i * 4 + 4));
+    bytes.push(...subBlocks(lzw(idx, levels)));
+  }
+  bytes.push(0x3b);
+  return Buffer.from(bytes);
 }

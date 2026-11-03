@@ -15,6 +15,12 @@
   docs/media/mascot.svg   终端精灵图 / lab 页面      MascotRaster.swift（CoreGraphics）
   krd-mark / favicon      （半块 / 字符两态）            │
   krd-favicon（16px 点阵）                          krd 的加载卡（两条传输）
+
+  docs/brand/tui/wordmark.mjs   ← K/R/D 三条路径，同一套胶囊、同一条墨线
+              │
+        vector.mjs::svg / render / gif
+              │
+  krd-wordmark.svg · krd-lockup(-stacked).svg · docs/media/krd-social.png · mascot-loading.gif
 ```
 
 ## 文件
@@ -22,11 +28,15 @@
 | 文件 | 是什么 |
 | --- | --- |
 | `mascot.mjs` | 造型：`scene()` 一层层写出路径/填充/描边/裁切，`beat(i)` 是 8 拍姿态，`spriteView()` 是取景框 |
-| `vector.mjs` | 渲染工具：路径扁平化、自己的光栅器（超采样 + 框滤波）、PNG 写出、SVG 写出、包围盒 |
+| `vector.mjs` | 渲染工具：路径扁平化、自己的光栅器（超采样 + 框滤波）、PNG / GIF / SVG 写出、包围盒 |
+| `wordmark.mjs` | 字标：`K`/`R`/`D` 的路径、字母排布（按墨宽推进）、lockup 的基线对齐与 clear space |
 | `swift.mjs` | 代码生成：把一个 lod 的场景 + 姿态表写成 Swift（`MascotArt`） |
 | `logo-tui.mjs` | CLI：lab 页面、TUI、以及所有静态产物的入口 |
 | `../../Sources/krd/MascotArt.swift` | **生成物**，`make mascot` 重写，不要手改 |
 | `../../Sources/krd/MascotRaster.swift` | 手写：CoreGraphics 渲染 `MascotArt`，两条传输共用 |
+| `krd-wordmark.svg` / `krd-lockup.svg` / `krd-lockup-stacked.svg` | 生成物：字标、横版 lockup、竖版 lockup |
+| `../../docs/media/krd-social.png` | 生成物：GitHub 社交预览 1280×640（近黑底） |
+| `../../docs/media/mascot-loading.gif` | 生成物：加载卡的四个图片帧（36×45 dot，整数倍放大） |
 
 ## 三个尺寸（lod）
 
@@ -56,7 +66,14 @@ node logo-tui.mjs --png  mascot.png  --px 680 [--bg #0d1117]
 node logo-tui.mjs --mark krd-mark.svg --px 64
 node logo-tui.mjs --favicon krd-favicon.svg --px 16
 node logo-tui.mjs --beats mascot-loading.png --px 256      # 图片卡的四帧并排
+node logo-tui.mjs --gif  mascot-loading.gif --cell 8       # 同样四帧，按终端放大的整像素
+node logo-tui.mjs --wordmark krd-wordmark.svg --px 960     # 字标，裁到墨边
+node logo-tui.mjs --lockup krd-lockup.svg --px 960         # 横版：蟹站在字标的基线上
+node logo-tui.mjs --lockup krd-lockup-stacked.svg --px 640 --stacked
+node logo-tui.mjs --social krd-social.png --px 1280        # 2:1 社交预览，近黑底
 node logo-tui.mjs --swift Sources/krd/MascotArt.swift      # 生成 Swift
+node logo-tui.mjs --write                                  # 重写全部产物（= make mascot）
+node logo-tui.mjs --verify                                 # 比一遍，过期就红（= make mascot-check）
 ```
 
 零依赖，Node 18+。
@@ -75,6 +92,26 @@ node logo-tui.mjs --swift Sources/krd/MascotArt.swift      # 生成 Swift
 
 图片卡的像素高度由调用方量到的 cell 推出来（`36 · cellH / (2 · cellW)`，8×20 的 cell 是 45 行），
 所以图片自己的长宽比等于它占的 cell 盒的长宽比——拉伸型和等比缩放型的终端看起来一样。
+
+## 字标与 lockup
+
+`KRD` 不是排出来的字体，是照着蟹画出来的：每个字母都是 `taper()` 扫出的胶囊（和腿、眼柄、钳臂同一个
+肢体工具箱），一个大写高 200、一个笔画 30（15%），一条 `INK.line` 描边压在填色下面（只露出外侧一半，
+和蟹的轮廓同一个规则）。`K` 的斜臂、`R` 的腿带一点弯——直线单线字会被读成字体，弯的会被读成这张画。
+
+排布按**墨宽**推进：每个字母先量自己含描边的墨盒，字距 `GAP = 46`（0.23 个大写高），所以字母之间
+的空白是设计值，不是字体度量碰巧留下的。`R` 的碗收到 0.56 高度，腿从碗肩下面出来；`D` 只有一个
+半椭圆，是最宽的字母。
+
+lockup 把两个场景放一起（`translate` 只动路径、渐变和群组 pivot，不动画法）：
+
+- **横版**：蟹的墨底 = 字标的基线，蟹墨与 `K` 墨之间 `LEAD = 64`（0.32 个大写高）。蟹放大 1.2 倍：
+  它的体量比大写高小，1:1 会看起来像字旁边的一个小图标。
+- **竖版**：蟹在上、字在下，中轴对称，中间 `STACK = 48`；蟹缩到字宽的 56%。
+- **clear space**：四周 0.14 个大写高（28 单位），`--lockup` 的 viewBox 就是这个矩形。
+
+`--social` 把横版 lockup 放进 2:1 的 1280×640、`#080a10` 底，四周留白由 viewBox 决定（不是裁剪）。
+GitHub 的社交预览图要在仓库设置里手动上传，仓库里这份就是上传用的。
 
 ## 配色
 
@@ -95,6 +132,7 @@ make mascot-check   # 重新生成一遍比 cmp，再跑 lab 的自检；生成�
 
 ## 还没做
 
-- `KRD` 大写字标和蟹并排的整体 lockup（横版/竖版、clear space）
-- 抓屏动画的 GIF（TUI 里能看，`--shot` 只能出静帧）
-- GitHub 社交预览图（1280×640，得把蟹放到品牌底色上）
+- TUI 抓屏版的动画 GIF（半块卡、终端质感）——现在这份 GIF 是图片卡的四帧 `a=f`，是产品会播的那份；
+  抓屏版要录终端，生成器不做
+- `--banner`（`--help` 的 5 行字符字标）还是手写的方块字，没有跟着 `wordmark.mjs` 走
+- 社交预览图上传到仓库设置是手动步骤，`make mascot` 只负责把它画对
