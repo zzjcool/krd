@@ -29,6 +29,7 @@
  * Zero dependencies, Node 18+.
  */
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { inflateSync } from 'node:zlib';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as V from './vector.mjs';
@@ -672,12 +673,51 @@ if (has('--write')) {
   }
   process.exit(0);
 }
+/* Bitmap assets are compared as pixels, not as bytes: zlib's deflate is deterministic for one
+   implementation but not across them, and a CI runner's libz is not this machine's. Two PNGs that
+   decode to the same pixels are the same asset; two that differ in a pixel are stale. */
+function pixelsOfPNG(buf) {
+  let p = 8, width = 0, height = 0;
+  const idat = [];
+  while (p + 8 <= buf.length) {
+    const len = buf.readUInt32BE(p), type = buf.toString('latin1', p + 4, p + 8);
+    const body = buf.subarray(p + 8, p + 8 + len);
+    if (type === 'IHDR') { width = body.readUInt32BE(0); height = body.readUInt32BE(4); }
+    else if (type === 'IDAT') idat.push(body);
+    p += 12 + len;
+  }
+  const raw = inflateSync(Buffer.concat(idat)), stride = width * 4 + 1, px = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    if (raw[y * stride] !== 0) throw new Error('png: filter type ' + raw[y * stride]);
+    raw.copy(px, y * width * 4, y * stride + 1, y * stride + 1 + width * 4);
+  }
+  return { width, height, px };
+}
+function samePNG(a, b) {
+  try {
+    const x = pixelsOfPNG(a), y = pixelsOfPNG(b);
+    return x.width === y.width && x.height === y.height && x.px.equals(y.px);
+  } catch { return false; }
+}
+function sameGIF(a, b) {
+  try {
+    const x = readGIF(a), y = readGIF(b);
+    if (x.width !== y.width || x.height !== y.height || x.loop !== y.loop) return false;
+    if (x.delay.join() !== y.delay.join() || x.frames.length !== y.frames.length) return false;
+    if (JSON.stringify(x.palette) !== JSON.stringify(y.palette)) return false;
+    return x.frames.every((f, i) => y.frames[i].width === f.width && y.frames[i].height === f.height
+      && lzwDecode(f.data, f.min).join() === lzwDecode(y.frames[i].data, y.frames[i].min).join());
+  } catch { return false; }
+}
+const sameAsset = (file, want, have) => file.endsWith('.png') ? samePNG(want, have)
+  : file.endsWith('.gif') ? sameGIF(want, have) : want.equals(have);
+
 if (has('--verify')) {
   const stale = [];
   for (const [file, make] of ASSETS) {
     const path = join(ROOT, file), data = make();
     const want = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (!existsSync(path) || !readFileSync(path).equals(want)) stale.push(file);
+    if (!existsSync(path) || !sameAsset(file, want, readFileSync(path))) stale.push(file);
   }
   if (stale.length) {
     process.stdout.write(stale.map(f => `stale: ${f}`).join('\n') + '\nrun make mascot\n');
