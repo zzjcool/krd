@@ -23,6 +23,8 @@ client to install — the SSH session you already have *is* the client.
 ssh -t host krd --fps 20        # exit with Ctrl-\
 ```
 
+**Contents:** [Install](#install) · [Use](#use) · [Headless](#headless-read-the-mac-as-text) · [Requirements](#requirements) · [Status](#status) · [Docs](#docs) · [The mascot](#the-mascot) · [Contributing](#contributing) · [License](#license)
+
 ## Install
 
 ```bash
@@ -62,12 +64,12 @@ krd --unfocused-fps 1        # while the pane has no focus the picture drops to 
                              # terminal reports focus with DECSET 1004: CSI I in, CSI O out):
                              # 1 fps by default, 0 freezes it — a key or a click brings it back
 krd --no-input               # watch only
-krd --quality 70            # how much colour the picture may lose: 100 = lossless, 80 (default) =
+krd --quality 70             # how much colour the picture may lose: 100 = lossless, 80 (default) =
                             # 5-6-5 on incompressible tiles, 70 = 5-5-5, 50 = 4-4-4 everywhere
-krd --quality auto          # let krd spend colour first (80->70->50), then frame rate, then scale
-krd --no-quantise           # same as --quality 100 (the mirror's lossless; the wall's is
+krd --quality auto           # let krd spend colour first (80->70->50), then frame rate, then scale
+krd --no-quantise            # same as --quality 100 (the mirror's lossless; the wall's is
                             # --wall-quality 100)
-krd --wall-quality 70       # the landing screen's pictures: 100 = lossless, 70 (default) = 5-5-5,
+krd --wall-quality 70        # the landing screen's pictures: 100 = lossless, 70 (default) = 5-5-5,
                             # 50 = 4-4-4. Bit depth only — the picture is still exactly its
                             # cells, so a first picture costs ~20-30 % fewer bytes on desktop-like
                             # content (measured -20.7 % at 70, -27.9 % at 50) and nothing on a flat
@@ -210,19 +212,30 @@ documentation — `python3 probe/kkeyboard.py` answers it for the terminal you a
 
 ## Status
 
-| | |
-|---|---|
-| Solid | tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost 0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input posted to that window's own process, display-set changes (plug/unplug, resolution, lid) restart capture in place, SSH |
-| Rough | colour-heavy full-screen motion at full density: 13.58 MB/frame worst case, costed in [research-photo-bandwidth](docs/research-photo-bandwidth.md); Herdr's image-delete semantics |
-| Solid (bandwidth) | colour-heavy motion is usable when you spend resolution on it: incompressible tiles drop to 5-6-5 (`Z_HUFFMAN_ONLY`, no protocol change) for **1.29×**, and `--scale 0.5` captures a quarter of the pixels for **3.98×** — together **68 MB/s at 20 fps**, inside a local pty's 103 MB/s, with pointer mapping unchanged |
-| Solid (clipboard) | clipboard bridge, opt-in with `--clipboard=in|out|both`: a copy inside the mirrored
-desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the terminal
-for its clipboard, puts it on the target's pasteboard and posts `Cmd-V` (`out`, needs a terminal
-that answers the OSC 52 read — `--clipboard-paste <file>` is the path that always works) |
-| Solid (IME/CJK) | `--ime` (`auto` / `raw` / `unicode`): physical keys go to the target so *its* input method composes
-(candidate window renders in the mirrored picture); characters with no key fall back to injected
-text, with a log line — see TROUBLESHOOTING §19 |
-| Not yet | spanning several displays in one picture (a session follows one display at a time) |
+**Solid** — tile-dirty rendering (8×4 cells, parallel zlib, per-tile level), static screens cost
+0 bytes/s, pointer following, left/middle/right click, double click, wheel, keyboard, kitty keyboard
+protocol (`Cmd`, repeat, release) on terminals that answer the handshake, window mode with input
+posted to that window's own process, display-set changes (plug/unplug, resolution, lid) restart
+capture in place, SSH.
+
+**Solid (bandwidth)** — colour-heavy motion is usable when you spend resolution on it: incompressible
+tiles drop to 5-6-5 (`Z_HUFFMAN_ONLY`, no protocol change) for **1.29×**, and `--scale 0.5` captures
+a quarter of the pixels for **3.98×** — together **68 MB/s at 20 fps**, inside a local pty's
+103 MB/s, with pointer mapping unchanged.
+
+**Solid (clipboard)** — the clipboard bridge, opt-in with `--clipboard=in|out|both`: a copy inside
+the mirrored desktop becomes an OSC 52 sequence for the local terminal (`in`), and `Ctrl-V` asks the
+terminal for its clipboard, puts it on the target's pasteboard and posts `Cmd-V` (`out`, needs a
+terminal that answers the OSC 52 read — `--clipboard-paste <file>` is the path that always works).
+
+**Solid (IME/CJK)** — `--ime` (`auto` / `raw` / `unicode`): physical keys go to the target so *its*
+input method composes (the candidate window renders in the mirrored picture); characters with no key
+fall back to injected text, with a log line — see TROUBLESHOOTING §19.
+
+**Rough** — colour-heavy full-screen motion at full density: 13.58 MB/frame worst case, costed in
+[research-photo-bandwidth](docs/research-photo-bandwidth.md); Herdr's image-delete semantics.
+
+**Not yet** — spanning several displays in one picture (a session follows one display at a time).
 
 ## Docs
 
@@ -237,48 +250,36 @@ text, with a log line — see TROUBLESHOOTING §19 |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | 47 symptoms with root causes |
 | [DEPLOY](docs/DEPLOY.md) | install, permissions, signing, SSH on the far side |
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
-
 ## The mascot
 
 <p align="center">
-  <img src="docs/media/mascot.svg" alt="krd's mascot: a hermit crab drawn in the terminal" width="680">
+  <img src="docs/media/mascot.svg" alt="krd's mascot: a hermit crab drawn in the terminal" width="620">
 </p>
 
-**A hermit crab** — and not just because it was the cutest sketch on the page.
+**A hermit crab** — because `SSH` is *secure shell*, and a shell is what a hermit crab lives in. krd
+brings no client, no port and no codec: it moves your Mac's desktop into the shell you already have
+open, so close it, reconnect or switch terminals and the crab walks out with the same desktop on its
+back. The claw is a capture, one frame at a time; the eyes on stalks are the two things it watches
+(the screen it reads, the terminal it paints into); the spiral is drawn with the same rounded cells
+as the tile grid going down the wire.
 
-`SSH` stands for *secure shell*, and a shell is exactly what a hermit crab lives in. krd brings no
-client, no port and no codec of its own: it moves your Mac's desktop into the shell you already have
-open. Close the shell, reconnect, switch terminals — the crab walks out with the same desktop on its
-back. That is the whole product in one animal.
-
-Everything else lines up too: the claw is a capture, one frame at a time; the eyes on stalks are the
-two things it has to watch (the screen it reads, the terminal it paints into); the spiral is drawn
-with the same rounded cells as the tile grid going down the wire.
-
-It is drawn **once**: paths in `docs/brand/tui/mascot.mjs`, read by three renderers — the SVG
-above, the terminal sprites the lab prints (24-bit half blocks, or one ASCII character per cell),
-and `MascotRaster`, the CoreGraphics renderer behind the card krd shows while the first frame is in
-flight. The crab on this page *is* the crab in the loading card, not a cousin of it: one geometry,
-generated into Swift (`MascotArt.swift`) so the two cannot drift.
+It is drawn **once** — paths in `docs/brand/tui/mascot.mjs`, rendered into the SVG above, the
+terminal sprites, the loading card (`MascotArt.swift`, generated) and the `KRD` wordmark
+(`wordmark.mjs`: the same capsules, the same ink). Before the first frame, the card is this:
 
 <p align="center">
-  <img src="docs/media/mascot-loading.gif" alt="the loading card: four beats of the crab coming out of its shell" width="288">
+  <img src="docs/media/mascot-loading.gif" alt="the loading card: four beats of the crab coming out of its shell" width="200">
 </p>
 
-Before the first frame there is only this: four `a=f` frames at 220 ms where the terminal plays
-pictures, eight half-block beats where it does not. The GIF is that card, not an illustration of
-it — 36×45 dots rendered at their own size and repeated by whole pixels, the way the terminal
-scales them. `make mascot` regenerates every asset from the one drawing; `make mascot-check` fails
-if a committed one is stale.
+Four `a=f` frames at 220 ms where the terminal plays pictures, eight half-block beats where it does
+not, at the card's own 36×45 dots rather than at display size. `make mascot` regenerates every asset
+from that one drawing and `make mascot-check` fails if a committed one is stale;
+`node docs/brand/tui/logo-tui.mjs` shows it moving. The wordmark and the lockup live in the same
+place: `docs/brand/tui/README.md`.
 
-The **wordmark** is drawn in the same hand: `KRD` swept from the crab's own capsules — one stroke
-weight (15% of the cap), one warm outline, the same ink as the shell — so the name is not a font
-that happened to sit next to the drawing. The lockup (`docs/brand/tui/krd-lockup.svg`) sets the
-crab on the wordmark's baseline with 0.14 cap of clear space. `node docs/brand/tui/logo-tui.mjs`
-to see it move.
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
 ## Contact
 

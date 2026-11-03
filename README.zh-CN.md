@@ -21,6 +21,8 @@ ScreenCaptureKit 抓屏，kitty 图形协议把画面送进终端，鼠标键盘
 ssh -t host krd --fps 20        # 退出按 Ctrl-\
 ```
 
+**目录：** [安装](#安装) · [用法](#用法) · [Headless](#headless把-mac-读成文本) · [环境要求](#环境要求) · [状态](#状态) · [文档](#文档) · [吉祥物](#吉祥物) · [参与](#参与) · [许可](#许可)
+
 ## 安装
 
 ```bash
@@ -58,9 +60,12 @@ krd --unfocused-fps 1        # pane 没焦点时画面降到这个帧率（终�
                              # CSI I 是获得焦点、CSI O 是失去焦点），默认 1 fps，0 就彻底冻住，
                              # 敲一下键或点一下鼠标画面就回来
 krd --no-input               # 只看不动
-krd --no-quantise           # 保持严格无损（照片类画面字节数约 2.3 倍）——这是镜像的无损，
+krd --quality 70             # 画面允许多少颜色损失：100 无损，80（默认）在不可压 tile 上走 5-6-5，
+                             # 70 是 5-5-5，50 全部 4-4-4
+krd --quality auto           # 先花颜色（80→70→50），再降帧率，最后降分辨率
+krd --no-quantise            # 保持严格无损（照片类画面字节数约 2.3 倍）——这是镜像的无损，
                             # 落地屏要无损是 --wall-quality 100
-krd --wall-quality 70       # 落地屏那几张图的质量：100 是无损，70（默认）是 5-5-5，50 是 4-4-4。
+krd --wall-quality 70        # 落地屏那几张图的质量：100 是无损，70（默认）是 5-5-5，50 是 4-4-4。
                             # 只降位深、不改分辨率：画面依旧正好铺满自己的格子，桌面类内容首屏字节
                             # 少 20-30%（实测 70 少 20.7%、50 少 27.9%），纯色平坦内容几乎没有变化，
                             # 既不会裁切也不会出现接缝。它是独立开关（--quality 是镜像的），
@@ -79,7 +84,18 @@ krd --passthrough on         # 在 tmux/screen 里：把每条图像转义包进
                              # （auto|on|off，或 KRD_PASSTHROUGH；默认 auto：TERM 以 tmux 或 screen
                              # 开头时打开，其它终端关着；见 TROUBLESHOOTING §1c）
 krd --bench                  # 在合成帧上给编码器计时，不需要终端
+make bench                   # 每一层 + 预算判定 -> bench/report.md
 ```
+
+`--dev` 会在画面下面加一条状态栏（`fps`、`MB/s`、延迟）和五个面板 —— stats、devices、settings、
+log、help —— 先按 `Ctrl-\` 再按 `s`/`d`/`f`/`l`/`?`，或者直接点你想看的那一段。画面保留状态栏
+以上的每一行；面板从画面里借走几行，关掉时再还给画面。`make dev` 是它的快捷方式。
+
+`fps` 那一段是 `delivered/target`。这个斜杠在 `--quality auto` 下很要紧：它的帧率台阶
+（`20 -> 15 -> 10`）是**目标，不是下限**。采集仍然按 `--fps` 到达，主循环丢帧让**平均**落在台阶上
+——20 fps 的采集要 15 的时候画法是 `画、丢、画、画、丢、…`，所以单帧间隔在 50/100 ms 之间跳，而
+送达率是 15.0。守不住的台阶会显示成 `11.2/15 fps`（状态栏和 `--stats` 里都一样），而不会悄悄
+标成一个假的 15（issue #140）。
 
 `--mock` 单独用时把 ScreenCaptureKit 换成进程内画的桌面（`--mock-size WxH`，默认 1920x1200）：
 瓦片、脏矩形、编码器、摆放和 TUI 层都是真代码，只有像素是合成的，所以不需要权限、也不会停（`make dev-mock`）。
@@ -174,17 +190,26 @@ krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检
 
 ## 状态
 
-| | |
-|---|---|
-| 可用 | 瓦片脏更新（静止画面 0 字节/秒）、指针跟随、左中右三键、双击、滚轮、键盘、应答握手的终端上的 kitty 键盘协议（`Cmd`、连发、释放）、窗口级镜像（输入直接投给该窗口所属进程）、显示器集合变化（插拔 / 改分辨率 / 合盖）就地重启采集、SSH |
-| 粗糙 | 全密度下的大面积高速运动：最坏情况 13.58 MB/帧，成本见 [research-photo-bandwidth](docs/research-photo-bandwidth.zh-CN.md)；Herdr 的图像删除语义 |
-| 可用（带宽） | 用分辨率换带宽后，彩色重内容已经可用：不可压 tile 降到 5-6-5（`Z_HUFFMAN_ONLY`，不改协议）省 **1.29×**，`--scale 0.5` 只采四分之一的像素省 **3.98×** —— 合起来 20 fps 下 **68 MB/s**，落在本地 pty 的 103 MB/s 之内，且指针映射不变 |
-| 可用（剪贴板） | 剪贴板桥，`--clipboard=in|out|both` 显式打开：镜像桌面里复制 = 给本地终端发一条 OSC 52
-（`in`）；`Ctrl-V` = 向终端索取剪贴板、放进镜像端 pasteboard 再投 `Cmd-V`（`out`，需要终端支持 OSC 52 读回，
-不支持就用 `--clipboard-paste <file>`） |
-| 可用（输入法/CJK） | `--ime`（`auto` / `raw` / `unicode`）：物理键直接发给目标端，由**它的**输入法组合
-（候选窗画在镜像画面里）；没有按键的字符退回注入文本，并打一行日志——见 TROUBLESHOOTING §19 |
-| 还没做 | 把多块显示器拼成一张画面（一个会话同一时刻只跟随一块屏） |
+**可用** —— 瓦片脏更新（8×4 格、并行 zlib、逐块级别），静止画面 0 字节/秒，指针跟随，左中右三键，
+双击，滚轮，键盘，在应答握手的终端上的 kitty 键盘协议（`Cmd`、连发、释放），窗口级镜像（输入直接
+投给该窗口所属进程），显示器集合变化（插拔 / 改分辨率 / 合盖）就地重启采集，SSH。
+
+**可用（带宽）** —— 用分辨率换带宽后，彩色重内容已经可用：不可压 tile 降到 5-6-5
+（`Z_HUFFMAN_ONLY`，不改协议）省 **1.29×**，`--scale 0.5` 只采四分之一的像素省 **3.98×** —— 合起来
+20 fps 下 **68 MB/s**，落在本地 pty 的 103 MB/s 之内，且指针映射不变。
+
+**可用（剪贴板）** —— 剪贴板桥，`--clipboard=in|out|both` 显式打开：镜像桌面里复制 = 给本地终端发
+一条 OSC 52（`in`）；`Ctrl-V` = 向终端索取剪贴板、放进镜像端 pasteboard 再投 `Cmd-V`（`out`，
+需要终端支持 OSC 52 读回，不支持就用 `--clipboard-paste <file>`）。
+
+**可用（输入法/CJK）** —— `--ime`（`auto` / `raw` / `unicode`）：物理键直接发给目标端，由**它的**
+输入法组合（候选窗画在镜像画面里）；没有按键的字符退回注入文本，并打一行日志 —— 见
+TROUBLESHOOTING §19。
+
+**粗糙** —— 全密度下的大面积高速运动：最坏情况 13.58 MB/帧，成本见
+[research-photo-bandwidth](docs/research-photo-bandwidth.zh-CN.md)；Herdr 的图像删除语义。
+
+**还没做** —— 把多块显示器拼成一张画面（一个会话同一时刻只跟随一块屏）。
 
 ## 文档
 
@@ -199,42 +224,33 @@ krd ax doctor && krd ax windows 是一条在坏机器上绝不会过的健康检
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.zh-CN.md) | 47 个现象及其根因 |
 | [DEPLOY](docs/DEPLOY.zh-CN.md) | 安装、权限、签名、远端 SSH |
 
-## 参与
-
-见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题见 [SECURITY.md](SECURITY.md)。
-
 ## 吉祥物
 
 <p align="center">
-  <img src="docs/media/mascot.svg" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="680">
+  <img src="docs/media/mascot.svg" alt="krd 的吉祥物：一只画在终端里的寄居蟹" width="620">
 </p>
 
-**一只寄居蟹** —— 不只是因为它在那几版草稿里最可爱。
+**一只寄居蟹** —— 因为 `SSH` 的全称是 *secure shell*，而 shell 就是寄居蟹住的那个壳。krd 不带自己
+的客户端、不开新端口、不装编解码器：它把你的 Mac 桌面搬进你已经打开的那个 shell 里。关掉、重连、
+换个终端 —— 蟹走出来，背上还是同一张桌面。钳子是一次抓屏，一次一帧；两根眼柄上的眼睛是它必须盯着的
+两样东西（它在读的那块屏、它在画的那个终端）；壳上那圈螺纹，和发送到线上去的 tile 用同一种圆角格子画。
 
-`SSH` 的全称是 *secure shell*，而 shell 就是寄居蟹住的那个壳。krd 不带自己的客户端、不开新端口、
-不装编解码器：它把你的 Mac 桌面搬进你已经打开的那个 shell 里。关掉、重连、换个终端 —— 蟹走出来，
-背上还是同一张桌面。整个产品就是这一只动物。
-
-其余的地方也对得上：钳子是一次抓屏，一次一帧；两根眼柄上的眼睛是它必须盯着的两样东西
-（它在读的那块屏、它在画的那个终端）；壳上那圈螺纹，和发送到线上去的 tile 用同一种圆角格子画。
-
-**只画一遍**：路径写在 `docs/brand/tui/mascot.mjs`，三个渲染器读它 —— 上面这张 SVG、lab 打印的终端
-精灵图（24-bit 半块，或每格一个 ASCII 字符）、以及 `MascotRaster`：krd 在首帧到达前那张加载卡背后的
-CoreGraphics 渲染器。所以这一页上的蟹**就是**加载卡里那只，不是亲戚：同一份几何生成成 Swift
-（`MascotArt.swift`），两边没法走样。
+**只画一遍** —— 路径写在 `docs/brand/tui/mascot.mjs`，渲染成上面这张 SVG、终端精灵图、加载卡
+（`MascotArt.swift`，生成物）和 `KRD` 字标（`wordmark.mjs`：同一套胶囊、同一条墨）。首帧到达之前，
+卡就是这张：
 
 <p align="center">
-  <img src="docs/media/mascot-loading.gif" alt="加载卡：寄居蟹从壳里探出来的四拍" width="288">
+  <img src="docs/media/mascot-loading.gif" alt="加载卡：寄居蟹从壳里探出来的四拍" width="200">
 </p>
 
-首帧到达之前只有这张卡：终端会播图片时是四帧 `a=f`、帧距 220 ms，不会播时是八拍半块。这个 GIF
-就是那张卡本身，不是它的插图 —— 36×45 个 dot 按原尺寸画出来，再按整数像素放大，和终端放大的
-是同一种像素。`make mascot` 从这一份画重生成所有产物，`make mascot-check` 发现提交的产物过期就红。
+终端会播图片时是四帧 `a=f`、帧距 220 ms，不会播时是八拍半块 —— 按卡自己的 36×45 个 dot 画，而不是
+按显示尺寸画。`make mascot` 从这一份画重生成所有产物，`make mascot-check` 发现提交的产物过期就红；
+`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。字标和 lockup 在同一个目录：
+`docs/brand/tui/README.md`。
 
-**字标**和蟹是同一只手画的：`KRD` 用蟹自己的胶囊肢体扫出来 —— 同一个笔画粗细（大写高的 15%）、
-同一条暖墨描边、和壳同一种墨，所以名字不是碰巧排在画旁边的字体。lockup
-（`docs/brand/tui/krd-lockup.svg`）让蟹站在字标的基线上，四周留 0.14 个大写高的 clear space。
-`node docs/brand/tui/logo-tui.mjs` 可以看它动起来。
+## 参与
+
+见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题见 [SECURITY.md](SECURITY.md)。
 
 ## 联系
 
