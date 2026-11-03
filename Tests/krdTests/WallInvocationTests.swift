@@ -289,6 +289,22 @@ final class StickyArgumentTests: XCTestCase {
         }
     }
 
+    /// The block ceiling is a decision about *this* pane's link, like `--quality` above: a
+    /// `--paint-budget 0` typed by someone on a fast link used to come back as 128 after a click into
+    /// a picture and back (issue #257 review).
+    func testThePaintBudgetSurvivesTheHandOver() throws {
+        let sticky = Desk.stickyArguments(try options(["--paint-budget", "0"]))
+        XCTAssertEqual(sticky, ["--paint-budget", "0"])
+        for arguments in [Desk.wallArguments(at: (1, 2), sticky: sticky),
+                          Desk.mirrorArguments(windowID: nil, cell: nil, at: (1, 2), sticky: sticky)] {
+            XCTAssertEqual(try options(arguments).paintBudgetKiB, 0, "\(arguments)")
+        }
+        // ...and the default travels as nothing, like every other untyped knob.
+        XCTAssertEqual(Desk.stickyArguments(try options([])), [])
+        XCTAssertEqual(Desk.stickyArguments(try options(["--paint-budget", "128"])), [])
+        XCTAssertEqual(Desk.stickyArguments(try options(["--paint-budget", "16"])), ["--paint-budget", "16"])
+    }
+
     func testTheDefaultsHandOverNothing() {
         // A reader who typed nothing must not get a command line that pins the defaults: `--scale
         // auto` and the adaptive quality governor have to stay free to react.

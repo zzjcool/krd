@@ -69,6 +69,18 @@ public final class ScreenWriter {
     /// A `clear()` that arrived while the frame's block was open (see `clear`): the delete may not
     /// be written yet, so `endFrame` sends it as a commit of its own.
     private var pendingClear = false
+    /// The session is **over**: `endSession` has begun, so nothing a paint path builds may reach the
+    /// pane any more.
+    ///
+    /// Why this is a writer-side latch and not a lock around `shutdown` (issue #257 review): the
+    /// frame path holds `emitLock`, not this write lock, across its compress-and-write, so a teardown
+    /// that waited for it would block for as long as a slow link takes to swallow a block -- and one
+    /// that did not wait would flush the rest of that block *after* `?1049l`, putting APCs and
+    /// `ESC[r;1H ESC[2K` on the shell's own screen. Both are avoided by making "after the teardown"
+    /// unrepresentable: `append`/`flushLocked` drop everything except the teardown's own bytes.
+    private var sessionEnded = false
+    /// True only while `endSession` is writing: those bytes are the reset that gives the pane back.
+    private var writingTeardown = false
     /// The screen lost placements since the last commit, so the frame about to start has to repaint
     /// **every** tile: the dirty pass only re-sends the ones that changed, and after a delete-all
     /// the rest of the pane would stay blank. Armed by the deferred clear above, see `clear`.
@@ -199,6 +211,12 @@ public final class ScreenWriter {
         // focused -- `resumeWall()` after a failed `exec` is that shape. `endSession` closes the
         // window; this is the invariant's other end.
         Self.sessionClosed = false
+        // ...and the writer's own latch with it: this session may write to the pane again
+        // (issue #257 review -- `resumeWall` runs after a *failed* exec, in the same process).
+        writeLock.lock()
+        sessionEnded = false
+        writingTeardown = false
+        writeLock.unlock()
         Self.motionReporting = true
         // Alternate screen: keeps scrollback clean and makes the terminal hand us wheel
         // events instead of scrolling itself.
@@ -615,6 +633,13 @@ public final class ScreenWriter {
         // bytes go out, so the window is closed as early as it can be; the resets themselves are
         // unaffected, and they are how the pane is given back.
         Self.sessionClosed = true
+        // ...and nothing a paint path builds may reach the pane from here on (see `sessionEnded`).
+        // Set *before* the first teardown byte, so a block that comes back from the frame path
+        // after this call cannot land behind the reset.
+        writeLock.lock()
+        sessionEnded = true
+        writingTeardown = true
+        writeLock.unlock()
         // Terminate any half-written APC *first*, then retire the screen. The keyboard push goes
         // with it: a pop after the alternate screen is gone is still our business, not the shell's.
         write("\u{1B}\\\u{1B}[?2026l")
@@ -634,6 +659,11 @@ public final class ScreenWriter {
         restoreSessionModes()
         write(Self.inputReset + "\u{1B}[?25h\u{1B}[?1049l")
         Self.writeKeyboardProtocol(false)
+        // The latch stays set: the session *is* over until `beginSession` says otherwise. Only the
+        // permission to write the teardown bytes is withdrawn.
+        writeLock.lock()
+        writingTeardown = false
+        writeLock.unlock()
     }
 
     /// Frames between "drop every image and repaint everything" cycles.
@@ -1181,6 +1211,62 @@ public final class ScreenWriter {
         if sync { append("\u{1B}[?2026l") }
     }
 
+    /// Put a tile the terminal **already holds** back on the pane: no payload, only its cells.
+    ///
+    /// Why this is not `emitTileAsPlaceholder` with an empty payload: with a fixed (id, pid) pair a
+    /// placement *replaces* the picture at the same ids, so a picture that only moved needs nothing
+    /// transmitted -- the image data is still in the terminal, and `a=p` is the whole statement of
+    /// where it goes (issue #257). What it costs is the cell grid (`cols * rows` invisible
+    /// characters), which is why a 216-tile picture re-places in ~65 KiB where re-sending it is
+    /// 2.17 MiB.
+    ///
+    /// The caller is responsible for the promise in the name: the pixels this index stands for must
+    /// be the ones the terminal was last given (`Desk.oweReason` is where krd decides that), because
+    /// a placement with no transmit draws whatever the image store has -- which after a `clear()`
+    /// (`a=d,d=a`) is nothing at all.
+    ///
+    /// No byte accounting either: nothing here is a payload, and counting a cell grid as one would
+    /// make the `B payload` line lie about a pass that sent no pixels.
+    public func replaceTilePlacement(index: Int, row: Int, col: Int, cols: Int, rows: Int,
+                                     placeholder: Bool, sync: Bool = true) {
+        guard cols > 0, rows > 0, row > 0, col > 0 else { return }
+        let iid = 100 + index
+        let pid = 1000 + index
+        if sync { append("\u{1B}[?2026h") }
+        if placeholder {
+            // The same two steps `emitTileAsPlaceholder` takes after its transmit, in the same
+            // order: the virtual placement names the rectangle, the invisible grid is what makes
+            // the terminal draw the image there.
+            appendAPC("Gi=\(iid),p=\(pid),a=p,U=1,q=\(quiet),c=\(cols),r=\(rows)")
+            appendPlaceholderGrid(id: iid, row: row, col: col, cols: cols, rows: rows)
+        } else {
+            // A pixel placement is anchored at the cursor, so the cell comes first. `C=1` is the
+            // protocol's "do not move the cursor": without it the placement is followed by a
+            // cursor move the terminal does not expect (docs/PROTOCOL.md §3).
+            append("\u{1B}[\(row);\(col)H")
+            appendAPC("Gi=\(iid),p=\(pid),a=p,q=\(quiet),C=1,c=\(cols),r=\(rows)")
+        }
+        if sync { append("\u{1B}[?2026l") }
+    }
+
+    /// Erase whole rows of the pane, in place: `ESC[row;1H` + `ESC[2K` each.
+    ///
+    /// What it is for (issue #257): a picture that moved leaves cells behind that still hold
+    /// `U+10EEEE`, and a placeholder cell keeps drawing the image it names -- so the rows the old
+    /// box covered and the new one does not have to be cleared, or the mirror keeps a band of a
+    /// picture that is no longer there.
+    ///
+    /// `2K` erases *in place*: the cursor does not move and nothing printable is written, so the
+    /// pane's final cell is never armed for the wrap that would scroll every placement one row up
+    /// (the invariant `WallCanvas` states as rule 2). `cols` is the pane's own width and is only
+    /// used to refuse a degenerate pane: a terminal with no columns has no rows to erase either.
+    public func eraseRows(_ rows: Range<Int>, cols: Int) {
+        guard cols > 0 else { return }
+        for row in rows where row >= 1 {
+            append("\u{1B}[\(row);1H\u{1B}[2K")
+        }
+    }
+
     /// The transmit half of the kitty protocol, in 4096-character chunks, in the writer's format.
     ///
     /// Shared by the tile, panel and placeholder emitters: any difference between them shows up as
@@ -1404,6 +1490,7 @@ public final class ScreenWriter {
     }
 
     private func append(_ text: String) {
+        guard !sessionEnded || writingTeardown else { return }
         out.append(contentsOf: Array(text.utf8))
     }
 
@@ -1482,6 +1569,13 @@ public final class ScreenWriter {
     public private(set) var envelopeViolations = 0
 
     private func flushLocked() {
+        if sessionEnded, !writingTeardown {
+            // The session is over and this is not the teardown itself: drop whatever a paint path
+            // built. Nothing may follow `?1049l` onto a pane that belongs to the shell again
+            // (issue #257 review).
+            out.removeAll(keepingCapacity: true)
+            return
+        }
         guard !out.isEmpty else { return }
         // The sink's own guard (issue #107): with passthrough on, a chunk that is not a run of
         // complete envelopes is a bypass, and it is counted rather than asserted. Counted because

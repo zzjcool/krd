@@ -96,6 +96,19 @@ struct Options {
     var listOnly = false
     var debug = false
     var fullFrame = false
+    /// How many KiB one picture block may spend (`--paint-budget`, issue #257), `0` = one block.
+    ///
+    /// Measured, and the reason this exists: a full repaint of 140x45 cells is 18x12 = 216 tiles in
+    /// one `?2026h … ?2026l` block -- 2.17 MiB, 0.9 s on a 20 Mbit/s link -- and a terminal that
+    /// answers `OK` to every image and placement still draws a row-major *prefix* of them (~108
+    /// tiles, i.e. 6 of 12 tile rows). krd only re-sends a tile when its pixels change, so the rest
+    /// of the picture stays the terminal's background colour for good: a staircase of black at the
+    /// bottom, in whole tile rectangles. A budgeted pass unrolls top to bottom and each block is
+    /// committed before the next is built.
+    var paintBudgetKiB = Options.defaultPaintBudgetKiB
+    /// The ceiling's default: big enough for ~10 average tiles in one commit, small enough that a
+    /// slow link finishes a block before the reader gives up on it.
+    static let defaultPaintBudgetKiB = 128
     // 8x4 cells (issue #5): at 16x8 a single changed character re-sends 5.2 KB, at 8x4 it is
     // 1.6 KB, and a full-width line still gets 1.7x smaller. Below 4x2 the per-image escape
     // overhead starts to dominate the payload, so this is the knee of the curve.
@@ -241,6 +254,12 @@ func usage() -> String {
       --zoom-at <x,y>     source point the zoom is centred on (global points; default: pointer)
       --zoom-follow       pan the crop when the pointer reaches the edge of the picture
       --tile <c>x<r>      dirty-tile size in cells (default 8x4; 16x8 = fewer, bigger images)
+      --paint-budget <KiB>
+                          how big one picture block may get (default 128). A full repaint is cut
+                          into blocks of at most this many KiB, so a slow link paints the picture
+                          top to bottom instead of leaving its bottom half black; 0 sends it as
+                          one block, which is what --selftest, --bench, --bench-wire, --replay and
+                          --pane always do (their bytes are contracts and measurements)
       --format <f>        wire pixel format: rgb (default, f=24) or rgba (f=32)
       --cell <w>x<h>      pin the cell size in px: it beats the terminal's own answer (default:
                           measure with CSI 16t / ws_xpixel, else 8x16)
@@ -407,6 +426,31 @@ func adaptiveQualityRefusal(bench: Bool, selftest: Bool, recording: Bool, replay
     if recording { return "--record runs at --quality 80 (a bit depth that changes mid-file has no marker)" }
     if replay { return "--replay runs at --quality 80 (the ladder reacts to a live pipe)" }
     return nil
+}
+
+/// The byte budget one picture block may spend, and which path pinned it to `0`.
+///
+/// `--paint-budget` bounds a **block**, which is what turns a full repaint from one 2.17 MiB commit
+/// into a top-to-bottom unroll: measured on a 20 Mbit/s link, one block is 0.9 s, the terminal
+/// answers `OK` to every image and placement and still draws only a row-major prefix of them (issue
+/// #257). The paths below keep exactly today's bytes and are pinned here, in one place, rather than
+/// by each of them remembering to say so:
+///
+///  * `--selftest`'s sha256 is a byte contract;
+///  * `--bench` and `--bench-wire` measure *one* block (docs/BENCHMARK.md's numbers are per frame);
+///  * `--replay` replays recorded frames -- its bytes are what a recording is compared against;
+///  * `--pane` is a harness, and every process test in `Tests/` passes it, so the whole suite sees
+///    the bytes it was written against.
+///
+/// Pure, so "budget 0 on those five" is a test and not a comment.
+func paintBudget(selftest: Bool, bench: Bool, benchWire: Bool, replay: Bool, pane: Bool,
+                 requested: Int) -> (kib: Int, pinnedBy: String?) {
+    if selftest { return (0, "--selftest") }
+    if bench { return (0, "--bench") }
+    if benchWire { return (0, "--bench-wire") }
+    if replay { return (0, "--replay") }
+    if pane { return (0, "--pane") }
+    return (max(0, requested), nil)
 }
 
 /// `--ime <spec>`, or a usage error: a typo must not silently pick a mode.
@@ -584,6 +628,11 @@ func parseArguments(_ argv: [String] = CommandLine.arguments) throws -> Options 
             }
             options.tileCols = max(2, cols)
             options.tileRows = max(1, rows)
+        case "--paint-budget":
+            // 0 is a documented value here ("one block, as before"), so only a non-number or a
+            // negative count is a usage error. See `paintBudget` for the paths that force it.
+            options.paintBudgetKiB = max(0, try intValue("--paint-budget", args, &i,
+                                                        wants: "a whole number of KiB (0 = one block)"))
         case "--cell":
             let spec = try value("--cell", args, &i)
             let parts = spec.split(separator: "x")
@@ -969,6 +1018,248 @@ final class Desk {
     /// capture (`reemitLastFrame`, issue #237).
     private var lastFrameSize = (w: 0, h: 0)
     private var lastDirtyCount = 0
+
+    // MARK: --paint-budget (issue #257)
+    //
+    // A full repaint used to be one `?2026h … ?2026l` block with every tile in it. That is 2.17 MiB
+    // for 216 tiles, and a terminal that answers `OK` to all of them still draws a row-major prefix
+    // of the picture -- the rest of it stays background colour until those tiles' pixels change,
+    // which on a still desktop is never. So a repaint is a *queue*: the tiles the pane has not been
+    // given yet, spent a block at a time (`nextChunk`) by two emitters -- the capture frame and
+    // `paintQueue`, which keeps going without waiting for one (an idle desktop delivers 1 fps).
+
+    /// What a tile **index** stands for: the pixels it is a slice of, and the cells it covers.
+    ///
+    /// Two layouts with the same signature put the same pixels on the same tile indices, so the image
+    /// the terminal holds for index *i* is still the right image after a re-layout -- which is the
+    /// whole basis of a cells-only pass. Everything `TileGrid.rect` builds a tile's pixel rect and
+    /// cell box from is in here (the frame size, the cell, the tile size, the capture scale and the
+    /// buffer's depth) **plus the source rectangle the frame was captured from**: the same tile index
+    /// can hold a different picture, which is exactly what a `--zoom-follow` pan does without moving
+    /// the box (issue #257 review). The picture's *position* deliberately is not: that is the thing a
+    /// move changes, and the thing a cells-only pass exists to follow.
+    struct ContentSignature: Equatable {
+        var pixelW = 0
+        var pixelH = 0
+        var boxCols = 0
+        var boxRows = 0
+        var tileCols = 0
+        var tileRows = 0
+        var bpp = 0
+        var scale = 1.0
+        var cellW = 0.0
+        var cellH = 0.0
+        /// The crop the frame is captured from, in points (global display space).
+        var cropX = 0.0
+        var cropY = 0.0
+        var cropW = 0.0
+        var cropH = 0.0
+
+        init(_ grid: TileGrid, crop: CGRect) {
+            pixelW = grid.pixelW
+            pixelH = grid.pixelH
+            boxCols = grid.paneCols
+            boxRows = grid.paneRows
+            tileCols = grid.tileCols
+            tileRows = grid.tileRows
+            bpp = grid.bpp
+            scale = grid.scale
+            cellW = grid.cellW
+            cellH = grid.cellH
+            cropX = crop.origin.x
+            cropY = crop.origin.y
+            cropW = crop.width
+            cropH = crop.height
+        }
+    }
+
+    /// How a tile is put on the pane: with its pixels, or only at its cells.
+    enum OweMode: Equatable {
+        case transmit
+        case cellsOnly
+    }
+
+    /// *Why* the pane is owed every tile -- the only thing that may make a pass cells-only.
+    enum OweReason: Equatable {
+        /// The pixels did not change, only the cells they are drawn on (a panel took rows).
+        case movedLayout
+        /// Every other reason: the slicing changed, the store was wiped, or the encoder changed.
+        case repaint
+    }
+
+    /// One queue of tiles the pane has not been given yet: which, how, and what it has cost.
+    ///
+    /// A value type with no lock of its own (`Desk` keeps it under `stateLock`), because every rule
+    /// in it is about *state* -- started, interrupted, drained -- and those three are what the two
+    /// emitters, a relayout and the one log line all have to agree about (issue #257 review).
+    ///
+    /// The distinction between a **pass** (`active`) and a file of leftovers matters: a whole-picture
+    /// repaint or move is a pass (it prints a line, and a transmit pass is followed by one confirm
+    /// re-place), while a tail of changed tiles that one frame's block could not fit is just a queue
+    /// -- it is painted by the following frames and must start nothing.
+    struct PaintQueue {
+        /// Tiles not yet given to the pane, ascending.
+        var tiles: [Int] = []
+        var mode: OweMode = .transmit
+        /// A pass is in flight: `tiles` was filled by `owe(_:)` and has not drained since.
+        var active = false
+        /// This pass is the one confirm re-place that follows a transmit pass.
+        var confirm = false
+        /// What the pass has spent so far (see `finish`) and the blocks it took.
+        var bytes = 0
+        var blocks = 0
+        var startedAt = 0.0
+        /// The store's content signature as of the last **transmit** pass that drained: while that is
+        /// the current signature, every tile index still stands for the pixels the terminal holds.
+        /// `nil` means "not known to be complete", which is the safe answer.
+        var transmitted: ContentSignature?
+
+        /// Fill the queue for a whole picture, at the meaning `reason` gives it. The one entry point
+        /// for "the pane is owed everything", so the reason -> mode mapping lives in one place.
+        ///
+        /// A `.repaint` pass **forgets the store**: from here on the terminal holds a mixture of old
+        /// and new tiles, so the signature it stood for is no longer true -- and if the pass is
+        /// interrupted (a relayout, a shutdown) it never becomes true again. `.movedLayout` keeps it:
+        /// that signature is exactly what makes the move legal.
+        mutating func owe(_ reason: OweReason, tiles count: Int, now: Double) {
+            if reason == .repaint { transmitted = nil }
+            tiles = Array(0..<count)
+            active = true
+            mode = reason == .movedLayout ? .cellsOnly : .transmit
+            confirm = false
+            bytes = 0
+            blocks = 0
+            startedAt = now
+        }
+
+        /// Put one block's leftovers back in the queue **without** starting a pass.
+        ///
+        /// This is the shape of a plain dirty frame whose own changes did not fit in one block: the
+        /// rest is owed, the following frames paint it, and nothing is announced -- no line, no
+        /// confirm re-place, no pass. The only ways to start a pass are `owe(_:)` (a whole picture) and
+        /// `finish` draining a transmit pass into its confirm.
+        mutating func absorb(_ rest: [Int], mode: OweMode) {
+            tiles = rest
+            self.mode = mode
+        }
+
+        /// A relayout supersedes whatever was owed (those indices belong to the old grid, which the
+        /// live one may not even have).
+        ///
+        /// It also **forgets the store** when a transmit pass was in flight: that pass painted only
+        /// part of the picture, so the signature it stood for is no longer true. Left standing, the
+        /// next relayout would answer `.movedLayout` and re-place tile indices the terminal never
+        /// received -- a blank picture that stays blank, which is the bug this change is about. A
+        /// cells-only pass transmits nothing, so an interrupted one leaves the store exactly as
+        /// complete as it was and keeps its signature.
+        mutating func drop() {
+            if active, mode == .transmit { transmitted = nil }
+            tiles = []
+            active = false
+            confirm = false
+            bytes = 0
+            blocks = 0
+        }
+
+        /// Why a full repaint that starts now exists, from this queue's own knowledge of the store
+        /// and the frame's facts. The whole decision in one place, so "an interrupted pass means
+        /// `.repaint`" is a statement about the state machine and not about its caller.
+        ///
+        /// Only a relayout may make it a move, and only a move that changed no **columns**: a vacated
+        /// row is one `ESC[2K`, but a vacated column band is not erasable as a unit, so a picture that
+        /// moved sideways keeps today's clear-and-transmit instead of leaving a permanent band of the
+        /// old picture beside it (issue #257 review). Everything else is `.repaint` by construction:
+        /// a reap, a focus step, a `clear()`, a changed slicing, a changed crop, a re-encode.
+        func reason(move: Bool, columnsMoved: Bool, repaintNeeded: Bool, reencode: Bool,
+                    signature: ContentSignature) -> OweReason {
+            guard move else { return .repaint }
+            return Desk.oweReason(signatureChanged: transmitted != signature,
+                                  repaintNeeded: repaintNeeded, explicitReencode: reencode,
+                                  columnMoved: columnsMoved)
+        }
+
+        /// Close the books on one painted block: drop what it painted, count what it cost, and --
+        /// when a **transmit** pass drains -- remember the store's signature and start the one
+        /// confirm re-place. Returns the line the pass prints when it drains, or nil.
+        ///
+        /// `spent` is in the units the printed line names: **payload** bytes for a transmit block
+        /// (the budget is a payload budget and base64 is x4/3, so wire bytes would make the total
+        /// contradict the number printed next to it) and the cell bytes for a cells-only block, which
+        /// has no payload and whose whole cost is the invisible grid.
+        mutating func finish(_ painted: [Int], spent: Int, signature: ContentSignature,
+                             tileCount: Int, row: Int, budgetKiB: Int, now: Double) -> String? {
+            let done = Set(painted)
+            tiles.removeAll { done.contains($0) }
+            guard active else { return nil }
+            bytes += spent
+            blocks += 1
+            guard tiles.isEmpty, blocks > 0 else { return nil }
+            let kib = (bytes + 1023) / 1024
+            let seconds = String(format: "%.2f", max(0, now - startedAt) / 1000)
+            switch mode {
+            case .transmit:
+                let painted = blocks
+                transmitted = signature
+                tiles = Array(0..<max(0, tileCount))
+                mode = .cellsOnly
+                confirm = true
+                bytes = 0
+                blocks = 0
+                startedAt = now
+                return "krd: picture painted in \(painted) blocks, \(kib) KiB, \(seconds) s "
+                    + "(--paint-budget \(budgetKiB) KiB)\n"
+            case .cellsOnly:
+                let wasConfirm = confirm
+                active = false
+                confirm = false
+                if wasConfirm {
+                    return "krd: picture re-placed once (\(kib) KiB, no pixels sent)\n"
+                }
+                return "krd: picture moved to row \(row) (cells only, \(kib) KiB, no pixels sent)\n"
+            }
+        }
+    }
+
+    /// The queue as it stands. Written under `stateLock`, and only inside a region that holds
+    /// `emitLock`.
+    private var pass = PaintQueue()
+    /// Every relayout bumps this. A frame records the generation it decided on, so a relayout that
+    /// lands while the frame waits for `emitLock` keeps its own reason for the next frame instead of
+    /// having it consumed by a frame that painted the *old* layout (issue #257 review).
+    private var layoutGeneration = 0
+    /// A relayout reset `previousFrame` and no frame has painted for it yet: the next full repaint may
+    /// only have to *move* the picture. Consumed by a frame that starts a full pass for the same
+    /// generation, and folded into `full`, so a lost race just means the next frame does the work.
+    private var pendingMove = false
+    /// That relayout changed the picture's columns (`originCol`), which no row erase can clean up.
+    private var pendingMoveMovedColumns = false
+    /// A menu rung (or a governor step) changed the encoder: the pixels have to be sent again. Used by
+    /// the next full repaint and dropped by the next frame whatever it is, so a click can never arm a
+    /// later relayout into a 2.17 MiB re-transmit.
+    private var explicitReencodePending = false
+    /// Rows a relayout vacated -- the old picture's cell box that the new one does not cover -- and
+    /// the pane's width when it was measured. A placeholder cell keeps drawing its image, so those
+    /// rows have to be erased; consumed by the first block that paints.
+    private var vacated: [(rows: Range<Int>, cols: Int)] = []
+    /// What each tile's payload last cost, so a block is sized by bytes without compressing first.
+    private var tileBytes: [Int] = []
+    /// A `paintNextChunk` is already on `paintQueue`.
+    private var paintingQueued = false
+    /// One emitter at a time. `handleFrame` runs on the capture queue and the painter on
+    /// `paintQueue`, and both assemble a whole frame (`beginFrame` … `endFrame`, one synchronized
+    /// block, one tick of the counters) -- this is what makes the second emitter safe. Lock order is
+    /// `emitLock` -> `stateLock`, and the writer is never called while `stateLock` is held.
+    private let emitLock = NSRecursiveLock()
+    private let paintQueue = DispatchQueue(label: "krd.paint", qos: .userInitiated)
+    /// The block ceiling in KiB (`--paint-budget`); `0` = one block with every tile, i.e. today's
+    /// bytes, which is what the test and bench paths are pinned to (`paintBudget`).
+    private let paintBudgetKiB: Int
+    /// Which path pinned it to `0`, for the one `--debug` line that says why.
+    private let paintBudgetPinnedBy: String?
+    /// What a tile that has never been sent is assumed to weigh (`--paint-budget` chunking only:
+    /// the number never reaches the wire). 12 KiB is the measured mean of a photographed 8x4 tile.
+    static let defaultTileBytes = 12 * 1024
+
     /// Frames that reached the encoder, not tiles: the number a human means by "fps".
     private var framesHandled = 0
     /// Frames ScreenCaptureKit handed us (`captureFps` is this one's rate), and of those, the ones
@@ -1158,6 +1449,13 @@ final class Desk {
     private var recorder: FrameRecorder?
 
     init(options: Options) {
+        // The block ceiling, decided once and by one pure rule (`paintBudget`): the test and bench
+        // paths keep today's single block, because their bytes are contracts and measurements.
+        let budget = paintBudget(selftest: options.selftest, bench: options.bench,
+                                 benchWire: options.benchWire != nil, replay: options.replay != nil,
+                                 pane: options.pane != nil, requested: options.paintBudgetKiB)
+        paintBudgetKiB = budget.kib
+        paintBudgetPinnedBy = budget.pinnedBy
         self.options = options
         if let name = options.devPanel, let panel = ChromePanel(rawValue: name) {
             chromeState.panel = panel
@@ -1335,6 +1633,17 @@ final class Desk {
                                                              deviceCell: deviceCell)
         if options.debug || options.placeholders != nil {
             Log.write("krd: tiles as \(placeholderTiles ? "unicode placeholders (U=1)" : "pixel-sized placements")\n")
+        }
+        // Why the picture is (or is not) painted in budgeted blocks, once, and only at --debug: this
+        // is the number a "the bottom of my picture is black" report is answered with.
+        if options.debug {
+            if let why = paintBudgetPinnedBy {
+                Log.write("krd: paint budget 0 KiB (\(why) keeps one block per full repaint)\n")
+            } else if paintBudgetKiB > 0 {
+                Log.write("krd: paint budget \(paintBudgetKiB) KiB per block\n")
+            } else {
+                Log.write("krd: paint budget off: one block per full repaint\n")
+            }
         }
         // One place decides the starting scale, for every path below -- live, --mock, --bench.
         // (It used to be set inside the live capture setup only, so `--mock --scale 0.5` quietly
@@ -2927,6 +3236,12 @@ final class Desk {
         // the screen from the copy the flag was protecting.
         if options.noTakeover { arguments.append("--no-takeover") }
         if options.drawsCursor { arguments.append("--cursor") }
+        // The block ceiling is a decision about *this pane's* link, like `--quality` and `--wall-quality`
+        // above: without it, a `--paint-budget 0` typed by someone on a fast link silently comes back
+        // as 128 after a click into a picture and back (issue #257 review). The default needs no flag.
+        if options.paintBudgetKiB != Options.defaultPaintBudgetKiB {
+            arguments += ["--paint-budget", String(max(0, options.paintBudgetKiB))]
+        }
         // Diagnostics follow their file, never the picture: without `--log` the hand-over leaves
         // `--debug` behind, because the next process's stderr *is* the picture - the mirror's first
         // `frame ... px` line landed across the reader's screen the moment it was carried blindly.
@@ -3871,6 +4186,9 @@ final class Desk {
             // spent, so the user's `guarded`/`eager` choice rides through a governor step.
             writer.quality = QualityBudget(change.to.quality, eager: options.quality.eager)
             options.quality = writer.quality
+            // A rung changed the encoder, so the owed pixels are not the ones the terminal holds
+            // (issue #257): never a cells-only pass after this.
+            noteReencode()
         }
         if takesFps {
             effectiveFps = change.to.fps
@@ -3976,9 +4294,27 @@ final class Desk {
             chromeDirty = true
         }
         stateLock.lock()
+        let previousGrid = grid
         grid = layout
         sourceRect = crop
         previousFrame = []
+        // The picture may only have *moved*: a panel took rows, so `originRow` changed while the
+        // content did not. That is the case a cells-only pass exists for, but the verdict is not
+        // taken here -- `handleFrame` takes it (`PaintQueue.reason`), because `handleResize` calls
+        // `writer.clear()` *after* this function and that delete really does wipe the store.
+        pendingMove = true
+        pendingMoveMovedColumns = Self.movedColumns(from: previousGrid, to: layout)
+        // Bumped so a frame that is already in flight cannot consume this relayout's facts: it read
+        // the old generation, and its `previousFrame = pixels` may land *after* the reset above.
+        layoutGeneration += 1
+        vacated = Self.vacatedRows(from: previousGrid, to: layout, paneRows: geometry.rows)
+            .map { (rows: $0, cols: geometry.cols) }
+        // A new layout supersedes whatever a pass was still owed: those indices belong to the old
+        // grid, which the live one may not even have (a smaller picture has fewer tiles). A transmit
+        // pass dropped before it drained leaves the terminal holding *part* of the picture, so the
+        // signature it stood for stops being true here -- otherwise the next relayout would answer
+        // `.movedLayout` for tiles that were never sent (issue #257 review).
+        pass.drop()
         // Pane pixels, not capture pixels: SGR-Pixels coordinates are the terminal's own grid, so
         // `--scale 0.5` must not move the mapping by a factor of two (issue #60).
         viewport = Viewport(pixelWidth: layout.panePixelW, pixelHeight: layout.panePixelH,
@@ -4195,6 +4531,339 @@ final class Desk {
         return focused
     }
 
+    // MARK: the paint queue (--paint-budget, issue #257)
+
+    /// Why an owed list is being created: the one input that may make the pass cells-only.
+    ///
+    /// `.movedLayout` is a picture whose *pixels* are the ones the terminal already holds: every tile
+    /// is the same slice of the same frame, only on different cells (a panel took rows, so
+    /// `applyLayout` re-centred the picture and the origin moved), so re-placing each tile is the
+    /// whole job. Re-sending 216 tiles of identical pixels is 2.17 MiB for a picture that did not
+    /// change -- and it is not merely wasted: a slow link draws a *prefix* of a block that big.
+    ///
+    /// Everything else is `.repaint`, and each one is why this is a function and not a condition:
+    ///
+    ///  * `signatureChanged`: the frame is sliced differently (or captured from a different crop, a
+    ///    `--zoom-follow` pan), so index *i* stands for different pixels than the ones the terminal
+    ///    holds there;
+    ///  * `repaintNeeded`: the terminal's store was wiped (`a=d,d=a` from `clear()`, or from a reap),
+    ///    so there is no image to move -- a cells-only pass against it is a blank picture;
+    ///  * `explicitReencode`: a menu rung or a governor step changed the encoder. Clicking a colour
+    ///    slider and getting no bytes back is the click doing nothing, so those pixels must be sent;
+    ///  * `columnMoved`: the picture moved **sideways**, which a whole-row erase cannot clean up (a
+    ///    vacated column band would keep drawing the old picture) -- so that one is not a move at all.
+    static func oweReason(signatureChanged: Bool, repaintNeeded: Bool, explicitReencode: Bool,
+                          columnMoved: Bool = false) -> OweReason {
+        if signatureChanged || repaintNeeded || explicitReencode || columnMoved { return .repaint }
+        return .movedLayout
+    }
+
+    /// Whether this run paints through the owed queue at all.
+    ///
+    /// `--paint-budget 0` is today's behaviour (one block with every tile) and is what every test and
+    /// bench path is pinned to (`paintBudget`); `--full-frame` puts the whole picture in *one* image
+    /// (id 2) with no tiles to owe anybody, so it keeps its own single-image path untouched.
+    static func usesPaintQueue(paintBudgetKiB: Int, fullFrame: Bool) -> Bool {
+        paintBudgetKiB > 0 && !fullFrame
+    }
+
+    /// The rows the old picture covered and the new one does not -- at most two ranges, one above it
+    /// and one below (a picture that shrank in place leaves both).
+    ///
+    /// WHY they have to be erased: with `U=1` a cell holds `U+10EEEE` and its image id, and such a
+    /// cell keeps drawing that image for as long as the character is there. A picture that moves up
+    /// leaves the rows it vacated still drawing the bottom of itself -- the mirror's `2K`-shaped
+    /// ghost. Clamped to the pane (`1 ... paneRows`, so an exclusive upper bound of `paneRows + 1`),
+    /// because a row the terminal does not have is a row krd must not address.
+    ///
+    /// Columns are deliberately *not* handled here: a band of columns cannot be erased without
+    /// writing into the cells beside it, so a sideways move is `.repaint` instead (`oweReason`).
+    ///
+    /// Pure, so "which rows does a panel opening vacate" is a test rather than a screenshot.
+    static func vacatedRows(from old: TileGrid?, to new: TileGrid, paneRows: Int) -> [Range<Int>] {
+        guard let old else { return [] }
+        let oldRows = old.originRow ..< (old.originRow + old.paneRows)
+        let newRows = new.originRow ..< (new.originRow + new.paneRows)
+        guard oldRows != newRows else { return [] }
+        var ranges: [Range<Int>] = []
+        if oldRows.lowerBound < newRows.lowerBound {
+            ranges.append(oldRows.lowerBound ..< min(newRows.lowerBound, oldRows.upperBound))
+        }
+        if oldRows.upperBound > newRows.upperBound {
+            ranges.append(max(newRows.upperBound, oldRows.lowerBound) ..< oldRows.upperBound)
+        }
+        return ranges.compactMap { range in
+            let lower = max(1, range.lowerBound), upper = min(paneRows + 1, range.upperBound)
+            return lower < upper ? lower..<upper : nil
+        }
+    }
+
+    /// Whether a relayout changed the picture's **columns** (`originCol`): the one move a whole-row
+    /// erase cannot clean up -- a vacated band of columns would keep drawing the old picture beside
+    /// the new one -- so `oweReason` refuses to call it a move at all.
+    ///
+    /// Pure, so "does a pane widened by ten columns move the picture's columns" is a test.
+    static func movedColumns(from old: TileGrid?, to new: TileGrid) -> Bool {
+        guard let old else { return false }
+        return old.originCol != new.originCol
+    }
+
+    /// What re-placing one tile costs in a cells-only block: its invisible grid (`4 B` per
+    /// `U+10EEEE` cell, a diacritic per row), its `a=p` APC and its cursor moves.
+    ///
+    /// A cells-only pass must be sized by *this*, not by the transmit estimate: 216 tiles of a 8x4
+    /// grid are ~65 KiB of cells, i.e. one block, where the 12 KiB-per-tile transmit estimate would
+    /// cut the same move into eighteen commits of one tile each (issue #257 review).
+    static func cellsOnlyTileBytes(cols: Int, rows: Int) -> Int {
+        max(64, cols * rows * 4 + rows * 2 + 160)
+    }
+
+    /// Fill the paint queue: every tile of `grid` is owed, at the meaning `reason` gives it.
+    ///
+    /// One entry point, so "why is the pane owed the whole picture" is answered in one place
+    /// (`PaintQueue.reason`) and every trigger -- a relayout, a focus step, a reap, a `clear()`, a
+    /// re-encode -- fills the queue the same way. What used to happen instead is the bug: the queue
+    /// was painted as one block, whatever its size.
+    ///
+    /// Caller holds `stateLock` (the reason it is called with was read under it).
+    private func oweAll(_ reason: OweReason, grid: TileGrid) {
+        pass.owe(reason, tiles: grid.count, now: benchNowMs())
+        if tileBytes.count != grid.count {
+            tileBytes = [Int](repeating: Self.defaultTileBytes, count: grid.count)
+        }
+    }
+
+    /// A menu rung, a governor step or a re-emit changed the encoder: the next full repaint owes
+    /// pixels. The one input `PaintQueue.reason` does not read from the frame itself, because it is a
+    /// fact about the *store* (`--quality` decodes and re-encodes, `a=t` replaces the image), not
+    /// about the pixels' positions, and a cells-only pass would keep the old bit depth for ever.
+    private func noteReencode() {
+        stateLock.lock(); defer { stateLock.unlock() }
+        explicitReencodePending = true
+    }
+
+    /// What a tile's payload last cost. Caller holds `stateLock`.
+    private func estimatedTileBytes(_ index: Int) -> Int {
+        index >= 0 && index < tileBytes.count ? max(1, tileBytes[index]) : Self.defaultTileBytes
+    }
+
+    /// Remember what a tile cost, so the next block can be sized without compressing it first.
+    /// Caller holds `stateLock`.
+    private func rememberTileBytes(_ index: Int, _ bytes: Int) {
+        guard index >= 0 else { return }
+        if index >= tileBytes.count { tileBytes.append(contentsOf: [Int](repeating: Self.defaultTileBytes,
+                                                                        count: index + 1 - tileBytes.count)) }
+        tileBytes[index] = max(1, bytes)
+    }
+
+    /// What one tile of `mode` costs a block: its invisible grid for a cells-only pass, the per-tile
+    /// transmit estimate otherwise.
+    ///
+    /// Pure (the estimate comes in as a closure), because getting this wrong is invisible and costly:
+    /// sized by the transmit estimate, a move of 216 tiles is eighteen commits of one tile each where
+    /// the whole pass is one ~65 KiB block (issue #257 review).
+    static func tileCost(index: Int, mode: OweMode, grid: TileGrid, estimate: (Int) -> Int) -> Int {
+        guard mode == .cellsOnly, index >= 0, index < grid.count else { return estimate(index) }
+        let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
+        return cellsOnlyTileBytes(cols: rect.cols, rows: rect.rows)
+    }
+
+    /// What one tile of `mode` costs a block. Caller holds `stateLock`.
+    private func tileCost(_ index: Int, mode: OweMode, grid: TileGrid) -> Int {
+        Self.tileCost(index: index, mode: mode, grid: grid, estimate: { self.estimatedTileBytes($0) })
+    }
+
+    /// Ask the paint queue for the next block.
+    ///
+    /// Immediate, never on the next capture frame: an idle desktop delivers 1 fps, and a 216-tile
+    /// repaint dripping out one tile per frame would take three and a half minutes -- the picture
+    /// would be wrong for longer than it was before.
+    private func schedulePainting() {
+        stateLock.lock()
+        let queue = !pass.tiles.isEmpty && Self.usesPaintQueue(paintBudgetKiB: paintBudgetKiB,
+                                                              fullFrame: options.fullFrame) && !paintingQueued
+        if queue { paintingQueued = true }
+        stateLock.unlock()
+        guard queue else { return }
+        paintQueue.async { [weak self] in self?.paintNextChunk() }
+    }
+
+    /// The greedy half of `nextChunk`: which tiles one block takes, and what is left owed.
+    ///
+    /// Pure, because the four things that are easy to get wrong here are all statements about the
+    /// list:
+    ///
+    ///  * the changed tiles go first -- a keystroke's tile must not queue behind a picture that is
+    ///    still being unrolled;
+    ///  * the budget is a **byte** budget, so it is spent from the per-tile estimate and never from a
+    ///    compression (`--paint-budget` bounds what the terminal has to swallow, and compressing
+    ///    first to find out what a tile costs is the work this exists to spread);
+    ///  * one tile is always taken even when it alone is bigger than the whole budget, or a picture
+    ///    of huge tiles would paint nothing, forever;
+    ///  * a changed tile that does not fit is **not dropped**: it goes into the owed list (and the
+    ///    list becomes a transmit list, one list one mode). The caller has already recorded this frame
+    ///    as the one `previousFrame` holds, so a dropped tile would never come back on its own. It is
+    ///    a queue, not a **pass**: nothing is counted and no confirm re-place follows (`PaintQueue`).
+    static func paintChunk(changed: [Int], owed: [Int], mode: OweMode, tileCount: Int, cap: Int,
+                           bytes: (Int) -> Int)
+        -> (chunk: [(index: Int, mode: OweMode)], rest: [Int], mode: OweMode) {
+        var chunk: [(index: Int, mode: OweMode)] = []
+        var spent = 0
+        func take(_ index: Int, _ mode: OweMode) -> Bool {
+            let cost = max(1, bytes(index))
+            if cap > 0, !chunk.isEmpty, spent + cost > cap { return false }
+            chunk.append((index: index, mode: mode))
+            spent += cost
+            return true
+        }
+        var dropped: [Int] = []
+        for index in changed where index >= 0 && index < tileCount {
+            if !take(index, .transmit) { dropped.append(index) }
+        }
+        let painted = Set(chunk.map(\.index))
+        var rest: [Int] = []
+        var overBudget = false
+        for index in owed {
+            guard index >= 0, index < tileCount, !painted.contains(index) else { continue }
+            if overBudget || !take(index, mode) {
+                overBudget = true
+                rest.append(index)
+            }
+        }
+        guard !dropped.isEmpty else { return (chunk, rest, mode) }
+        return (chunk, Array(Set(rest).union(dropped)).sorted(), .transmit)
+    }
+
+    /// The tiles one block paints, in the order they go out: the changed ones first (a visible edit
+    /// must not queue behind a picture that is still being unrolled), then what the pane is still
+    /// owed, greedily up to `--paint-budget` -- and always at least one tile, or a tile bigger than
+    /// the whole budget would never be painted at all.
+    ///
+    /// Takes `stateLock` itself; called with `emitLock` held.
+    private func nextChunk(changed: [Int], grid: TileGrid) -> [(index: Int, mode: OweMode)] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let mode = pass.mode
+        let taken = Self.paintChunk(changed: changed, owed: pass.tiles, mode: mode,
+                                    tileCount: grid.count, cap: paintBudgetKiB * 1024,
+                                    bytes: { self.tileCost($0, mode: mode, grid: grid) })
+        pass.absorb(taken.rest, mode: taken.mode)
+        return taken.chunk
+    }
+
+    /// Close the books on one painted block, print the one line a drained pass costs, and keep the
+    /// queue moving (a pass, a confirm pass, or a dirty frame's own tail -- none of them waits for a
+    /// capture frame).
+    ///
+    /// Called with `emitLock` held, from both emitters and after `endFrame`.
+    private func finishPass(_ painted: [Int], payloadBytes: Int, grid: TileGrid) {
+        let wireBytes = writer.lastWireBytes
+        stateLock.lock()
+        // The pass's own line names one unit: payload for a transmit block (the budget is a payload
+        // budget, so wire bytes -- base64 is x4/3 -- would contradict the number printed next to it),
+        // cell bytes for a cells-only block, which has no payload at all.
+        let spent = pass.mode == .cellsOnly ? wireBytes : payloadBytes
+        let line = pass.finish(painted, spent: spent,
+                               signature: ContentSignature(grid, crop: sourceRect),
+                               tileCount: grid.count, row: grid.originRow,
+                               budgetKiB: paintBudgetKiB, now: benchNowMs())
+        stateLock.unlock()
+        if let line { Log.write(line) }
+        schedulePainting()
+    }
+
+    /// Paint the next block of what the pane is owed, from the *latest* pixels, and ask for the block
+    /// after it.
+    ///
+    /// Runs on `paintQueue` with `emitLock` held exactly as `handleFrame` holds it: the two emitters
+    /// share one frame contract (`beginFrame` … `endFrame`, one `?2026h`/`?2026l` per block) and
+    /// neither may interleave its block with the other's. Nothing here waits for a capture frame --
+    /// that is the point: an idle desktop delivers 1 fps.
+    ///
+    /// The grid and the pixels are re-read under `stateLock` every time, and every index is checked
+    /// against the live grid: a block never emits a tile the current layout does not have.
+    private func paintNextChunk() {
+        stateLock.lock()
+        paintingQueued = false
+        stateLock.unlock()
+        emitLock.lock()
+        defer { emitLock.unlock() }
+        // Shutdown, no grid, or nothing owed: the queue stops dead. (A session that has ended is the
+        // writer's own business -- `ScreenWriter.endSession` makes anything built after it
+        // unrepresentable, so a block that is already half-built cannot reach the pane.)
+        guard !cleanedUp, let grid = currentGrid() else { return }
+        stateLock.lock()
+        let pixels = previousFrame
+        let mode = pass.mode
+        let owed = pass.tiles
+        stateLock.unlock()
+        guard !owed.isEmpty, Self.usesPaintQueue(paintBudgetKiB: paintBudgetKiB,
+                                                 fullFrame: options.fullFrame) else { return }
+        // A `clear()` wiped the store and the capture frame owns that repaint: do not spend bytes on
+        // a picture that is about to be deleted, and do not answer the request by opening a block
+        // here (`beginFrame` disarms it).
+        guard !writer.repaintNeeded else { return }
+        let frameBytes = grid.pixelW * grid.pixelH * grid.bpp
+        guard mode == .cellsOnly || pixels.count == frameBytes else { return }
+        stateLock.lock()
+        let taken = Self.paintChunk(changed: [], owed: owed, mode: mode, tileCount: grid.count,
+                                    cap: paintBudgetKiB * 1024,
+                                    bytes: { self.tileCost($0, mode: mode, grid: grid) })
+        let chunk = taken.chunk.map(\.index)
+        // An owed list with nothing the live grid has: those indices are stale, and leaving them
+        // there would make this queue a loop that never drains.
+        if chunk.isEmpty { pass.tiles = [] }
+        let vacated = chunk.isEmpty ? [] : self.vacated
+        if !chunk.isEmpty { self.vacated = [] }
+        stateLock.unlock()
+        guard !chunk.isEmpty else { return }
+
+        writer.resize(tiles: grid.count)
+        writer.beginFrame()
+        for (rows, cols) in vacated { writer.eraseRows(rows, cols: cols) }
+        var payload = 0
+        if mode == .cellsOnly {
+            // No payload at all: the terminal already holds every one of these images, and the fixed
+            // (id, pid) pair makes the placement replace itself where it now belongs.
+            for index in chunk {
+                let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
+                writer.replaceTilePlacement(index: index, row: rect.row, col: rect.col,
+                                            cols: rect.cols, rows: rect.rows,
+                                            placeholder: placeholderTiles, sync: writer.perTileSync)
+            }
+        } else {
+            let compressStart = Date()
+            var packed = [CompressedTile?](repeating: nil, count: chunk.count)
+            packed.withUnsafeMutableBufferPointer { buffer in
+                let base = buffer.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: chunk.count) { i in
+                    let index = chunk[i]
+                    let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
+                    base[i] = ScreenWriter.compress(index: index, rect: rect,
+                                                    pixels: grid.extract(pixels, rect: rect),
+                                                    plan: writer.plan(for: index))
+                }
+            }
+            writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
+            var sizes: [(Int, Int)] = []
+            for case let tile? in packed {
+                if placeholderTiles {
+                    writer.emitTileAsPlaceholder(tile, sync: writer.perTileSync)
+                } else {
+                    writer.emit(tile, sync: writer.perTileSync)
+                }
+                writer.observe(index: tile.index, ratio: tile.ratio, quantisedIn: tile.isQuantised)
+                sizes.append((tile.index, tile.payload.count))
+                payload += tile.payload.count
+            }
+            stateLock.lock()
+            for (index, bytes) in sizes { rememberTileBytes(index, bytes) }
+            stateLock.unlock()
+        }
+        writer.endFrame()
+        finishPass(chunk, payloadBytes: payload, grid: grid)
+    }
+
     // MARK: frame handling
 
     /// The pid events should be posted to, or nil once the target is gone.
@@ -4387,6 +5056,13 @@ final class Desk {
             // the path `Capturer`'s `prev == rgba` used to take, before it ever got here.
             dedupedFrame = true
             framesSkipped += 1
+            // A menu rung may have changed the encoder since the last frame: the pixels on the pane
+            // are already the right ones, so the intent is consumed here rather than left armed for
+            // some later relayout -- a click must never turn into a 2.17 MiB re-transmit (issue #257
+            // review).
+            stateLock.lock()
+            explicitReencodePending = false
+            stateLock.unlock()
             return
         }
         // **`framesHandled` counts frames that reached the encoder**, not callbacks (`Rates.fps`,
@@ -4405,26 +5081,90 @@ final class Desk {
         // after the frame it interrupted (see `ScreenWriter.clear`), so the pane has had no
         // placements since that commit. The dirty pass would re-send only the tiles that changed and
         // leave the rest of the picture blank.
-        let dirty: [Int]
-        if options.fullFrame || previousFrame.count != pixels.count || writer.reapIfNeeded()
-            || writer.repaintNeeded {
-            dirty = Array(0..<grid.count)
-        } else {
-            dirty = scan.dirty          // the tiles the scan above already found
-        }
+        //
+        // Every reason a full repaint is needed today keeps its meaning; what changed (issue #257) is
+        // what happens *after* the decision. With `--paint-budget` the repaint is not one block: it
+        // becomes the queue of tiles the pane is owed (`oweAll`), and `nextChunk` spends the budget
+        // on it, block by block, from this frame and from `paintQueue`.
+        //
+        // Both mirror kinds come through here -- `--mirror` (a display) and `--window <id>` are the
+        // same `onFrame` -- so the fix is deliberately not gated on display-only.
+        //
+        // One emitter at a time: `handleFrame` (this thread) and `paintQueue` both assemble a whole
+        // frame, and a second one must never land inside this block's `?2026h … ?2026l`.
+        emitLock.lock()
+        defer { emitLock.unlock() }
+        // **The decision inputs are read after `emitLock`** (issue #257 review): a `clear()` that
+        // landed while this frame waited for the lock must not be swallowed -- a cells-only pass
+        // against a wiped store is a blank picture -- and a reap must not append its delete into a
+        // block that is still open.
         stateLock.lock()
+        let previousBytes = previousFrame.count
+        let move = pendingMove
+        let columnsMoved = pendingMoveMovedColumns
+        let reencode = explicitReencodePending
+        let generation = layoutGeneration
+        stateLock.unlock()
+        // A pending move is folded in, so a relayout that lost the `previousFrame = []` race still
+        // gets its full repaint from this frame.
+        var full = options.fullFrame || previousBytes != pixels.count || move
+        var reaped = false
+        if !full {
+            reaped = writer.reapIfNeeded()
+            if reaped || writer.repaintNeeded { full = true }
+        }
+        // Unconditional, and *before* `beginFrame` disarms it: a `clear()` can land even where the
+        // frame was already a full repaint for another reason (`handleResize` clears after
+        // `applyLayout`). A reap sent `a=d,d=a` itself, so its store is gone without `repaintNeeded`.
+        let storeLost = reaped || writer.repaintNeeded
+        let dirty: [Int] = full ? Array(0..<grid.count) : scan.dirty
+
+        // Why this pass exists, decided once (`PaintQueue.reason`): a relayout that kept the content
+        // signature, moved no columns and did not lose the terminal's store has only to move the
+        // cells; everything else owes pixels.
+        stateLock.lock()
+        let signature = ContentSignature(grid, crop: sourceRect)
+        let reason = pass.reason(move: move, columnsMoved: columnsMoved, repaintNeeded: storeLost,
+                                 reencode: reencode, signature: signature)
+        if full, Self.usesPaintQueue(paintBudgetKiB: paintBudgetKiB, fullFrame: options.fullFrame) {
+            oweAll(reason, grid: grid)
+        }
         previousFrame = pixels
         lastFrameSize = (w: width, h: height)
         lastDirtyCount = dirty.count
+        // The move belongs to the relayout it came from: one that landed while this frame waited for
+        // `emitLock` bumped the generation and keeps its own reason for the next frame. The encoder
+        // one is consumed by the first frame that paints anything, whatever it paints -- a click must
+        // never stay armed until some later relayout turns into a full re-transmit.
+        if full, generation == layoutGeneration { pendingMove = false }
+        explicitReencodePending = false
         stateLock.unlock()
 
         writer.resize(tiles: grid.count)
         writer.beginFrame()
-        guard !dirty.isEmpty else {
+
+        // What this block paints. With a budget of 0 nothing is ever owed, so this is exactly the old
+        // `dirty` list, in the old order, in one block -- the bytes `--selftest`/`--bench`/`--replay`
+        // compare against. `--full-frame` keeps its own single-image path too: it has no tile ids to
+        // owe anybody, so it never joins the queue.
+        let chunk: [(index: Int, mode: OweMode)]
+        if Self.usesPaintQueue(paintBudgetKiB: paintBudgetKiB, fullFrame: options.fullFrame) {
+            chunk = nextChunk(changed: full ? [] : scan.dirty, grid: grid)
+        } else {
+            chunk = dirty.map { (index: $0, mode: OweMode.transmit) }
+        }
+        guard !chunk.isEmpty else {
             writer.nudge()
             writer.endFrame()               // the frame's synchronized block must still be closed
             return
         }
+
+        // A relayout that moved the picture left cells behind that still hold `U+10EEEE`, and such a
+        // cell keeps drawing its image: erase the rows the old box covered and this one does not,
+        // before anything is placed. Skipped when the store is gone -- a `clear()` already erased the
+        // screen (`2J`), so there is nothing left to erase.
+        var vacated = consumeVacated()
+        if storeLost || options.fullFrame { vacated = [] }
 
         if options.fullFrame {
             if placeholderTiles {
@@ -4446,34 +5186,67 @@ final class Desk {
             writer.endFrame()
             return
         }
+        for (rows, cols) in vacated { writer.eraseRows(rows, cols: cols) }
 
         // Compressing a dirty tile is >90 % of the frame budget and touches no shared state, so
-        // the dirty tiles of a frame go through zlib concurrently. On a full repaint that is the
-        // difference between ~477 ms and ~75 ms for 54 tiles (see issue #2).
+        // the tiles of a block go through zlib concurrently. On a full repaint that is the
+        // difference between ~477 ms and ~75 ms for 54 tiles (see issue #2). A cells-only tile has
+        // nothing to compress: its pixels are already in the terminal.
         let compressStart = Date()
-        var packed = [CompressedTile?](repeating: nil, count: dirty.count)
+        var packed = [CompressedTile?](repeating: nil, count: chunk.count)
+        let transmitting = chunk.indices.filter { chunk[$0].mode == .transmit }
         packed.withUnsafeMutableBufferPointer { buffer in
             let base = buffer.baseAddress!
-            DispatchQueue.concurrentPerform(iterations: dirty.count) { i in
-                let index = dirty[i]
+            DispatchQueue.concurrentPerform(iterations: transmitting.count) { k in
+                let slot = transmitting[k]
+                let index = chunk[slot].index
                 let rect = grid.rect(index % grid.tilesX, index / grid.tilesX)
                 let plan = writer.plan(for: index)
-                base[i] = ScreenWriter.compress(index: index, rect: rect,
-                                                pixels: grid.extract(pixels, rect: rect), plan: plan)
+                base[slot] = ScreenWriter.compress(index: index, rect: rect,
+                                                   pixels: grid.extract(pixels, rect: rect), plan: plan)
             }
         }
         writer.addCompressTime(Date().timeIntervalSince(compressStart) * 1000)
 
         // Assembly stays serial: the escapes must reach the pty in a deterministic order.
-        for case let tile? in packed {
+        var sizes: [(Int, Int)] = []
+        var payload = 0
+        for (slot, entry) in chunk.enumerated() {
+            if entry.mode == .cellsOnly {
+                let rect = grid.rect(entry.index % grid.tilesX, entry.index / grid.tilesX)
+                writer.replaceTilePlacement(index: entry.index, row: rect.row, col: rect.col,
+                                            cols: rect.cols, rows: rect.rows,
+                                            placeholder: placeholderTiles, sync: writer.perTileSync)
+                continue
+            }
+            guard let tile = packed[slot] else { continue }
             if placeholderTiles {
                 writer.emitTileAsPlaceholder(tile, sync: writer.perTileSync)
             } else {
                 writer.emit(tile, sync: writer.perTileSync)
             }
             writer.observe(index: tile.index, ratio: tile.ratio, quantisedIn: tile.isQuantised)
+            sizes.append((tile.index, tile.payload.count))
+            payload += tile.payload.count
         }
+        stateLock.lock()
+        for (index, bytes) in sizes { rememberTileBytes(index, bytes) }
+        stateLock.unlock()
         writer.endFrame()
+        // The books, the next block, and the one line this pass costs: `finishPass` is what starts the
+        // confirm pass when this block drained the queue, and what schedules the block after it when
+        // it did not.
+        finishPass(chunk.map(\.index), payloadBytes: payload, grid: grid)
+    }
+
+    /// The rows the last relayout vacated, if any -- consumed, since the next block has nothing left
+    /// to erase.
+    private func consumeVacated() -> [(rows: Range<Int>, cols: Int)] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let rows = vacated
+        vacated = []
+        return rows
     }
 
     // MARK: lifecycle
@@ -4565,7 +5338,30 @@ final class Desk {
             Log.write("resize: \(burst) SIGWINCHes coalesced into one relayout at "
                       + "\(layout.pixelW)x\(layout.pixelH)\n")
         }
-        writer.clear()
+        // Drop every placement -- **unless the picture only moved** (issue #257).
+        //
+        // A menu panel takes rows, so `applyLayout` re-centres the picture: the pixel slicing (and the
+        // crop it was captured from) is the same, every tile index still stands for the pixels the
+        // terminal already holds, and the only thing that changed is where they go. `clear()` here
+        // would delete that store (`a=d,d=a` + `2J`) and make the pass that follows re-transmit all of
+        // them -- measured, 2.17 MiB and 0.9 s at 20 Mbit/s for a picture that did not change by one
+        // pixel. The pass that follows a move is cells-only (`PaintQueue.reason`), it re-places *every*
+        // tile at its new cells (same tile count, so nothing is left over from the old box), and the
+        // rows the old box covered and the new one does not are erased (`eraseRows`). That is the
+        // whole of what `clear()` was buying here.
+        //
+        // The inputs are the ones `PaintQueue.reason` uses, read under the same lock, so the two
+        // agree: a store this function does not wipe and `handleFrame` cannot have lost is a store a
+        // cells-only pass may paint. A relayout that changed the slicing or moved sideways, a session
+        // that lost the store, and `--full-frame` (one image, no tiles) all keep today's delete.
+        let storeLost = writer.repaintNeeded      // never the writer *under* `stateLock`
+        stateLock.lock()
+        let keepsStore = !options.fullFrame
+            && pass.reason(move: pendingMove, columnsMoved: pendingMoveMovedColumns,
+                           repaintNeeded: storeLost, reencode: false,
+                           signature: ContentSignature(layout, crop: sourceRect)) == .movedLayout
+        stateLock.unlock()
+        if !keepsStore { writer.clear() }
         chrome.invalidate()
         chromeDirty = true
         if let mock {
@@ -5528,6 +6324,11 @@ final class Desk {
         let size = lastFrameSize
         stateLock.unlock()
         guard !pixels.isEmpty, size.w > 0, size.h > 0 else { return }
+        // The pixels on screen are the ones the *old* settings made, so the pass that follows this
+        // frame is pixels-owed by definition (issue #257): without the note, a re-layout arriving
+        // right after a re-encode could answer with a cells-only move and leave the old bit depth in
+        // place -- the click would look half done.
+        noteReencode()
         writer.repaintNextFrame()
         handleFrame(pixels: pixels, width: size.w, height: size.h, forced: true)
     }
@@ -5555,12 +6356,16 @@ final class Desk {
                                             eager: options.quality.eager)
             writer.quality = options.quality
             options.qualityHeld = true
+            // The click asked for *different pixels*: a pass that re-places the picture without
+            // re-encoding it would silently do nothing (issue #257).
+            noteReencode()
             Log.write("krd: menu colour \(step) -> q\(options.quality.value) \(options.quality.label)"
                       + "\(options.quality.eager ? " eager" : "") (pinned: no governor)\n")
         case .quality:
             options.quality = QualityBudget(options.quality.value, eager: step == 1)
             writer.quality = options.quality
             options.qualityHeld = true
+            noteReencode()
             Log.write("krd: menu quality \(step) -> q\(options.quality.value)"
                       + "\(options.quality.eager ? " eager" : " guarded") (pinned: no governor)\n")
         case .fps:
@@ -5580,8 +6385,15 @@ final class Desk {
         // #237). Re-encode the one we already have, on the frame queue.
         // Only the live capture path: `--mock`/`--replay`/`--bench`/`--selftest` produce their frames
         // on queues of their own, and a re-emit from here would interleave two frames into one writer.
-        if axis.encodesTheFrame, Self.capturesTheScreen(options) {
-            capturer.onFrameQueue { [weak self] in self?.reemitLastFrame() }
+        if axis.encodesTheFrame {
+            if Self.capturesTheScreen(options) {
+                capturer.onFrameQueue { [weak self] in self?.reemitLastFrame() }
+            } else {
+                // `--mock`/`--replay`/`--pane`: no frame to re-emit from here (their frames come off
+                // queues of their own), but the pixels on screen are still the old settings'. Note it
+                // so the next pass owes pixels and cannot be answered with a cells-only move.
+                noteReencode()
+            }
         }
         // Repaint now, not on the next 1 Hz tick: a slider that answers a second late reads as a
         // click that missed. The snapshot has to be refreshed first -- `chromeMetrics` is written
@@ -5709,6 +6521,12 @@ final class Desk {
     func shutdown(returnsToWall: Bool = true) {
         guard !cleanedUp else { return }
         cleanedUp = true
+        // The paint queue stops here: whatever was still owed belongs to a picture this session is
+        // about to delete (`endSession` sends `a=d,d=a`), and a queued block must not land on the
+        // shell's screen after the hand-over.
+        stateLock.lock()
+        pass = PaintQueue()
+        stateLock.unlock()
         followTimer?.cancel()
         clipboardTimer?.cancel()
         displayTimer?.cancel()
