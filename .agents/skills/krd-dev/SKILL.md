@@ -123,6 +123,19 @@ rex send -s "$REX_SESSION" -b "$B" $'ssh -t krd-vm krd --no-placeholders --cell 
 Then ask: *fills / still black / worse*. Each answer kills a whole branch of hypotheses, and the
 flags that make the difference become the next fix.
 
+When the question is "did the picture actually reach the screen" -- a terminal can answer `OK` to
+every transmit and placement and still draw half of them -- do not ask a human, count it:
+
+```bash
+scripts/picture-vm-check.sh --budget 16 --move
+```
+
+It paints the guest terminal's background green, so "this cell was never reached" is a colour
+(`probe/picture_tiles.swift` prints one character per tile and exits non-zero on a missing one), and
+it shrinks the picture area with `kill -USR1 <krd>` -- the panel cycle, i.e. the menu opening that
+used to re-transmit the whole picture. `missing 0` before and after the move is the verdict; the
+guest's screen is yours to look at, this desktop is not.
+
 ## Pitfalls this repo paid for (read before debugging graphics)
 
 - **kitty replies echo the request**: a `U=1` probe is answered `ESC_Gi=31,p=1;OK ESC\`, not
@@ -163,3 +176,6 @@ flags that make the difference become the next fix.
 2. Deploy to the VM with the script above.
 3. Run it in a Rex pane **with `--debug`**, read the log lines, and measure the placeholder runs.
 4. Report numbers, not adjectives: `stage 143x46 cells at 2431x1518 px, card 54x20 centred at 45..99`.
+5. If any of it is a *picture* rather than text, `scripts/picture-vm-check.sh` is the cheapest honest
+   check (`docs/TESTING.md` §14): it counts tiles on the guest's screen, and a covered window fails it
+   by name instead of looking like missing tiles.
