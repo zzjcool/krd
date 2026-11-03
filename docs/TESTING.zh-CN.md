@@ -474,3 +474,32 @@ KRD_VT_XCFRAMEWORK=pinned swift test --filter HeadlessRender   # 已发布资产
 发布是维护者的步骤（`scripts/build-vt-xcframework.sh` 用 Zig 0.17.0 从 Ghostty `v1.4.0` 构建，两者都锁定
 并校验签名，并打印 checksum）。发布之后把 `Package.swift` 里 `path:` 形式的二进制目标换成它上方注释里的
 `url:`/`checksum:` 形式即可，用脚本打印的 sha256。在那之前，本地 `path:` 形式就是开关。
+
+## 13. 真实屏幕上的画面：`scripts/picture-vm-check.sh`（英文版 §14）
+
+有些故障在字节里没有痕迹。issue #257 就是：一次全量重绘曾以**一个** `?2026` 块发出全部 216 张 tile
+（2.17 MiB，20 Mbit/s 上 0.9 s）——终端对**每一条**传输和**每一个**放置都回 `OK`（`bad=0`，没有任何拒绝），
+却只画出按行优先的一段前缀，画面底部就整块地留着背景色（阶梯状）。`--debug`、`KRD_DUMP`、`--stats-json`
+都分不出「图送达了且终端握着」和「图没画上」，也没有查询能问：kitty 协议里最接近的 `a=q`，Rex 回的是
+`EINVAL: dimensions required`。
+
+所以改成**在屏幕上数**。两个让它便宜且可重复的技巧：
+
+* **终端背景设成画面永远不会用的颜色**（`--background=#00ff00`）：于是「这个格子没被画到」不再是判断题，
+  而是一个颜色；`probe/picture_tiles.swift` 按 tile 逐格统计，打出 `#`/`+`/`.`。
+* **不用敲键盘就能缩小画面区**：`kill -USR1 <krd>` 就是面板循环（`installReportHandler`），等价于点开菜单
+  ——正是当年重传 2.17 MiB 不变像素的那次重排。`--move` 检查它现在是 cells-only，以及旧区域是否回到背景色。
+
+```bash
+scripts/picture-vm-check.sh                    # 128 KiB 一块，整幅画面
+scripts/picture-vm-check.sh --budget 16 --move # 20 Mbit/s 链路的样子 + 面板重排
+```
+
+判定：`missing 0` 才是整幅画面；`partial 17` 是**最后一行 tile**（`TileGrid.rect` 会把它裁到框内，所以它只
+填满 48 px tile 框的四分之一，属于几何而非损坏，`.` 才永远表示缺失）；`--budget 16` 下必须是多个块
+（一块 = 预算没生效，脚本会直接失败）；`--move` 必须打出 `picture moved to row N (cells only, … no pixels
+sent)`，且腾出的那条带回到背景色（漏擦会让 `U+10EEEE` 单元格继续画旧图）。
+
+它跑 `--mock`（ssh 会话拿不到录屏权限：`Screen Recording is off for this SSH session`），所以验的是**真实
+终端上的传输**，不是采集。而且 Ghostty 并不是出事的那个终端：实测它在单个 4.36 s 的块里画满了 **1175**
+张，复现不出丢图——这正是修法选择「给块设上限 + 末端廉价重贴」而不是绕协议的原因。细节见英文版 §14。

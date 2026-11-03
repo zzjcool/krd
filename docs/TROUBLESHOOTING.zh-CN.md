@@ -753,3 +753,21 @@ krd: source 1024x678 pt -> 1024x678 px in 61x21 cells (the source is smaller tha
 `--stats-json` 每秒的 `scale`）。要钉死就 `--scale 1`，要固定另一个值就 `--scale 0.5`。`--bench`、
 `--selftest`、`--record`、`--replay` 永远按 1 采集并说明一次，因为它们的输出不能依赖链路——一段帧尺寸
 中途变过的录影，文件里没有任何标记。
+
+### 50. 画面底部整块地是背景色，呈阶梯状（英文版 §51）
+
+**原因。** 一次全量重绘曾以一个 `?2026` 块发出全部 tile（216 张、2.17 MiB、20 Mbit/s 上 0.9 s、8 Mbit/s 上
+2.2 s）。终端有权只部分提交这样的块，而被测的那个终端正是如此：它对每一条传输和放置都回 `OK`
+（`bad=0`，`KRD_Q=0` 看不出任何拒绝），却只画出按行优先的**前缀**（出问题的那次是 216 张里的 108 张）。
+而 tile 只在像素变化时重发，所以剩下的就一直留着背景色；只有内容自己在动的那几块会回来（视频、转圈、光标），
+于是边缘看起来像台阶。触发者是任何会重新居中画面的重排——**菜单面板**占掉几行 → 画面整体上移 → 虽然一个
+像素都没变，整幅图又被重传了一遍。
+
+**修法。** `--paint-budget <KiB>`（默认 128）让一个块最多带这么多 payload，其余由串行队列继续铺；只改位置
+的重排（像素切片、crop、终端的图像库存都没变）走 **cells-only**：重贴单元格而一个 `a=t` 都不发（开一次菜单
+从 2.17 MiB 变成约 65 KiB）；传输铺完后补一次 cells-only 重贴，兜住「终端收下了却没画」的情况。两条 mirror
+路径（`--mirror`、`--window`）共用同一段代码，所以两边都修到了。
+
+**确认。** `--paint-budget 0` 逐字节回到旧行为，所以差别只差一个开关；`--debug` 每次打
+`krd: picture painted in N blocks, X KiB`，位移打 `krd: picture moved to row N (cells only, … no pixels sent)`。
+要数而不是看：`scripts/picture-vm-check.sh`（`docs/TESTING.zh-CN.md` §13 / 英文版 §14），`missing 0` 才是整幅。

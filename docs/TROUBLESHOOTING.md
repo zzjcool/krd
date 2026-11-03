@@ -917,3 +917,29 @@ froze returns on the first thing you type or click. Without the option, `--unfoc
 freeze switch at all: krd is never told the pane lost focus, so there is nothing to freeze.
 `--debug` shows each transition — `krd: pane unfocused; the picture is at 1 fps`, then
 `krd: pane focused again; the picture is back at 20 fps` (your `--fps` in place of 20).
+
+### 51. The bottom of the picture is the background colour, in whole tiles — a staircase
+
+**Cause.** A full repaint used to leave as **one** `?2026` block carrying every tile: 216 images,
+2.17 MiB, 0.9 s at 20 Mbit/s, 2.2 s at 8 Mbit/s. A terminal is free to commit such a block only in
+part, and the one this was measured on did exactly that: it answered `OK` to every transmit and every
+placement (`bad=0`, `KRD_Q=0` shows no refusal of any kind) and drew a **row-major prefix** of the
+tiles — 108 of 216 in the session that produced the screenshot. A tile is only re-sent when its pixels
+change, so the rest stayed the background colour for good; the only tiles that came back were the ones
+whose content happened to move (a video, a spinner, a caret), which is why the edge looked like
+steps. The trigger is any relayout that re-centres the picture — opening the **menu panel** takes
+rows out of the picture area, `applyLayout` moves the picture up, and the whole thing was transmitted
+again although not one pixel had changed.
+**Fix.** Three things, all in the tile path both mirror kinds share (`--mirror` and `--window`):
+`--paint-budget <KiB>` (default 128) puts at most that much payload in one block and lets a serial
+queue paint the rest, so no block is big enough for a terminal to half-commit; a relayout that keeps
+the pixel slicing, the crop and the terminal's image store is a **cells-only** pass — the picture is
+re-placed without a single `a=t` (a menu open costs ~65 KiB instead of 2.17 MiB); and a transmit pass
+that drains is followed by one cells-only re-place, so a placement the terminal dropped is re-asserted
+without re-sending its pixels.
+**Confirm.** `--paint-budget 0` restores the old behaviour (one block, byte for byte), so the
+difference is a flag away; `--debug` prints `krd: picture painted in N blocks, X KiB` per pass and
+`krd: picture moved to row N (cells only, … KiB, no pixels sent)` for a move. To count the tiles
+instead of looking at them, `scripts/picture-vm-check.sh` paints the terminal's background green and
+counts what the picture reached (`docs/TESTING.md` §14) — `missing 0` is the whole picture, and a
+`.` in its map is a tile that is not on the screen.

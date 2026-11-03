@@ -627,3 +627,71 @@ Publishing is a maintainer step (`scripts/build-vt-xcframework.sh` builds from G
 Zig 0.17.0, both pinned and signature-checked, and prints the checksum). Pinning it afterwards is one
 edit in `Package.swift`: replace the `path:` binary target with the commented `url:`/`checksum:` form
 above it, using the sha256 the script printed. Until then the local `path:` form is the switch.
+
+## 14. The picture on a real screen — `scripts/picture-vm-check.sh`
+
+Some failures leave no trace in the bytes. Issue #257 is the one this section exists for: a full
+repaint went out as a single `?2026` block carrying all 216 tiles (2.17 MiB, 0.9 s at 20 Mbit/s), the
+terminal answered `OK` to **every** transmit and **every** placement (`bad=0`, no refusal anywhere),
+and drew a row-major prefix of the tiles. The bottom of the picture stayed the background colour, in
+whole tiles — a staircase. Nothing in `--debug`, `KRD_DUMP` or `--stats-json` can tell that apart from
+"the picture arrived and the terminal has it", and there is no query to ask it: `a=q` is the closest
+the kitty protocol comes, and Rex answers it with `EINVAL: dimensions required`.
+
+So the picture is counted on a screen. Two tricks make that cheap and repeatable:
+
+* **The terminal's background is a colour the picture never is** (`--background=#00ff00`). "This cell
+  was never reached" then stops being a judgement call and becomes a colour; `probe/picture_tiles.swift`
+  counts it per tile and prints `#` / `+` / `.` for each.
+* **The picture area is shrunk without typing anything**: `kill -USR1 <krd>` is the panel cycle
+  (`installReportHandler`), i.e. exactly what opening the menu does — the relayout that used to
+  re-transmit 2.17 MiB of unchanged pixels. `--move` checks that it is now a cells-only pass and that
+  the rows the picture vacated came back to the background.
+
+It runs in the macOS VM, never against this desktop, and it gates on the numbers:
+
+```bash
+scripts/picture-vm-check.sh                    # one 128 KiB budget, whole picture
+scripts/picture-vm-check.sh --budget 16 --move # what a 20 Mbit/s link sees, plus the panel relayout
+```
+
+```
+==> 4/6 ghostty in the guest, running the mirror on a mock desktop
+    krd: mirror grid 141x37 cells at 5x12 px, pane 141x73, src 1920x1200 px, fit 0.367, origin 1,19, frame 705x444 px
+    krd: picture painted in 180 blocks, 19 KiB, 0.01 s (--paint-budget 16 KiB)
+    geometry: 141x37 cells = 18x10 tiles at 0,216 px (180 total)
+==> 5/6 count the tiles on the guest's screen
+    pane on screen: 705x876 px at 0,30 (want 705x876)
+    picture top: y=246 (the log said 216 px from the pane top)
+    first paint tiles: missing 0  partial 17  of 180
+==> 6/6 shrink the picture area (a panel) and check the move
+    krd: picture moved to row 13 (cells only, 48 KiB, no pixels sent)
+    picture top after the move: y=174 (was 246; the log says 144 px from the pane top)
+    after the move tiles: missing 0  partial 17  of 180
+    vacated band (72 px from y=618): missing 1  partial 0  of 1
+==> ok: the picture is whole
+```
+
+What the numbers mean, and what each one catches:
+
+* `missing 0` — every tile of the picture is on the screen. This is the assertion.
+* `partial 17` — the last tile row, by design: tiles are clipped to the frame (`TileGrid.rect`), so
+  the last row of a 37-cell-high picture is one cell tall and only fills a quarter of a 48 px tile box.
+  `+` there is the geometry, not damage; `.` never is.
+* `painted in 180 blocks` at `--budget 16` — the budget is applied. One block where the picture does
+  not fit in the budget is the regression this line exists to catch (the script fails on it).
+* `picture moved to row 13 (cells only, 48 KiB, no pixels sent)` — a panel open re-placed 180 tiles
+  for 48 KiB instead of re-transmitting them, and the vacated band is background again (a missed
+  erase leaves `U+10EEEE` cells drawing the old picture — this is where that shows).
+
+The whole thing rests on `probe/picture_tiles.swift`, which takes the geometry out of krd's own
+`mirror grid` line and finds the picture's top edge with `--find-y` (a window sits below the menu bar,
+so `(originRow-1) x cellH` is a cell offset, not a screen coordinate). Window position matters twice:
+a cascaded or covered window reads as *missing tiles*, which is why the script pins the position,
+activates the app, and fails by name when the pane's background box is smaller than the pane.
+
+What it does **not** do: it runs `--mock` (Screen Recording is refused to an ssh session —
+`krd log`'s `Screen Recording is off for this SSH session`), so it proves the *transport* on a real
+terminal, not the capture. And Ghostty is not the terminal that broke: measured, Ghostty draws all
+**1175** tiles of a single 4.36 s block, so it cannot reproduce the drop. That asymmetry is the reason
+the fix is a *bound* on the block and a cheap re-place at the end, rather than a protocol workaround.
